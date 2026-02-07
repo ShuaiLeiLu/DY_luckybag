@@ -2,7 +2,6 @@ const https = require('https')
 
 /**
  * 完整的抖音直播API签名算法
- * 直接从原项目 超人福袋助手_1.0.10 提取
  */
 
 // ==================== 辅助函数 ====================
@@ -523,15 +522,21 @@ async function handleParams(params, headers) {
   return params
 }
 
-function requestJson(url, headers, timeoutMs = 10000) {
+function requestJson(url, headers, timeoutMs = 10000, method = 'GET') {
   return new Promise((resolve, reject) => {
     const u = new URL(url)
     const options = {
       hostname: u.hostname,
       path: u.pathname + u.search,
-      method: 'GET',
+      method,
       headers
     }
+
+    const reqHeaders = options.headers || {}
+    if (method !== 'GET' && !('content-length' in Object.keys(reqHeaders).reduce((acc, k) => (acc[k.toLowerCase()] = true, acc), {}))) {
+      reqHeaders['content-length'] = '0'
+    }
+    options.headers = reqHeaders
 
     const req = https.request(options, (res) => {
       const chunks = []
@@ -556,7 +561,7 @@ function requestJson(url, headers, timeoutMs = 10000) {
   })
 }
 
-async function douyinLiveRemote(uri, params, headers) {
+async function douyinLiveRemote(uri, params, headers, method = 'GET') {
   const p = { ...params, ...commonParams }
   const h = { ...commonHeaders, ...headers }
 
@@ -570,7 +575,7 @@ async function douyinLiveRemote(uri, params, headers) {
   console.log(`[API请求] ${uri}`)
   console.log(`[a_bogus] ${a_bogus.substring(0, 30)}...`)
   
-  const res = await requestJson(url, h, 10000)
+  const res = await requestJson(url, h, 10000, method)
   return res.json
 }
 

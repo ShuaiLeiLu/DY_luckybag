@@ -12,6 +12,7 @@
     "electron:build:mac": "vite build && electron-builder --mac"
   },
   "dependencies": {
+    "@vicons/ionicons5": "^0.13.0",
     "axios": "^1.6.0",
     "naive-ui": "^2.38.0",
     "vue": "^3.4.0"
@@ -42,7 +43,10 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64", "ia32"]
+          "arch": [
+            "x64",
+            "ia32"
+          ]
         }
       ],
       "icon": "build/icon.ico",

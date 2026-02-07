@@ -79,7 +79,7 @@ function cookieObjToString(cookieObj) {
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
-    height: 900,
+    height: 1000,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false
@@ -120,7 +120,100 @@ app.whenReady().then(() => {
   console.log('  - search-live-by-category')
   console.log('  - get-lottery-detail')
   console.log('  - collect-lotteries-by-category')
+  console.log('  - attend-lottery')
+  console.log('  - room-like')
+  console.log('  - room-chat')
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+})
+
+// ... 前面的代码保持不变 ...
+
+// ==================== 互动操作 ====================
+
+// 参与福袋
+ipcMain.handle('attend-lottery', async (event, { roomId, lotteryId, accountId }) => {
+  try {
+    let cookieString = ''
+    if (accountId) {
+      const browserData = browserViews.get(accountId)
+      if (browserData) {
+        const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
+        cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
+      }
+    }
+
+    const json = await douyinLiveRemote('/webcast/lottery/melon/attend/', {
+      roomId,
+      lottery_id: lotteryId,
+    }, {
+      cookie: cookieString,
+      referer: `https://live.douyin.com/${roomId}`
+    }, 'POST')
+
+    const status = json?.data?.status
+    const errorMsg = json?.extra?.error_msg || json?.data?.prompt || json?.data?.toast || ''
+    return {
+      success: status === 0,
+      data: json?.data,
+      extra: json?.extra,
+      status,
+      error: errorMsg
+    }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+// 直播间点赞
+ipcMain.handle('room-like', async (event, { roomId, accountId, count = 1 }) => {
+  try {
+    let cookieString = ''
+    if (accountId) {
+      const browserData = browserViews.get(accountId)
+      if (browserData) {
+        const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
+        cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
+      }
+    }
+
+    const json = await douyinLiveRemote('/webcast/room/digg/', {
+      room_id: roomId,
+      count: count,
+    }, {
+      cookie: cookieString,
+      referer: `https://live.douyin.com/${roomId}`
+    }, 'POST')
+
+    return { success: json?.data?.status === 0, data: json?.data }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+// 发送弹幕
+ipcMain.handle('room-chat', async (event, { roomId, content, accountId }) => {
+  try {
+    let cookieString = ''
+    if (accountId) {
+      const browserData = browserViews.get(accountId)
+      if (browserData) {
+        const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
+        cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
+      }
+    }
+
+    const json = await douyinLiveRemote('/webcast/room/chat/', {
+      room_id: roomId,
+      content: content,
+    }, {
+      cookie: cookieString,
+      referer: `https://live.douyin.com/${roomId}`
+    }, 'POST')
+
+    return { success: json?.data?.status === 0, data: json?.data }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
 })
 
 app.on('window-all-closed', () => {
@@ -200,12 +293,58 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
     // 监听页面加载完成
     browserWindow.webContents.on('did-finish-load', () => {
       console.log(`[${accountId}] 页面加载完成`)
+      
+      // 开启调试模式以监听网络响应体
+      try {
+        const wc = browserWindow.webContents
+        if (!wc.debugger.isAttached()) {
+          wc.debugger.attach('1.3')
+        }
+        wc.debugger.on('detach', (event, reason) => {
+          console.log(`[${accountId}] Debugger detached:`, reason)
+        })
+        wc.debugger.sendCommand('Network.enable')
+        wc.debugger.on('message', async (event, method, params) => {
+          if (method === 'Network.responseReceived') {
+            const { url } = params.response
+            const requestId = params.requestId
+            
+            // 监听关键接口
+            const isLottery = url.includes('webcast/lottery/melon/check_user_right')
+            const isRedPacket = url.includes('webcast/luckybox/receive')
+            const isWallet = url.includes('webcast/wallet/info')
+            
+            if (isLottery || isRedPacket || isWallet) {
+              try {
+                const { body } = await wc.debugger.sendCommand('Network.getResponseBody', { requestId })
+                const json = JSON.parse(body)
+                
+                // 发送到渲染进程
+                mainWindow.webContents.send('douyin-response', {
+                  accountId,
+                  type: isLottery ? 'lottery' : (isRedPacket ? 'redpacket' : 'wallet'),
+                  data: json.data
+                })
+              } catch (e) {
+                // 忽略获取响应体失败的情况
+              }
+            }
+          }
+        })
+      } catch (err) {
+        console.error(`[${accountId}] Debugger attach error:`, err)
+      }
     })
     
     // 监听窗口关闭
     browserWindow.on('closed', () => {
       console.log(`[${accountId}] 窗口已关闭`)
       browserViews.delete(accountId)
+      
+      // 通知渲染进程窗口已关闭，停止该账号的所有活动
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('browser-closed', { accountId })
+      }
     })
     
     // 监听网络请求
@@ -726,8 +865,32 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null } = {}) =>
       cookie: cookieString
     })
     
-    if (!json?.data || !Array.isArray(json.data)) {
-      return { success: false, error: '响应数据格式错误' }
+    // 详细日志
+    console.log(`[search-live-by-all] 响应状态:`, json ? 'OK' : 'NULL')
+    if (json) {
+      console.log(`[search-live-by-all] 响应结构:`, {
+        hasData: !!json.data,
+        dataType: Array.isArray(json.data) ? 'array' : typeof json.data,
+        dataLength: Array.isArray(json.data) ? json.data.length : 'N/A',
+        statusCode: json.status_code,
+        extra: json.extra
+      })
+    }
+    
+    if (!json) {
+      return { success: false, error: '响应为空' }
+    }
+    
+    // 检查错误码
+    if (json.status_code !== undefined && json.status_code !== 0) {
+      const errorMsg = json.extra?.error_msg || json.extra?.description || '未知错误'
+      console.error(`[search-live-by-all] API错误: ${json.status_code} - ${errorMsg}`)
+      return { success: false, error: `API错误(${json.status_code}): ${errorMsg}` }
+    }
+    
+    if (!json.data || !Array.isArray(json.data)) {
+      console.error(`[search-live-by-all] 数据格式错误:`, JSON.stringify(json).substring(0, 500))
+      return { success: false, error: '响应数据格式错误', detail: json }
     }
     
     // 筛选有福袋的直播间
@@ -742,6 +905,7 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null } = {}) =>
         onlineTotal: room.data.user_count
       }))
     
+    console.log(`[search-live-by-all] 找到 ${roomInfoList.length} 个有福袋的直播间`)
     return { success: true, roomInfoList }
   } catch (error) {
     console.error('搜索全部直播间失败:', error)
@@ -771,7 +935,7 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
       live_id: 1,
       enter_from: 'page_refresh',
       cookie_enabled: true,
-      count: count,  // 支持自定义count
+      count: count,
       offset: offset,
       partition: categoryId,
       partition_type: 4,
@@ -781,8 +945,33 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
       referer: 'https://live.douyin.com/'
     })
     
-    if (!json?.data?.data || !Array.isArray(json.data.data)) {
-      return { success: false, error: '响应数据格式错误' }
+    // 详细日志
+    console.log(`[search-live-by-category] 分类:${categoryId}, offset:${offset}`)
+    if (json) {
+      console.log(`[search-live-by-category] 响应结构:`, {
+        hasData: !!json.data,
+        hasDataData: !!json.data?.data,
+        dataType: Array.isArray(json.data?.data) ? 'array' : typeof json.data?.data,
+        dataLength: Array.isArray(json.data?.data) ? json.data.data.length : 'N/A',
+        statusCode: json.status_code,
+        extra: json.extra
+      })
+    }
+    
+    if (!json) {
+      return { success: false, error: '响应为空' }
+    }
+    
+    // 检查错误码
+    if (json.status_code !== undefined && json.status_code !== 0) {
+      const errorMsg = json.extra?.error_msg || json.extra?.description || '未知错误'
+      console.error(`[search-live-by-category] API错误: ${json.status_code} - ${errorMsg}`)
+      return { success: false, error: `API错误(${json.status_code}): ${errorMsg}` }
+    }
+    
+    if (!json.data?.data || !Array.isArray(json.data.data)) {
+      console.error(`[search-live-by-category] 数据格式错误:`, JSON.stringify(json).substring(0, 500))
+      return { success: false, error: '响应数据格式错误', detail: json }
     }
     
     // 筛选有福袋的直播间
@@ -797,6 +986,7 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
         onlineTotal: item.room.user_count
       }))
     
+    console.log(`[search-live-by-category] 找到 ${roomInfoList.length} 个有福袋的直播间`)
     return { success: true, roomInfoList }
   } catch (error) {
     console.error('搜索分类直播间失败:', error)

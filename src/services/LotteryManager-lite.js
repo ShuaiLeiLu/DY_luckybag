@@ -27,6 +27,8 @@ class LotteryManager {
     this.lotteryInfoList = [] // 全局福袋列表
     this.collectLoading = false // 是否正在收集福袋
     this.pauseCollect = false // 是否暂停收集
+    this.attendFailureStreak = new Map() // accountId -> consecutive failure count
+    this.blockList = new Set() // 屏蔽的直播间列表 (roomId)
     
     // 默认为空数组（完全照搬原项目）
     // 用户可以通过 setCategoryList() 方法手动设置要扫描的分类
@@ -36,6 +38,19 @@ class LotteryManager {
     this.scanConfig = {
       countPerPage: 15,  // 每页15个（原项目默认值）
       pagesPerCategory: 10  // 每个分类扫描10页（原项目默认值）
+    }
+  }
+
+  emitLotteryListUpdate(accountData) {
+    if (!accountData || !accountData.callbacks) return
+    if (typeof accountData.callbacks.onLotteryListUpdate !== 'function') return
+    try {
+      accountData.callbacks.onLotteryListUpdate({
+        accountId: accountData.id,
+        list: [...this.lotteryInfoList]
+      })
+    } catch (e) {
+      // ignore
     }
   }
   
@@ -229,6 +244,24 @@ class LotteryManager {
     this.searchLiveRoom(accountId)
   }
 
+  async stopAccount(accountId) {
+    this.pauseCollect = true // 标记停止采集
+    await ipcRenderer.invoke('close-browser', accountId)
+    this.accounts.delete(accountId)
+  }
+
+  /**
+   * 检查浏览器是否仍在运行
+   */
+  async isBrowserAlive(accountId) {
+    try {
+      const result = await ipcRenderer.invoke('check-browser-exists', accountId)
+      return result.exists
+    } catch (e) {
+      return false
+    }
+  }
+
   /**
    * 统一搜索直播间（参考原项目）
    */
@@ -237,53 +270,68 @@ class LotteryManager {
       return
     }
     
-    const accountData = this.accounts.get(accountId)
-    if (!accountData) return
-    
+    if (!this.accounts.has(accountId)) return
+
     try {
       this.collectLoading = true
-      accountData.callbacks.onLog('🔍 开始采集直播间福袋...')
+      const accountData = this.accounts.get(accountId)
+      if (!accountData) return
+
+      this.emitLotteryListUpdate(accountData)
+      
+      // 检查浏览器是否存活
+      if (!(await this.isBrowserAlive(accountId))) {
+        accountData.callbacks.onLog('⚠️ 浏览器窗口已关闭，停止扫描任务')
+        return
+      }
+
+      this.pauseCollect = false // 开始新一轮扫描前重置标记
       
       // 清空旧的福袋列表
       this.lotteryInfoList = []
+      this.emitLotteryListUpdate(accountData)
       
-      // 1. 先执行全部搜索（方法1）
-      accountData.callbacks.onLog('【方法1】搜索全部直播间...')
+      // 1. 先执行全部搜索
       await this.searchLiveByAll(accountId)
       
-      // 2. 再执行分类搜索（方法2）
+      if (this.pauseCollect || !(await this.isBrowserAlive(accountId))) return
+
+      // 2. 再执行分类搜索
       if (this.categoryList.length > 0) {
-        accountData.callbacks.onLog('【方法2】按分类搜索直播间...')
         await this.startCollectLive(accountId)
-      } else {
-        accountData.callbacks.onLog('【方法2】未配置分类，跳过分类搜索')
       }
       
+      if (this.pauseCollect || !(await this.isBrowserAlive(accountId))) return
+
       // 3. 剔除过期和失效的福袋
       this.removeExpiredLotteries()
       
       // 4. 计算预测概率
       this.calculatePredictedProbabilities()
       
-      // 5. 按开奖时间排序（最快开奖的在前）
+      // 5. 按开奖时间排序
       this.sortLotteriesByProbability()
-      
-      accountData.callbacks.onLog(`✅ 扫描完成，共收集到 ${this.lotteryInfoList.length} 个有效福袋`)
-      
-      // 6. 打印所有福袋详情
-      this.printLotteryDetails(accountData)
+
+      this.emitLotteryListUpdate(accountData)
       
       if (this.lotteryInfoList.length > 0) {
         // 开始参与
         setTimeout(() => this.start(accountId), 1000)
       } else {
         accountData.callbacks.onLog('⚠️ 没有符合条件的福袋，10秒后重新扫描...')
-        setTimeout(() => this.searchLiveRoom(accountId), 10000)
+        if (!this.pauseCollect) {
+          setTimeout(() => this.searchLiveRoom(accountId), 10000)
+        }
       }
       
     } catch (error) {
-      accountData.callbacks.onLog(`搜索失败: ${error.message}，10秒后重试...`, 'error')
-      setTimeout(() => this.searchLiveRoom(accountId), 10000)
+      const accountData = this.accounts.get(accountId)
+      if (accountData) {
+        accountData.callbacks.onLog(`搜索失败: ${error.message}，10秒后重试...`, 'error')
+        if (!this.pauseCollect) {
+          setTimeout(() => this.searchLiveRoom(accountId), 10000)
+        }
+      }
     } finally {
       this.collectLoading = false
     }
@@ -532,35 +580,46 @@ class LotteryManager {
     if (!accountData) return
     
     try {
-      accountData.callbacks.onLog(`开始执行全部直播间搜索，共${times}次`)
-      
       for (let i = 0; i < times; i++) {
         if (this.pauseCollect) break
-        
-        accountData.callbacks.onLog(`正在执行直播间第${i + 1}/${times}次搜索...`)
         
         try {
           // 调用API获取直播间列表
           const result = await ipcRenderer.invoke('search-live-by-all', { accountId })
           
-          if (!result.success || !result.roomInfoList) {
+          if (!result.success) {
             accountData.callbacks.onLog(`第${i + 1}次搜索失败: ${result.error || '未知错误'}`)
+            
+            // 如果是API错误，打印详细信息
+            if (result.detail) {
+              console.error(`[搜索失败详情]`, result.detail)
+            }
+            
+            // 继续下一次搜索，不要中断
+            continue
+          }
+          
+          if (!result.roomInfoList) {
+            accountData.callbacks.onLog(`第${i + 1}次搜索: 返回数据为空`)
             continue
           }
           
           const roomInfoList = result.roomInfoList
-          accountData.callbacks.onLog(`第${i + 1}次搜索: 发现${roomInfoList.length}个有福袋的直播间`)
+          
+          if (roomInfoList.length === 0) {
+            // 没有福袋，继续下一次
+            continue
+          }
           
           // 获取福袋详情（并发）
           const resList = await this.getLotteryInfo(roomInfoList, accountId)
           const validLotteryInfoList = resList.filter(item => item.status === 'fulfilled' && item.value).map(item => item.value)
           
-          // 筛选符合条件的福袋
-          const filteredList = this.filterLotteryByConditions(validLotteryInfoList)
-          accountData.callbacks.onLog(`  符合条件的福袋数量: ${filteredList.length}`)
-          
-          // 添加到列表（去重）
-          this.addLotteryInfoWithoutDuplicates(filteredList)
+          // 不再在扫描阶段过滤“可参与”福袋，而是全部展示
+          // const filteredList = this.filterLotteryByConditions(validLotteryInfoList)
+          // this.addLotteryInfoWithoutDuplicates(filteredList)
+          this.addLotteryInfoWithoutDuplicates(validLotteryInfoList)
+          this.emitLotteryListUpdate(accountData)
           
           // 随机延迟
           const randomDelay = Math.floor(Math.random() * 1000) + 500
@@ -568,10 +627,13 @@ class LotteryManager {
           
         } catch (error) {
           accountData.callbacks.onLog(`第${i + 1}次搜索出错: ${error.message}`)
+          console.error(`[搜索异常]`, error)
+          // 继续下一次搜索
         }
       }
     } catch (error) {
       accountData.callbacks.onLog(`全部搜索异常: ${error.message}`)
+      console.error(`[全部搜索异常]`, error)
     }
   }
 
@@ -586,13 +648,10 @@ class LotteryManager {
     const categories = this.categoryList
     
     try {
-      accountData.callbacks.onLog(`开始按分类采集直播间，共${categories.length}个分类`)
-      
       for (let i = 0; i < categories.length; i++) {
         if (this.pauseCollect) break
         
         const category = categories[i]
-        accountData.callbacks.onLog(`正在采集【${category.name}】分类的直播间...`)
         
         try {
           const res = await this.searchLiveRoomCategory(accountId, {
@@ -601,12 +660,11 @@ class LotteryManager {
             page: 10
           })
           
-          const filteredList = this.filterLotteryByConditions(res)
-          accountData.callbacks.onLog(
-            `【${category.name}】分类: 发现${res.length}个有福袋的直播间, 符合条件: ${filteredList.length}`
-          )
-          
-          this.addLotteryInfoWithoutDuplicates(filteredList)
+          // 不再在扫描阶段过滤“可参与”福袋，而是全部展示
+          // const filteredList = this.filterLotteryByConditions(res)
+          // this.addLotteryInfoWithoutDuplicates(filteredList)
+          this.addLotteryInfoWithoutDuplicates(res)
+          this.emitLotteryListUpdate(accountData)
           
           const randomDelay = Math.floor(Math.random() * 1000) + 500
           await this.sleep(randomDelay)
@@ -634,8 +692,6 @@ class LotteryManager {
     const lotteryInfoList = []
     
     try {
-      accountData.callbacks.onLog(`  正在搜索【${category_name}】分类，每页${countPerPage}个，共${totalPages}页`)
-      
       for (let i = 0; i < totalPages; i++) {
         if (this.pauseCollect) break
         
@@ -653,7 +709,6 @@ class LotteryManager {
           }
           
           const roomInfoList = result.roomInfoList
-          accountData.callbacks.onLog(`    第${i + 1}页: 发现${roomInfoList.length}个直播间`)
           
           // 延迟200ms
           await this.sleep(200)
@@ -728,14 +783,56 @@ class LotteryManager {
   }
 
   /**
+   * 添加直播间到屏蔽列表
+   * @param {string} roomId - 直播间ID
+   */
+  addBlockList(roomId) {
+    if (roomId) {
+      this.blockList.add(roomId)
+      // 从当前福袋列表中移除已屏蔽的直播间
+      this.lotteryInfoList = this.lotteryInfoList.filter(item => item.roomId !== roomId)
+    }
+  }
+
+  /**
+   * 从屏蔽列表移除直播间
+   * @param {string} roomId - 直播间ID
+   */
+  removeBlockList(roomId) {
+    if (roomId) {
+      this.blockList.delete(roomId)
+    }
+  }
+
+  /**
+   * 清空屏蔽列表
+   */
+  clearBlockList() {
+    this.blockList.clear()
+  }
+
+  /**
+   * 检查直播间是否在屏蔽列表中
+   * @param {string} roomId - 直播间ID
+   * @returns {boolean} 是否被屏蔽
+   */
+  isBlocked(roomId) {
+    return this.blockList.has(roomId)
+  }
+
+  /**
    * 添加福袋信息，避免重复（参考原项目）
    */
   addLotteryInfoWithoutDuplicates(newLotteryList) {
+    // 每次添加新福袋前，先清理内存中已过期的福袋
+    this.removeExpiredLotteries()
+
     const existingRoomIds = new Set(this.lotteryInfoList.map((item) => item.roomId))
     let addedCount = 0
     
     for (const lottery of newLotteryList) {
-      if (lottery && !existingRoomIds.has(lottery.roomId)) {
+      // 检查是否在屏蔽列表中
+      if (lottery && !this.isBlocked(lottery.roomId) && !existingRoomIds.has(lottery.roomId)) {
         this.lotteryInfoList.push(lottery)
         existingRoomIds.add(lottery.roomId)
         addedCount++
@@ -760,8 +857,8 @@ class LotteryManager {
       accountData.state = 'waiting'
       accountData.callbacks.onLog(`📋 福袋池为空，10秒后重新扫描...`)
       accountData.callbacks.onStatusUpdate({ id: accountId, state: 'waiting' })
+      this.emitLotteryListUpdate(accountData)
       
-      // 等待10秒后重新扫描
       setTimeout(async () => {
         if (!this.collectLoading) {
           await this.searchLiveRoom(accountId)
@@ -774,7 +871,8 @@ class LotteryManager {
     const now = Date.now() / 1000
     if (lotteryInfo.end_time && lotteryInfo.end_time < now) {
       accountData.callbacks.onLog(`福袋已结束，清空福袋池并重新扫描...`)
-      this.lotteryInfoList = [] // 清空福袋池
+      this.lotteryInfoList = []
+      this.emitLotteryListUpdate(accountData)
       setTimeout(() => this.start(accountId), 1000)
       return
     }
@@ -783,17 +881,27 @@ class LotteryManager {
     const remainingTime = lotteryInfo.end_time - now
     if (remainingTime < 10) {
       accountData.callbacks.onLog(`福袋即将结束（剩余${remainingTime.toFixed(0)}秒），清空福袋池并重新扫描...`)
-      this.lotteryInfoList = [] // 清空福袋池
+      this.lotteryInfoList = []
+      this.emitLotteryListUpdate(accountData)
+      setTimeout(() => this.start(accountId), 1000)
+      return
+    }
+
+    // 二次概率检查
+    const config = accountData.config
+    const currentProb = this.calculateProbability(lotteryInfo)
+    if (config.secondInspect?.enabled && currentProb < (config.secondInspect.value * 100)) {
+      accountData.callbacks.onLog(`⚠️ 二次检查概率过低 (${currentProb}%), 放弃参与，寻找下一个...`)
+      this.lotteryInfoList.shift()
       setTimeout(() => this.start(accountId), 1000)
       return
     }
     
     accountData.state = 'running'
-    const probability = this.calculateProbability(lotteryInfo)
     accountData.callbacks.onLog(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`)
     accountData.callbacks.onLog(`🎯 选择最优福袋: ${lotteryInfo.authorNickname}`)
     accountData.callbacks.onLog(`   福袋: ${lotteryInfo.lotteryName}`)
-    accountData.callbacks.onLog(`   当前概率: ${probability}%`)
+    accountData.callbacks.onLog(`   当前概率: ${currentProb}%`)
     accountData.callbacks.onLog(`   剩余时间: ${remainingTime.toFixed(0)}秒`)
     accountData.callbacks.onLog(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`)
     
@@ -804,88 +912,66 @@ class LotteryManager {
       currentRoom: accountData.currentRoom 
     })
     
-    // 前往直播间
-    const gotoResult = await ipcRenderer.invoke('navigate-to', {
+    // 前往直播间 (BrowserView 导航)
+    await ipcRenderer.invoke('navigate-to', {
       accountId,
       url: `https://live.douyin.com/${lotteryInfo.webRid}`
     })
     
-    if (!gotoResult.success) {
-      accountData.callbacks.onLog(`❌ 导航失败: ${gotoResult.error}，清空福袋池并重新扫描`, 'error')
-      this.lotteryInfoList = [] // 清空福袋池
-      setTimeout(() => this.start(accountId), 2000)
-      return
+    accountData.callbacks.onLog('✅ 已进入直播间，准备执行参与...')
+
+    // 1. 调用 API 参与福袋
+    const attendResult = await ipcRenderer.invoke('attend-lottery', {
+      roomId: lotteryInfo.roomId,
+      lotteryId: lotteryInfo.lottery_id,
+      accountId: accountId
+    })
+
+    if (attendResult.success) {
+      this.attendFailureStreak.set(accountId, 0)
+      accountData.callbacks.onLog('🎁 接口参与成功')
+      
+      accountData.participationCount++
+      accountData.callbacks.onStatusUpdate({ 
+        id: accountId, 
+        participationCount: accountData.participationCount 
+      })
+
+      // 等待开奖
+      const waitTime = Math.max((remainingTime + 5) * 1000, 5000)
+      accountData.callbacks.onLog(`⏱️ 等待福袋结束（${(waitTime/1000).toFixed(0)}秒）...`)
+      
+      setTimeout(() => {
+        accountData.callbacks.onLog('✅ 福袋已开奖')
+        accountData.callbacks.onLog('🔄 清空福袋池，准备下一轮扫描...')
+        this.lotteryInfoList = []
+        this.emitLotteryListUpdate(accountData)
+        setTimeout(() => this.searchLiveRoom(accountId), 2000)
+      }, waitTime)
+
+    } else {
+      const prev = this.attendFailureStreak.get(accountId) || 0
+      const streak = prev + 1
+      this.attendFailureStreak.set(accountId, streak)
+
+      const status = attendResult?.status
+      const errorText = attendResult?.error || attendResult?.extra?.error_msg || '未知错误'
+      const toast = attendResult?.data?.toast || attendResult?.data?.prompt || ''
+      const detail = [
+        status !== undefined ? `status=${status}` : null,
+        toast ? `toast=${toast}` : null
+      ].filter(Boolean).join(', ')
+
+      accountData.callbacks.onLog(
+        `❌ 参与失败: ${errorText}${detail ? ` (${detail})` : ''}，连续失败${streak}次`,
+        'error'
+      )
+
+      // 退避：连续失败越多，等待越久（上限60秒）
+      const waitMs = Math.min(2000 * Math.pow(2, Math.min(streak - 1, 5)), 60000)
+      this.lotteryInfoList.shift()
+      setTimeout(() => this.start(accountId), waitMs)
     }
-    
-    accountData.callbacks.onLog('✅ 已进入直播间，等待福袋出现...')
-    
-    // 等待并点击福袋
-    setTimeout(async () => {
-      try {
-        // 尝试点击福袋
-        await ipcRenderer.invoke('execute-script', {
-          accountId,
-          script: `
-            (function() {
-              const lotteryBtn = document.querySelector('.dVxrjT_h');
-              if (lotteryBtn) {
-                lotteryBtn.click();
-                return true;
-              }
-              return false;
-            })()
-          `
-        })
-        
-        accountData.callbacks.onLog('🎁 已点击福袋')
-        
-        // 等待2秒后点击参与按钮
-        setTimeout(async () => {
-          await ipcRenderer.invoke('execute-script', {
-            accountId,
-            script: `
-              (function() {
-                const joinBtn = document.querySelector('#lottery_close_cotainer div[role="button"]');
-                if (joinBtn) {
-                  joinBtn.click();
-                  return true;
-                }
-                return false;
-              })()
-            `
-          })
-          
-          accountData.callbacks.onLog('✅ 已参与福袋')
-          accountData.participationCount++
-          accountData.callbacks.onStatusUpdate({ 
-            id: accountId, 
-            participationCount: accountData.participationCount 
-          })
-          
-          // 等待福袋结束时间 + 10秒
-          const waitTime = (remainingTime + 10) * 1000
-          accountData.callbacks.onLog(`⏱️ 等待福袋结束（${(waitTime/1000).toFixed(0)}秒）...`)
-          
-          setTimeout(() => {
-            accountData.callbacks.onLog('✅ 福袋已结束')
-            accountData.callbacks.onLog('🔄 清空福袋池，10秒后重新扫描...')
-            
-            // 清空整个福袋池
-            this.lotteryInfoList = []
-            
-            // 10秒后重新扫描
-            setTimeout(() => this.start(accountId), 10000)
-          }, waitTime)
-          
-        }, 2000)
-        
-      } catch (error) {
-        accountData.callbacks.onLog(`❌ 参与失败: ${error.message}`, 'error')
-        accountData.callbacks.onLog('🔄 清空福袋池，重新扫描...')
-        this.lotteryInfoList = [] // 清空福袋池
-        setTimeout(() => this.start(accountId), 2000)
-      }
-    }, 3000)
   }
 
   pauseAccount(accountId) {
