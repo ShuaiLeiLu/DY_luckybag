@@ -1,0 +1,26 @@
+{
+  "account_1": {
+    "sessionid": "your_sessionid_here",
+    "sessionid_ss": "your_sessionid_ss_here",
+    "ttwid": "your_ttwid_here",
+    "passport_csrf_token": "",
+    "odin_tt": "",
+    "__ac_nonce": "",
+    "__ac_signature": "",
+    "nickname": "张三",
+    "userId": "MS4wLjABAAAA...",
+    "savedAt": 1738867200000
+  },
+  "account_2": {
+    "sessionid": "your_sessionid_here",
+    "sessionid_ss": "your_sessionid_ss_here",
+    "ttwid": "your_ttwid_here",
+    "passport_csrf_token": "",
+    "odin_tt": "",
+    "__ac_nonce": "",
+    "__ac_signature": "",
+    "nickname": "李四",
+    "userId": "MS4wLjABAAAA...",
+    "savedAt": 1738867200000
+  }
+}
