@@ -20,6 +20,7 @@
         :pagination="false"
         :bordered="false"
         size="small"
+        :scroll-x="scrollX"
         class="custom-table"
       />
     </div>
@@ -42,6 +43,10 @@ const props = defineProps({
   columns: {
     type: Array,
     required: true
+  },
+  scrollX: {
+    type: Number,
+    default: 1000
   }
 })
 </script>
@@ -50,12 +55,12 @@ const props = defineProps({
 .card-container {
   display: flex;
   flex-direction: column;
-  background-color: #fff;
+  background-color: rgba(255, 255, 255, 0.92);
   border-radius: 12px;
-  box-shadow: 0 2px 10px rgba(0,0,0,0.03);
+  box-shadow: 0 8px 24px rgba(31, 41, 55, 0.08);
   overflow: hidden;
 }
-.account-card { height: 300px; flex-shrink: 0; }
+.account-card { height: 320px; flex-shrink: 0; }
 .card-header { display: flex; align-items: center; justify-content: space-between; width: 100%; }
 .header-title { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; }
 .card-inner {
@@ -69,4 +74,11 @@ const props = defineProps({
 
 :deep(.custom-table .n-data-table-base-table-body) { scrollbar-width: none; }
 :deep(.custom-table .n-data-table-base-table-body::-webkit-scrollbar) { display: none; }
+
+@media (max-width: 900px) {
+  .account-card {
+    height: auto;
+    min-height: 260px;
+  }
+}
 </style>

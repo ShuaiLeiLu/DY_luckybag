@@ -507,6 +507,10 @@ function getMsToken(randomLength = 120) {
   return randomStr
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
 async function handleParams(params, headers) {
   const cookie = headers.cookie
   if (!cookie) return params
@@ -545,9 +549,24 @@ function requestJson(url, headers, timeoutMs = 10000, method = 'GET') {
         try {
           const buf = Buffer.concat(chunks)
           const text = buf.toString('utf8')
+          const contentType = String(res.headers['content-type'] || '').toLowerCase()
+          const looksLikeHtml = /^\s*</.test(text) || text.includes('<!DOCTYPE')
+          if (!contentType.includes('json') && looksLikeHtml) {
+            const snippet = text.slice(0, 160).replace(/\s+/g, ' ')
+            const err = new Error(`Non-JSON response: status=${res.statusCode}, content-type=${contentType || 'unknown'}, body=${snippet}`)
+            err.code = 'NON_JSON_RESPONSE'
+            err.statusCode = res.statusCode
+            err.contentType = contentType
+            err.bodySnippet = snippet
+            reject(err)
+            return
+          }
           const json = JSON.parse(text)
           resolve({ statusCode: res.statusCode, headers: res.headers, json })
         } catch (e) {
+          if (e instanceof SyntaxError) {
+            e.code = e.code || 'JSON_PARSE_ERROR'
+          }
           reject(e)
         }
       })
@@ -564,19 +583,57 @@ function requestJson(url, headers, timeoutMs = 10000, method = 'GET') {
 async function douyinLiveRemote(uri, params, headers, method = 'GET') {
   const p = { ...params, ...commonParams }
   const h = { ...commonHeaders, ...headers }
+  const cookieObj = cookieToObj(h.cookie || '')
 
-  const handledParams = await handleParams(p, h)
-  const query = new URLSearchParams(handledParams).toString()
-  const a_bogus = uri.includes('reply') ? sign_reply(query, h['User-Agent']) : sign_datail(query, h['User-Agent'])
+  // 抖音风控下常出现 444 + HTML，增加短退避重试
+  const maxAttempts = uri.includes('/webcast/lottery/melon/lottery_info/') ? 4 : 3
+  let lastError = null
 
-  const finalParams = { ...handledParams, a_bogus }
-  const url = `${liveHost}${uri}?${new URLSearchParams(finalParams).toString()}`
-  
-  console.log(`[API请求] ${uri}`)
-  console.log(`[a_bogus] ${a_bogus.substring(0, 30)}...`)
-  
-  const res = await requestJson(url, h, 10000, method)
-  return res.json
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const handledParams = await handleParams({ ...p }, h)
+      const query = new URLSearchParams(handledParams).toString()
+      const a_bogus = uri.includes('reply') ? sign_reply(query, h['User-Agent']) : sign_datail(query, h['User-Agent'])
+      const finalParams = { ...handledParams, a_bogus }
+      const url = `${liveHost}${uri}?${new URLSearchParams(finalParams).toString()}`
+
+      const reqHeaders = {
+        ...h,
+        origin: 'https://live.douyin.com',
+        referer: h.referer || 'https://live.douyin.com/',
+        'x-secsdk-csrf-request': '1'
+      }
+      if (cookieObj.passport_csrf_token) {
+        reqHeaders['x-tt-passport-csrf-token'] = cookieObj.passport_csrf_token
+        reqHeaders['x-secsdk-csrf-token'] = cookieObj.passport_csrf_token
+      }
+
+      console.log(`[API请求] ${uri}${attempt > 0 ? ` (retry ${attempt}/${maxAttempts - 1})` : ''}`)
+      console.log(`[a_bogus] ${a_bogus.substring(0, 30)}...`)
+
+      const res = await requestJson(url, reqHeaders, 10000, method)
+      return res.json
+    } catch (error) {
+      lastError = error
+      const code = error?.code
+      const statusCode = Number(error?.statusCode || 0)
+      const retryable =
+        code === 'NON_JSON_RESPONSE' ||
+        code === 'JSON_PARSE_ERROR' ||
+        statusCode === 403 ||
+        statusCode === 429 ||
+        statusCode === 444
+
+      if (!retryable || attempt >= maxAttempts - 1) {
+        throw error
+      }
+
+      const backoffMs = 180 + attempt * 220 + Math.floor(Math.random() * 160)
+      await sleep(backoffMs)
+    }
+  }
+
+  throw lastError || new Error('请求失败')
 }
 
 module.exports = {

@@ -55,20 +55,22 @@ const props = defineProps({
 <style scoped>
 .header-base {
   height: 64px;
-  background-color: #fff;
-  border-bottom: 1px solid #efeff5;
+  background-color: rgba(255, 255, 255, 0.88);
+  border-bottom: 1px solid #e7ece8;
+  backdrop-filter: blur(8px);
   display: flex;
   align-items: center;
   flex-shrink: 0;
   box-sizing: border-box;
 }
 .main-header {
-  padding: 0 24px;
+  padding: 0 18px;
   justify-content: space-between;
 }
 .header-left { display: flex; align-items: center; gap: 12px; }
 .logo-box {
-  width: 36px; height: 36px; background-color: #ff4d4f;
+  width: 36px; height: 36px;
+  background: linear-gradient(145deg, #ff5f5f 0%, #ff7a18 100%);
   border-radius: 8px; display: flex; align-items: center; justify-content: center;
 }
 .main-title { font-size: 15px; font-weight: 600; line-height: 1.2; }
@@ -84,4 +86,25 @@ const props = defineProps({
 .stat-value.success { color: #18a058; }
 .header-tools { display: flex; align-items: center; gap: 12px; margin-left: 8px; }
 .version-tag { font-family: monospace; }
+
+@media (max-width: 900px) {
+  .main-header {
+    height: auto;
+    min-height: 64px;
+    padding: 10px 12px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .header-right {
+    width: 100%;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .header-tools {
+    gap: 6px;
+    margin-left: 0;
+  }
+}
 </style>

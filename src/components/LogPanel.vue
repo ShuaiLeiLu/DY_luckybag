@@ -61,21 +61,31 @@ onMounted(() => {
 .card-container {
   display: flex;
   flex-direction: column;
-  background-color: #fff;
+  background-color: rgba(255, 255, 255, 0.92);
   border-radius: 12px;
-  box-shadow: 0 2px 10px rgba(0,0,0,0.03);
+  box-shadow: 0 8px 24px rgba(31, 41, 55, 0.08);
   overflow: hidden;
 }
-.log-card { height: 100%; }
+.log-card { height: 100%; min-height: 0; flex: 1; }
+.card-container :deep(.n-card-header) { flex-shrink: 0; }
+.card-container :deep(.n-card__content) {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  padding: 0 !important;
+}
 .card-header { display: flex; align-items: center; justify-content: space-between; width: 100%; }
 .header-title { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; }
 .card-inner {
   flex: 1;
-  overflow: hidden;
-  display: flex;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: block;
 }
 .scroll-box { overflow-y: auto; display: block; }
-.log-scroll { padding: 12px; background-color: #fdfdfd; flex-direction: column; }
+.log-scroll { padding: 12px; background-color: #f8fbf9; flex-direction: column; }
 .log-item { margin-bottom: 6px; font-size: 12px; font-family: 'JetBrains Mono', monospace; display: flex; gap: 8px; }
 .log-time { color: #ccc; flex-shrink: 0; }
 .log-msg { color: #555; word-break: break-all; }
@@ -85,4 +95,10 @@ onMounted(() => {
 
 .hide-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
 .hide-scrollbar::-webkit-scrollbar { display: none; }
+
+@media (max-width: 900px) {
+  .log-card {
+    min-height: 320px;
+  }
+}
 </style>

@@ -58,6 +58,15 @@
             size="small"
           />
         </div>
+        <div class="config-item">
+          <div class="item-header card-style">
+            <div class="item-info">
+              <span class="item-label">过滤粉丝团</span>
+              <span class="item-desc">跳过需加入粉丝团的福袋</span>
+            </div>
+            <n-switch v-model:value="config.filterFanClub.enabled" size="small" />
+          </div>
+        </div>
       </div>
 
       <!-- 时间与限制分组 -->
@@ -103,6 +112,15 @@
             </div>
             <n-switch v-model:value="config.filterOnline.enabled" size="small" />
           </div>
+          <n-input-number
+            v-model:value="config.filterOnline.value"
+            :min="1"
+            :max="100000"
+            :disabled="!config.filterOnline.enabled"
+            size="small"
+          >
+            <template #suffix><span class="input-prefix">人</span></template>
+          </n-input-number>
         </div>
       </div>
 
@@ -119,6 +137,15 @@
               <span class="item-label">自动抢红包</span>
             </div>
             <n-switch v-model:value="config.enableRedPacket" size="small" />
+          </div>
+        </div>
+        <div class="config-item">
+          <div class="item-header card-style">
+            <div style="display: flex; align-items: center; gap: 8px">
+              <n-icon color="#18a058" size="18"><chatbox-ellipses-outline /></n-icon>
+              <span class="item-label">随机互动</span>
+            </div>
+            <n-switch v-model:value="config.randomInteraction.enabled" size="small" />
           </div>
         </div>
       </div>
@@ -143,24 +170,27 @@ const props = defineProps({
   flex: 1;
 }
 .sidebar-content {
-  padding: 20px 16px;
+  padding: 16px 14px;
 }
 .config-group { margin-bottom: 16px; }
 .group-title {
   display: flex; align-items: center; gap: 8px;
-  font-size: 13px; font-weight: 600; color: #333;
+  font-size: 13px; font-weight: 600; color: #2f3a33;
   margin-bottom: 12px; padding-left: 4px;
 }
 .config-item {
-  margin-bottom: 12px; background: #fcfcfd;
-  padding: 8px 10px; border-radius: 8px; border: 1px solid #f0f0f5;
+  margin-bottom: 10px;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfdfb 100%);
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid #edf2ee;
 }
 .item-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px; }
 .item-header.card-style { align-items: center; margin-bottom: 0; }
 .item-info { display: flex; flex-direction: column; }
 .item-label { font-size: 13px; font-weight: 500; color: #333; }
-.item-desc { font-size: 11px; color: #999; }
-.input-prefix { font-size: 12px; color: #999; }
+.item-desc { font-size: 11px; color: #8f9a92; }
+.input-prefix { font-size: 12px; color: #8f9a92; }
 
 .hide-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
 .hide-scrollbar::-webkit-scrollbar { display: none; }

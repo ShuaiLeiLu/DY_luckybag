@@ -32,6 +32,7 @@
               :accounts="accounts"
               :running-count="runningCount"
               :columns="responsiveColumns"
+              :scroll-x="accountTableScrollX"
             />
             <LotteryDetail :lotteries="mergedLotteries" @block="handleBlockRoom" />
           </div>
@@ -46,7 +47,7 @@
 </template>
 
 <script setup>
-import { ref, h, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, h, computed, onMounted, onUnmounted } from 'vue'
 import { 
   NButton, NTag, NSpace, NConfigProvider, NIcon
 } from 'naive-ui'
@@ -77,22 +78,21 @@ const themeOverrides = {
 
 // 响应式状态
 const windowWidth = ref(window.innerWidth)
-const siderCollapsed = ref(false)
-
 // 响应式计算
 const isMobile = computed(() => windowWidth.value < 768)
-const isTablet = computed(() => windowWidth.value >= 768 && windowWidth.value < 1024)
 
 // 统计数据
 const runningCount = computed(() => accounts.value.filter(a => a.state === 'running').length)
 const totalParticipation = computed(() => accounts.value.reduce((sum, a) => sum + a.participationCount, 0))
-const totalWinning = computed(() => accounts.value.reduce((sum, a) => sum + a.winningCount, 0))
-const totalDiamonds = computed(() => accounts.value.reduce((sum, a) => sum + a.totalDiamonds, 0))
+const totalWinning = computed(() => accounts.value.reduce((sum, a) => sum + a.lotteryWinCount, 0))
+const totalDiamonds = computed(() => accounts.value.reduce((sum, a) => sum + a.todayEarnedDiamonds, 0))
 
 const mergedLotteries = computed(() => {
   const map = new Map()
   const allLists = Object.values(lotteriesByAccount.value || {})
-  const all = allLists.flatMap(list => (Array.isArray(list) ? list : []))
+  const all = allLists
+    .flatMap(list => (Array.isArray(list) ? list : []))
+    .filter(item => !(config.value.filterFanClub?.enabled && hasFanClubRequirement(item)))
 
   for (const item of all) {
     const roomId = item?.roomId ?? ''
@@ -126,16 +126,65 @@ const config = ref({
   enableRedPacket: true,
   hitRate: { enabled: true, value: 0.1 },
   secondInspect: { enabled: true, value: 0.05 },
+  filterFanClub: { enabled: true },
   participationCount: { enabled: true, value: 80 },
   singleAccountDuration: { enabled: true, value: 3 },
   filterOnline: { enabled: false, value: 1000 },
-  randomInteraction: { enabled: true }
+  randomInteraction: { enabled: true },
+  closeLiveStream: { enabled: true }
 })
 
 const accounts = ref([])
 const logs = ref([])
 const lotteriesByAccount = ref({})
 const lotteryManager = new LotteryManager()
+
+function getTodayKey() {
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = String(now.getMonth() + 1).padStart(2, '0')
+  const d = String(now.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+function createAccountModel(base = {}) {
+  return {
+    id: base.id || '',
+    nickname: base.nickname || '',
+    userId: base.userId || base.id || '',
+    state: base.state || 'waiting',
+    currentRoom: base.currentRoom || '',
+    token: base.token || null,
+    participationCount: Number(base.participationCount || 0),
+    lotteryWinCount: Number(base.lotteryWinCount || 0),
+    redPacketWinCount: Number(base.redPacketWinCount || 0),
+    todayLotteryWinCount: Number(base.todayLotteryWinCount || 0),
+    todayRedPacketWinCount: Number(base.todayRedPacketWinCount || 0),
+    todayEarnedDiamonds: Number(base.todayEarnedDiamonds || 0),
+    totalDiamonds: Number(base.totalDiamonds || 0),
+    lastWalletDiamond: base.lastWalletDiamond ?? null,
+    statsDateKey: base.statsDateKey || getTodayKey()
+  }
+}
+
+function ensureDailyStats(account) {
+  const todayKey = getTodayKey()
+  if (account.statsDateKey !== todayKey) {
+    account.todayLotteryWinCount = 0
+    account.todayRedPacketWinCount = 0
+    account.todayEarnedDiamonds = 0
+    account.statsDateKey = todayKey
+  }
+}
+
+function hasFanClubRequirement(lottery) {
+  const conditions = Array.isArray(lottery?.conditions) ? lottery.conditions : []
+  return conditions.some(c => {
+    const typeNum = Number(c?.type)
+    const content = String(c?.content || '')
+    return typeNum === 2 || content.includes('粉丝团')
+  })
+}
 
 let ipcRenderer = null
 try {
@@ -154,6 +203,8 @@ const handleResize = () => {
 
 onMounted(async () => {
   window.addEventListener('resize', handleResize)
+  lotteryManager.setCategoryList(lotteryManager.getAllCategories().slice(0, 3))
+  lotteryManager.setScanConfig({ countPerPage: 12, pagesPerCategory: 4 })
   await loadAllAccounts()
   if (ipcRenderer) {
     // 监听浏览器窗口关闭事件
@@ -169,14 +220,22 @@ onMounted(async () => {
     ipcRenderer.on('douyin-response', (event, { accountId, type, data }) => {
       const account = accounts.value.find(a => a.id === accountId)
       if (!account) return
+      ensureDailyStats(account)
       if (type === 'lottery' && data?.lottery_info?.win_status === 1) {
-        account.winningCount++
+        account.lotteryWinCount++
+        account.todayLotteryWinCount++
         addLog(`🎉 [${account.nickname}] 恭喜！福袋中奖了！`, 'success')
       } else if (type === 'redpacket' && data?.receive_info?.is_win) {
-        account.winningCount++
+        account.redPacketWinCount++
+        account.todayRedPacketWinCount++
         addLog(`🧧 [${account.nickname}] 领取红包成功：${data.receive_info.amount || 0} 钻石`, 'success')
       } else if (type === 'wallet' && data?.diamond !== undefined) {
-        account.totalDiamonds = data.diamond
+        const currentWallet = Number(data.diamond || 0)
+        if (account.lastWalletDiamond !== null && currentWallet > account.lastWalletDiamond) {
+          account.todayEarnedDiamonds += (currentWallet - account.lastWalletDiamond)
+        }
+        account.lastWalletDiamond = currentWallet
+        account.totalDiamonds = currentWallet
       }
     })
   }
@@ -192,44 +251,103 @@ async function loadAllAccounts() {
     const result = await ipcRenderer.invoke('load-all-tokens')
     if (result.success && result.tokens) {
       Object.entries(result.tokens).forEach(([id, info]) => {
-        accounts.value.push({
-          id, nickname: info.nickname || `账号_${id}`, userId: info.userId || id,
-          state: 'waiting', currentRoom: '', participationCount: 0, winningCount: 0,
-          totalDiamonds: 0, token: info.sessionid || info.sessionid_ss
-        })
+        const match = id.match(/account_(\d+)/)
+        const fallbackNickname = match ? `账号${match[1]}` : `账号_${id}`
+        accounts.value.push(createAccountModel({
+          id,
+          nickname: info.nickname || fallbackNickname,
+          userId: info.userId || id,
+          state: 'waiting',
+          token: info.sessionid || info.sessionid_ss
+        }))
       })
     }
   } catch (error) { addLog(`❌ 加载账号失败: ${error.message}`, 'error') }
 }
 
-const responsiveColumns = computed(() => [
-  { title: 'ID', key: 'id', width: 110, ellipsis: { tooltip: true } },
-  { title: '昵称', key: 'nickname', width: 100 },
-  { 
-    title: '状态', key: 'state', width: 90,
-    render: (row) => {
-      const map = { waiting: 'default', opened: 'info', running: 'success', paused: 'warning', error: 'error' }
-      const text = { waiting: '等待', opened: '已打开', running: '运行', paused: '暂停', error: '错误' }
-      return h(NTag, { type: map[row.state] || 'default', size: 'small' }, { default: () => text[row.state] || '等待' })
-    }
-  },
-  { 
-    title: '操作', key: 'actions', width: 180, fixed: 'right',
-    render: (row) => h(NSpace, { size: 6 }, {
-      default: () => [
-        h(NButton, { size: 'tiny', type: row.state === 'running' ? 'warning' : 'primary', onClick: () => toggleAccount(row) }, { default: () => row.state === 'running' ? '暂停' : '启动' }),
-        h(NButton, { size: 'tiny', type: 'info', onClick: () => refreshUserInfo(row.id), disabled: !row.token }, { default: () => '刷新' }),
-        h(NButton, { size: 'tiny', type: 'error', onClick: () => removeAccount(row.id) }, { default: () => '删除' })
-      ]
-    })
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+
+async function resolveUserInfoWithRetry(accountId, fromLoginToken = null) {
+  if (!ipcRenderer) return fromLoginToken || null
+  if (fromLoginToken?.nickname) return fromLoginToken
+
+  for (let i = 0; i < 4; i++) {
+    try {
+      const ur = await ipcRenderer.invoke('get-user-info', accountId)
+      if (ur.success && ur.userInfo?.nickname) return ur.userInfo
+    } catch (_) {}
+    await sleep(1200)
   }
-])
+  return fromLoginToken || null
+}
+
+const responsiveColumns = computed(() => {
+  const actionFixed = isMobile.value ? undefined : 'right'
+  const compact = windowWidth.value < 1360
+
+  const base = [
+    { title: '昵称', key: 'nickname', width: isMobile.value ? 92 : 120, ellipsis: { tooltip: true } },
+    {
+      title: '状态', key: 'state', width: isMobile.value ? 74 : 90,
+      render: (row) => {
+        const map = { waiting: 'default', opened: 'info', running: 'success', paused: 'warning', error: 'error' }
+        const text = { waiting: '等待', opened: '已打开', running: '运行', paused: '暂停', error: '错误' }
+        return h(NTag, { type: map[row.state] || 'default', size: 'small' }, { default: () => text[row.state] || '等待' })
+      }
+    },
+    {
+      title: '统计',
+      key: 'stats',
+      width: compact ? 160 : 230,
+      render: (row) => {
+        const rate = row.participationCount > 0
+          ? ((row.lotteryWinCount / row.participationCount) * 100).toFixed(1)
+          : '0.0'
+        const text = compact
+          ? `参${row.participationCount} 中${row.lotteryWinCount} 成${rate}% 收¥${(Number(row.todayEarnedDiamonds || 0) / 10).toFixed(2)}`
+          : `参与${row.participationCount} 福袋中${row.lotteryWinCount} 红包中${row.redPacketWinCount} 成功率${rate}% 收益¥${(Number(row.todayEarnedDiamonds || 0) / 10).toFixed(2)}`
+        return h('span', { style: 'font-family: JetBrains Mono, monospace; font-size: 12px;' }, text)
+      }
+    }
+  ]
+
+  base.push({
+    title: '操作',
+    key: 'actions',
+    width: compact ? 120 : 220,
+    fixed: actionFixed,
+    render: (row) => compact
+      ? h(NButton, {
+        size: 'small',
+        type: row.state === 'running' ? 'warning' : 'primary',
+        onClick: () => toggleAccount(row)
+      }, { default: () => row.state === 'running' ? '暂停' : '启动' })
+      : h(NSpace, { size: 6 }, {
+        default: () => [
+          h(NButton, { size: 'tiny', type: row.state === 'running' ? 'warning' : 'primary', onClick: () => toggleAccount(row) }, { default: () => row.state === 'running' ? '暂停' : '启动' }),
+          h(NButton, { size: 'tiny', type: 'info', onClick: () => refreshUserInfo(row.id), disabled: !row.token }, { default: () => '刷新' }),
+          h(NButton, { size: 'tiny', type: 'error', onClick: () => removeAccount(row.id) }, { default: () => '删除' })
+        ]
+      })
+  })
+
+  return base
+})
+
+const accountTableScrollX = computed(() => {
+  return responsiveColumns.value.reduce((sum, col) => sum + Number(col.width || 120), 0) + 40
+})
 
 function addAccount() {
   let max = 0
   accounts.value.forEach(a => { const m = a.id.match(/account_(\d+)/); if(m) max = Math.max(max, parseInt(m[1])) })
   const next = max + 1
-  const acc = { id: `account_${next}`, nickname: `账号${next}`, state: 'waiting', currentRoom: '', participationCount: 0, winningCount: 0, totalDiamonds: 0, token: null }
+  const acc = createAccountModel({
+    id: `account_${next}`,
+    nickname: `账号${next}`,
+    state: 'waiting',
+    token: null
+  })
   accounts.value.push(acc)
   addLog(`账号 ${acc.nickname} 已添加，请扫码登录`)
   startAccountWithLogin(acc)
@@ -246,16 +364,27 @@ async function startAccountWithLogin(account) {
       const tr = await ipcRenderer.invoke('get-login-token', account.id)
       if (tr.success && tr.isLoggedIn) {
         clearInterval(timer)
-        let info = tr.userInfo
-        if (!info?.nickname) {
-          const ur = await ipcRenderer.invoke('get-user-info', account.id)
-          if (ur.success) info = ur.userInfo
+        const info = await resolveUserInfoWithRetry(account.id, tr.userInfo)
+        const fallbackInfo = {
+          nickname: account.nickname,
+          userId: account.userId || account.id
         }
-        const sr = await ipcRenderer.invoke('save-token', { accountId: account.id, tokenInfo: tr.tokenInfo, userInfo: info })
-        if (sr.success) {
-          account.nickname = sr.savedInfo?.nickname || account.nickname
-          account.token = tr.tokenInfo.sessionid || tr.tokenInfo.sessionid_ss
-          account.state = 'waiting'
+        let saveResult = await ipcRenderer.invoke('save-token', { accountId: account.id, tokenInfo: tr.tokenInfo, userInfo: info })
+        if (!saveResult.success) {
+          saveResult = await ipcRenderer.invoke('save-token', { accountId: account.id, tokenInfo: tr.tokenInfo, userInfo: fallbackInfo })
+        }
+
+        const finalNickname = info?.nickname || saveResult.savedInfo?.nickname || account.nickname
+        const finalUserId = info?.userId || saveResult.savedInfo?.userId || account.userId || account.id
+        account.nickname = finalNickname
+        account.userId = finalUserId
+        account.token = tr.tokenInfo.sessionid || tr.tokenInfo.sessionid_ss
+        account.state = 'waiting'
+
+        if (saveResult.success) {
+          addLog(`✅ [${finalNickname}] 登录成功`, 'success')
+        } else {
+          addLog(`⚠️ [${finalNickname}] 登录成功，但本地保存信息不完整`, 'warning')
         }
       }
     }, 3000)
@@ -287,9 +416,10 @@ async function startAccountScanning(account) {
       onStatusUpdate: (upd) => { const i = accounts.value.findIndex(a => a.id === upd.id); if(i !== -1) accounts.value[i] = { ...accounts.value[i], ...upd } },
       onLotteryListUpdate: ({ accountId, list }) => {
         const a = accounts.value.find(acc => acc.id === accountId)
+        const filteredList = (list || []).filter(item => !(config.value.filterFanClub?.enabled && hasFanClubRequirement(item)))
         lotteriesByAccount.value = {
           ...lotteriesByAccount.value,
-          [accountId]: (list || []).map(item => ({
+          [accountId]: filteredList.map(item => ({
           ...item,
           _scanAccountId: accountId,
           _scanAccountNickname: a?.nickname || accountId
@@ -328,7 +458,10 @@ async function refreshUserInfo(id) {
     const ir = await ipcRenderer.invoke('get-user-info', id)
     if (ir.success) {
       const a = accounts.value.find(acc => acc.id === id)
-      if (a) a.nickname = ir.userInfo.nickname
+      if (a) {
+        a.nickname = ir.userInfo.nickname
+        if (ir.userInfo.userId) a.userId = ir.userInfo.userId
+      }
     }
   } catch (e) {}
 }
@@ -344,7 +477,10 @@ function addLog(message, type = 'info') {
   display: flex;
   width: 100vw;
   height: 100vh;
-  background-color: #f5f7f9;
+  background:
+    radial-gradient(1200px 500px at -10% -20%, rgba(24, 160, 88, 0.14), transparent 65%),
+    radial-gradient(900px 600px at 110% 0%, rgba(255, 122, 24, 0.1), transparent 60%),
+    linear-gradient(180deg, #f7faf8 0%, #f2f5f3 100%);
   overflow: hidden;
 }
 
@@ -360,16 +496,17 @@ function addLog(message, type = 'info') {
 
 /* 侧边栏样式 */
 .sidebar {
-  width: 280px;
+  width: 292px;
   display: flex;
   flex-direction: column;
-  background-color: #fff;
-  border-right: 1px solid #efeff5;
-  box-shadow: 2px 0 8px rgba(0,0,0,0.05);
+  background-color: rgba(255, 255, 255, 0.92);
+  border-right: 1px solid #e7ece8;
+  box-shadow: 0 10px 30px rgba(31, 41, 55, 0.08);
+  backdrop-filter: blur(8px);
   z-index: 10;
 }
 .sidebar-header {
-  padding: 0 20px;
+  padding: 0 18px;
   gap: 8px;
 }
 .title-text {
@@ -378,9 +515,9 @@ function addLog(message, type = 'info') {
   font-weight: 600;
 }
 .sidebar-footer {
-  padding: 16px;
-  border-top: 1px solid #efeff5;
-  background-color: #fff;
+  padding: 14px 16px 18px;
+  border-top: 1px solid #eef2ef;
+  background-color: rgba(255, 255, 255, 0.9);
   flex-shrink: 0;
 }
 
@@ -390,27 +527,73 @@ function addLog(message, type = 'info') {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-width: 0;
 }
 
 /* 内容体布局 */
 .content-body {
   flex: 1;
-  padding: 20px;
-  display: flex;
-  gap: 20px;
+  padding: 16px 18px 18px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(320px, 1fr);
+  gap: 16px;
   overflow: hidden;
   box-sizing: border-box;
+  min-height: 0;
 }
 .column-left {
-  flex: 14;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 16px;
   height: 100%;
+  min-width: 0;
+  min-height: 0;
 }
 .column-right {
-  flex: 10;
+  display: flex;
+  min-width: 0;
   height: 100%;
+  min-height: 0;
+}
+
+@media (max-width: 1200px) {
+  .content-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(300px, auto) minmax(280px, 38vh);
+  }
+}
+
+@media (max-width: 900px) {
+  .app-container {
+    flex-direction: column;
+    height: auto;
+    min-height: 100vh;
+    overflow: auto;
+  }
+
+  .sidebar {
+    width: 100%;
+    border-right: 0;
+    border-bottom: 1px solid #e7ece8;
+  }
+
+  .main-content {
+    min-height: 0;
+  }
+
+  .content-body {
+    padding: 12px;
+    gap: 12px;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    overflow: visible;
+  }
+
+  .column-left,
+  .column-right {
+    height: auto;
+    min-height: 320px;
+  }
 }
 
 .hide-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
