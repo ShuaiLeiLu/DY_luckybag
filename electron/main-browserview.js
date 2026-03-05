@@ -76,10 +76,173 @@ function cookieObjToString(cookieObj) {
   return parts.join('; ')
 }
 
+/**
+ * 使用 session 获取账号 cookie，并拼接为 header 字符串
+ * @param {string} accountId
+ * @returns {Promise<{ cookies: Array, cookieString: string }>}
+ */
+async function getAccountCookiesAndString(accountId) {
+  const browserData = browserViews.get(accountId)
+  if (!browserData) {
+    throw new Error('浏览器实例不存在')
+  }
+  const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
+  const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
+  return { cookies, cookieString }
+}
+
+/**
+ * 主进程直连接口，避免页面脚本跨域限制
+ * @param {string} url
+ * @param {object} headers
+ * @param {number} timeout
+ * @returns {Promise<object>}
+ */
+function requestJson(url, headers = {}, timeout = 10000) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, {
+      method: 'GET',
+      headers,
+      timeout
+    }, (res) => {
+      let body = ''
+      res.on('data', (chunk) => { body += chunk })
+      res.on('end', () => {
+        const statusCode = res.statusCode || 0
+        if (statusCode < 200 || statusCode >= 300) {
+          return reject(new Error(`HTTP ${statusCode}`))
+        }
+        const trimmed = (body || '').trim()
+        if (!trimmed) return reject(new Error('空响应'))
+        if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html')) {
+          return reject(new Error('响应不是JSON(HTML)'))
+        }
+        try {
+          resolve(JSON.parse(trimmed))
+        } catch (e) {
+          reject(new Error(`JSON解析失败: ${e.message}`))
+        }
+      })
+    })
+    req.on('error', reject)
+    req.on('timeout', () => req.destroy(new Error('请求超时')))
+    req.end()
+  })
+}
+
+function normalizeUserInfo(raw, method) {
+  if (!raw) return null
+  const nickname = raw.nickname || raw.nickName || raw.nick_name || ''
+  const userId = raw.sec_uid || raw.secUid || raw.uid || raw.userId || ''
+  if (!nickname) return null
+  return {
+    method,
+    nickname,
+    userId: userId || null
+  }
+}
+
+async function fetchUserInfoFromApis(cookieString) {
+  if (!cookieString) return null
+  const commonHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Cookie': cookieString
+  }
+
+  // 参考“超人福袋助手”优先使用 creator 接口
+  try {
+    const creatorRes = await requestJson('https://creator.douyin.com/web/api/media/user/info/', {
+      ...commonHeaders,
+      'Referer': 'https://creator.douyin.com/creator-micro/content/manage'
+    })
+    if (creatorRes?.status_code === 0 && creatorRes?.user) {
+      const info = normalizeUserInfo(creatorRes.user, 'creator_api')
+      if (info) return info
+    }
+  } catch (e) {
+    console.log(`[user-info] creator 接口失败: ${e.message}`)
+  }
+
+  // 回退到 aweme 用户信息接口
+  try {
+    const awemeRes = await requestJson('https://www.douyin.com/aweme/v1/web/im/user/info/', {
+      ...commonHeaders,
+      'Referer': 'https://www.douyin.com/user/self'
+    })
+    const info = normalizeUserInfo(awemeRes?.data?.user_info, 'aweme_api')
+    if (info) return info
+  } catch (e) {
+    console.log(`[user-info] aweme 接口失败: ${e.message}`)
+  }
+
+  return null
+}
+
+async function fetchUserInfoFromPage(webContents) {
+  try {
+    const result = await webContents.executeJavaScript(`
+      (function() {
+        try {
+          const fromState = window.__INITIAL_STATE__?.user || window.__INITIAL_STATE__?.userInfo || null;
+          if (fromState) {
+            const nick = fromState.nickname || fromState.nickName || fromState.nick_name;
+            const uid = fromState.sec_uid || fromState.secUid || fromState.uid;
+            if (nick) return { nickname: nick, userId: uid || null, method: 'dom_state' };
+          }
+
+          const userLinks = document.querySelectorAll('a[href*="/user/"]');
+          for (const link of userLinks) {
+            const href = link.getAttribute('href') || '';
+            const match = href.match(/\\/user\\/([^?/]+)/);
+            const text = (link.textContent || '').trim();
+            if (match && text && text.length < 50 && !text.includes('登录')) {
+              return { nickname: text, userId: match[1], method: 'dom_link' };
+            }
+          }
+
+          const metaTitle = document.querySelector('meta[property="og:title"]')?.content || '';
+          const m = metaTitle.match(/(.+)的抖音/);
+          if (m && m[1]) return { nickname: m[1], userId: null, method: 'dom_meta' };
+        } catch (_) {}
+        return null;
+      })()
+    `, true)
+    if (result?.nickname) {
+      return {
+        method: result.method || 'dom',
+        nickname: result.nickname,
+        userId: result.userId || null
+      }
+    }
+  } catch (e) {
+    console.log(`[user-info] 页面兜底失败: ${e.message}`)
+  }
+  return null
+}
+
+async function resolveUserInfo(accountId, options = {}) {
+  const waitMs = options.waitMs ?? 0
+  const browserData = browserViews.get(accountId)
+  if (!browserData) throw new Error('浏览器实例不存在')
+  if (waitMs > 0) {
+    await new Promise(resolve => setTimeout(resolve, waitMs))
+  }
+
+  const { cookieString } = await getAccountCookiesAndString(accountId)
+  const apiInfo = await fetchUserInfoFromApis(cookieString)
+  if (apiInfo?.nickname) return apiInfo
+
+  const pageInfo = await fetchUserInfoFromPage(browserData.window.webContents)
+  if (pageInfo?.nickname) return pageInfo
+
+  return null
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
-    height: 900,
+    height: 1000,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false
@@ -97,6 +260,10 @@ function createWindow() {
 }
 
 app.whenReady().then(createWindow)
+// 全局静音兜底（多账号场景避免偶发出声）
+try {
+  app.commandLine.appendSwitch('mute-audio')
+} catch (_) {}
 
 // 打印所有已注册的 IPC handlers（用于调试）
 app.whenReady().then(() => {
@@ -120,7 +287,127 @@ app.whenReady().then(() => {
   console.log('  - search-live-by-category')
   console.log('  - get-lottery-detail')
   console.log('  - collect-lotteries-by-category')
+  console.log('  - attend-lottery')
+  console.log('  - room-like')
+  console.log('  - room-chat')
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+})
+
+// ... 前面的代码保持不变 ...
+
+// ==================== 互动操作 ====================
+
+// 参与福袋
+ipcMain.handle('attend-lottery', async (event, { roomId, lotteryId, webRid = null, accountId }) => {
+  try {
+    let cookieString = ''
+    if (accountId) {
+      const browserData = browserViews.get(accountId)
+      if (browserData) {
+        const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
+        cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
+      }
+    }
+
+    const commonHeaders = {
+      cookie: cookieString,
+      referer: `https://live.douyin.com/${webRid || roomId}`
+    }
+
+    const attemptAttend = async (payload) => {
+      const json = await douyinLiveRemote('/webcast/lottery/melon/attend/', payload, commonHeaders, 'POST')
+      const status = json?.data?.status
+      const statusCode = json?.status_code
+      const errorMsg = json?.extra?.error_msg ||
+        json?.extra?.description ||
+        json?.data?.prompt ||
+        json?.data?.toast ||
+        json?.status_msg ||
+        json?.message ||
+        ''
+      const success = status === 0 || (status === undefined && statusCode === 0)
+      return { json, status, statusCode, errorMsg, success }
+    }
+
+    // 先使用标准字段 room_id，失败后回退 roomId
+    let result = null
+    try {
+      result = await attemptAttend({
+        room_id: roomId,
+        lottery_id: lotteryId
+      })
+    } catch (_) {}
+
+    if (!result || !result.success) {
+      result = await attemptAttend({
+        roomId,
+        lottery_id: lotteryId
+      })
+    }
+
+    return {
+      success: result.success,
+      data: result.json?.data,
+      extra: result.json?.extra,
+      status: result.status,
+      statusCode: result.statusCode,
+      error: result.errorMsg
+    }
+  } catch (error) {
+    return { success: false, error: error.message, code: error?.code || 'UNKNOWN' }
+  }
+})
+
+// 直播间点赞
+ipcMain.handle('room-like', async (event, { roomId, accountId, count = 1 }) => {
+  try {
+    let cookieString = ''
+    if (accountId) {
+      const browserData = browserViews.get(accountId)
+      if (browserData) {
+        const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
+        cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
+      }
+    }
+
+    const json = await douyinLiveRemote('/webcast/room/digg/', {
+      room_id: roomId,
+      count: count,
+    }, {
+      cookie: cookieString,
+      referer: `https://live.douyin.com/${roomId}`
+    }, 'POST')
+
+    return { success: json?.data?.status === 0, data: json?.data }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+// 发送弹幕
+ipcMain.handle('room-chat', async (event, { roomId, content, accountId }) => {
+  try {
+    let cookieString = ''
+    if (accountId) {
+      const browserData = browserViews.get(accountId)
+      if (browserData) {
+        const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
+        cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
+      }
+    }
+
+    const json = await douyinLiveRemote('/webcast/room/chat/', {
+      room_id: roomId,
+      content: content,
+    }, {
+      cookie: cookieString,
+      referer: `https://live.douyin.com/${roomId}`
+    }, 'POST')
+
+    return { success: json?.data?.status === 0, data: json?.data }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
 })
 
 app.on('window-all-closed', () => {
@@ -190,6 +477,11 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
     })
     
     console.log(`[${accountId}] 已创建独立session: ${partition}`)
+
+    // 参考超人福袋：默认静音，避免多账号运行时音频干扰
+    try {
+      browserWindow.webContents.setAudioMuted(true)
+    } catch (_) {}
     
     browserViews.set(accountId, {
       window: browserWindow,
@@ -200,12 +492,67 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
     // 监听页面加载完成
     browserWindow.webContents.on('did-finish-load', () => {
       console.log(`[${accountId}] 页面加载完成`)
+      try { browserWindow.webContents.setAudioMuted(true) } catch (_) {}
+      
+      // 开启调试模式以监听网络响应体
+      try {
+        const wc = browserWindow.webContents
+        if (!wc.debugger.isAttached()) {
+          wc.debugger.attach('1.3')
+        }
+        wc.debugger.on('detach', (event, reason) => {
+          console.log(`[${accountId}] Debugger detached:`, reason)
+        })
+        wc.debugger.sendCommand('Network.enable')
+        wc.debugger.on('message', async (event, method, params) => {
+          if (method === 'Network.responseReceived') {
+            const { url } = params.response
+            const requestId = params.requestId
+            
+            // 监听关键接口
+            const isLottery = url.includes('webcast/lottery/melon/check_user_right')
+            const isRedPacket = url.includes('webcast/luckybox/receive')
+            const isWallet = url.includes('webcast/wallet/info')
+            
+            if (isLottery || isRedPacket || isWallet) {
+              try {
+                const { body } = await wc.debugger.sendCommand('Network.getResponseBody', { requestId })
+                const json = JSON.parse(body)
+                
+                // 发送到渲染进程
+                mainWindow.webContents.send('douyin-response', {
+                  accountId,
+                  type: isLottery ? 'lottery' : (isRedPacket ? 'redpacket' : 'wallet'),
+                  data: json.data
+                })
+              } catch (e) {
+                // 忽略获取响应体失败的情况
+              }
+            }
+          }
+        })
+      } catch (err) {
+        console.error(`[${accountId}] Debugger attach error:`, err)
+      }
+    })
+
+    // 页面跳转后再次强制静音，防止站点恢复音量
+    browserWindow.webContents.on('did-navigate', () => {
+      try { browserWindow.webContents.setAudioMuted(true) } catch (_) {}
+    })
+    browserWindow.webContents.on('did-navigate-in-page', () => {
+      try { browserWindow.webContents.setAudioMuted(true) } catch (_) {}
     })
     
     // 监听窗口关闭
     browserWindow.on('closed', () => {
       console.log(`[${accountId}] 窗口已关闭`)
       browserViews.delete(accountId)
+      
+      // 通知渲染进程窗口已关闭，停止该账号的所有活动
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('browser-closed', { accountId })
+      }
     })
     
     // 监听网络请求
@@ -302,106 +649,8 @@ ipcMain.handle('delete-token', async (event, accountId) => {
 
 ipcMain.handle('get-user-info', async (event, accountId) => {
   try {
-    const browserData = browserViews.get(accountId)
-    if (!browserData) {
-      throw new Error('浏览器实例不存在')
-    }
-    
     console.log(`[${accountId}] 开始获取用户信息...`)
-    
-    // 等待页面完全加载
-    await new Promise(resolve => setTimeout(resolve, 3000))
-    
-    const userInfo = await browserData.window.webContents.executeJavaScript(`
-      (async function() {
-        console.log('开始执行用户信息获取脚本...');
-        
-        // 方法1: 通过抖音API获取
-        try {
-          console.log('尝试方法1: API获取');
-          const response = await fetch('https://www.douyin.com/aweme/v1/web/im/user/info/', {
-            credentials: 'include'
-          });
-          const data = await response.json();
-          console.log('API返回:', data);
-          if (data && data.data && data.data.user_info) {
-            return {
-              method: 'API',
-              nickname: data.data.user_info.nickname,
-              userId: data.data.user_info.sec_uid || data.data.user_info.uid
-            };
-          }
-        } catch (e) {
-          console.log('方法1失败:', e.message);
-        }
-        
-        // 方法2: 从页面右上角头像区域获取
-        try {
-          console.log('尝试方法2: 页面元素');
-          // 查找头像元素
-          const avatarImg = document.querySelector('img[alt*="头像"]') || 
-                           document.querySelector('img[class*="avatar"]');
-          if (avatarImg) {
-            const container = avatarImg.closest('div');
-            const textElements = container.querySelectorAll('span, div');
-            for (const el of textElements) {
-              const text = el.textContent.trim();
-              if (text && text.length > 0 && text.length < 30 && !text.includes('登录')) {
-                console.log('找到昵称:', text);
-                return {
-                  method: 'DOM',
-                  nickname: text,
-                  userId: null
-                };
-              }
-            }
-          }
-        } catch (e) {
-          console.log('方法2失败:', e.message);
-        }
-        
-        // 方法3: 从URL中查找用户页面链接
-        try {
-          console.log('尝试方法3: 用户链接');
-          const userLinks = document.querySelectorAll('a[href*="/user/"]');
-          for (const link of userLinks) {
-            const href = link.getAttribute('href');
-            const match = href.match(/\\/user\\/([^?/]+)/);
-            if (match) {
-              const text = link.textContent.trim();
-              if (text && text.length > 0 && text.length < 30) {
-                console.log('找到用户链接:', text, match[1]);
-                return {
-                  method: 'Link',
-                  nickname: text,
-                  userId: match[1]
-                };
-              }
-            }
-          }
-        } catch (e) {
-          console.log('方法3失败:', e.message);
-        }
-        
-        // 方法4: 从全局变量获取
-        try {
-          console.log('尝试方法4: 全局变量');
-          if (window.__INITIAL_STATE__ && window.__INITIAL_STATE__.user) {
-            const user = window.__INITIAL_STATE__.user;
-            return {
-              method: 'GlobalVar',
-              nickname: user.nickname || user.nickName,
-              userId: user.secUid || user.sec_uid || user.uid
-            };
-          }
-        } catch (e) {
-          console.log('方法4失败:', e.message);
-        }
-        
-        console.log('所有方法都失败了');
-        return null;
-      })()
-    `, true)
+    const userInfo = await resolveUserInfo(accountId, { waitMs: 1500 })
     
     if (userInfo && userInfo.nickname) {
       console.log(`✅ [${accountId}] 获取到用户信息 (${userInfo.method}): ${userInfo.nickname} ${userInfo.userId || ''}`)
@@ -448,12 +697,7 @@ ipcMain.handle('clear-account-cache', async (event, accountId) => {
 
 ipcMain.handle('get-login-token', async (event, accountId) => {
   try {
-    const browserData = browserViews.get(accountId)
-    if (!browserData) {
-      throw new Error('浏览器实例不存在')
-    }
-    
-    const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
+    const { cookies } = await getAccountCookiesAndString(accountId)
     
     const tokenInfo = {
       sessionid: '',
@@ -477,97 +721,9 @@ ipcMain.handle('get-login-token', async (event, accountId) => {
     let userInfo = null
     if (isLoggedIn) {
       try {
-        // 等待页面加载完成
-        await new Promise(resolve => setTimeout(resolve, 2000))
-        
-        const result = await browserData.window.webContents.executeJavaScript(`
-          (async function() {
-            try {
-              // 方法1: 通过API获取用户信息
-              try {
-                const response = await fetch('https://www.douyin.com/aweme/v1/web/im/user/info/', {
-                  credentials: 'include'
-                });
-                const data = await response.json();
-                if (data && data.data && data.data.user_info) {
-                  return {
-                    nickname: data.data.user_info.nickname,
-                    userId: data.data.user_info.sec_uid || data.data.user_info.uid
-                  };
-                }
-              } catch (e) {
-                console.log('API方法失败:', e);
-              }
-              
-              // 方法2: 从页面右上角用户信息获取
-              const avatarElement = document.querySelector('[data-e2e="user-avatar"]');
-              if (avatarElement) {
-                const parentElement = avatarElement.closest('div[class*="user"]');
-                if (parentElement) {
-                  const nicknameElement = parentElement.querySelector('[class*="nickname"]');
-                  if (nicknameElement) {
-                    return {
-                      nickname: nicknameElement.textContent.trim(),
-                      userId: null
-                    };
-                  }
-                }
-              }
-              
-              // 方法3: 从页面标题或meta标签获取
-              const metaTitle = document.querySelector('meta[property="og:title"]');
-              if (metaTitle && metaTitle.content) {
-                const match = metaTitle.content.match(/(.+)的抖音/);
-                if (match) {
-                  return {
-                    nickname: match[1],
-                    userId: null
-                  };
-                }
-              }
-              
-              // 方法4: 从页面任何包含用户信息的元素
-              const userLinks = document.querySelectorAll('a[href*="/user/"]');
-              for (const link of userLinks) {
-                const href = link.getAttribute('href');
-                const match = href.match(/\\/user\\/([^?]+)/);
-                if (match) {
-                  const nickname = link.textContent.trim();
-                  if (nickname && nickname.length > 0 && nickname.length < 50) {
-                    return {
-                      nickname: nickname,
-                      userId: match[1]
-                    };
-                  }
-                }
-              }
-              
-              // 方法5: 从cookie中的用户信息
-              const cookieMatch = document.cookie.match(/passport_auth_mix_state=([^;]+)/);
-              if (cookieMatch) {
-                try {
-                  const decoded = decodeURIComponent(cookieMatch[1]);
-                  const parsed = JSON.parse(decoded);
-                  if (parsed.nickname) {
-                    return {
-                      nickname: parsed.nickname,
-                      userId: parsed.uid || parsed.sec_uid
-                    };
-                  }
-                } catch (e) {}
-              }
-              
-              return null;
-            } catch (e) {
-              console.error('获取用户信息失败:', e);
-              return null;
-            }
-          })()
-        `, true)
-        
-        if (result && result.nickname) {
-          userInfo = result
-          console.log(`✅ 获取到用户信息: ${result.nickname} ${result.userId ? '(' + result.userId + ')' : ''}`)
+        userInfo = await resolveUserInfo(accountId, { waitMs: 1200 })
+        if (userInfo && userInfo.nickname) {
+          console.log(`✅ 获取到用户信息: ${userInfo.nickname} ${userInfo.userId ? '(' + userInfo.userId + ')' : ''}`)
         } else {
           console.log('⚠️ 未能获取到用户信息，将使用默认值')
         }
@@ -726,8 +882,32 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null } = {}) =>
       cookie: cookieString
     })
     
-    if (!json?.data || !Array.isArray(json.data)) {
-      return { success: false, error: '响应数据格式错误' }
+    // 详细日志
+    console.log(`[search-live-by-all] 响应状态:`, json ? 'OK' : 'NULL')
+    if (json) {
+      console.log(`[search-live-by-all] 响应结构:`, {
+        hasData: !!json.data,
+        dataType: Array.isArray(json.data) ? 'array' : typeof json.data,
+        dataLength: Array.isArray(json.data) ? json.data.length : 'N/A',
+        statusCode: json.status_code,
+        extra: json.extra
+      })
+    }
+    
+    if (!json) {
+      return { success: false, error: '响应为空' }
+    }
+    
+    // 检查错误码
+    if (json.status_code !== undefined && json.status_code !== 0) {
+      const errorMsg = json.extra?.error_msg || json.extra?.description || '未知错误'
+      console.error(`[search-live-by-all] API错误: ${json.status_code} - ${errorMsg}`)
+      return { success: false, error: `API错误(${json.status_code}): ${errorMsg}` }
+    }
+    
+    if (!json.data || !Array.isArray(json.data)) {
+      console.error(`[search-live-by-all] 数据格式错误:`, JSON.stringify(json).substring(0, 500))
+      return { success: false, error: '响应数据格式错误', detail: json }
     }
     
     // 筛选有福袋的直播间
@@ -742,6 +922,7 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null } = {}) =>
         onlineTotal: room.data.user_count
       }))
     
+    console.log(`[search-live-by-all] 找到 ${roomInfoList.length} 个有福袋的直播间`)
     return { success: true, roomInfoList }
   } catch (error) {
     console.error('搜索全部直播间失败:', error)
@@ -771,7 +952,7 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
       live_id: 1,
       enter_from: 'page_refresh',
       cookie_enabled: true,
-      count: count,  // 支持自定义count
+      count: count,
       offset: offset,
       partition: categoryId,
       partition_type: 4,
@@ -781,22 +962,68 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
       referer: 'https://live.douyin.com/'
     })
     
-    if (!json?.data?.data || !Array.isArray(json.data.data)) {
-      return { success: false, error: '响应数据格式错误' }
+    // 详细日志
+    console.log(`[search-live-by-category] 分类:${categoryId}, offset:${offset}`)
+    if (json) {
+      console.log(`[search-live-by-category] 响应结构:`, {
+        hasData: !!json.data,
+        hasDataData: !!json.data?.data,
+        dataType: Array.isArray(json.data?.data) ? 'array' : typeof json.data?.data,
+        dataLength: Array.isArray(json.data?.data) ? json.data.data.length : 'N/A',
+        statusCode: json.status_code,
+        extra: json.extra
+      })
     }
     
-    // 筛选有福袋的直播间
-    const roomInfoList = json.data.data
-      .filter(item => item?.room?.others?.web_enter_benefit_point_data?.has_ongoing_lottery)
-      .map(item => ({
-        webRid: item.web_rid,
-        roomId: item.room.id_str,
-        roomTitle: item.room.title,
-        authorNickname: item.room.owner.nickname,
-        authorSecUid: item.room.owner.sec_uid,
-        onlineTotal: item.room.user_count
-      }))
+    if (!json) {
+      return { success: false, error: '响应为空' }
+    }
     
+    // 检查错误码
+    if (json.status_code !== undefined && json.status_code !== 0) {
+      const errorMsg = json.extra?.error_msg || json.extra?.description || '未知错误'
+      console.error(`[search-live-by-category] API错误: ${json.status_code} - ${errorMsg}`)
+      return { success: false, error: `API错误(${json.status_code}): ${errorMsg}` }
+    }
+    
+    const rawList = Array.isArray(json.data?.data)
+      ? json.data.data
+      : Array.isArray(json.data?.room_list)
+        ? json.data.room_list
+        : Array.isArray(json.data?.list)
+          ? json.data.list
+          : []
+
+    if (rawList.length === 0) {
+      console.error(`[search-live-by-category] 数据格式错误:`, JSON.stringify(json).substring(0, 500))
+      return { success: false, error: '响应数据格式错误', detail: json }
+    }
+    
+    // 分类接口在不同账号/版本下字段有差异，这里做兼容解析
+    const roomInfoList = rawList
+      .map(item => {
+        const room = item?.room || item?.data || item
+        const benefit = room?.others?.web_enter_benefit_point_data || item?.others?.web_enter_benefit_point_data
+        const hasLottery = !!benefit && (
+          benefit.has_ongoing_lottery === true ||
+          benefit.has_ongoing_lottery === 1 ||
+          benefit.has_ongoing_lottery === '1' ||
+          benefit.has_ongoing_lottery === undefined
+        )
+
+        if (!hasLottery || !room?.id_str) return null
+        return {
+          webRid: item?.web_rid || item?.webRid || room?.web_rid || room?.id_str,
+          roomId: room.id_str,
+          roomTitle: room.title || '',
+          authorNickname: room?.owner?.nickname || '',
+          authorSecUid: room?.owner?.sec_uid || '',
+          onlineTotal: room?.user_count || 0
+        }
+      })
+      .filter(Boolean)
+    
+    console.log(`[search-live-by-category] 原始${rawList.length}个, 筛出${roomInfoList.length}个有福袋直播间`)
     return { success: true, roomInfoList }
   } catch (error) {
     console.error('搜索分类直播间失败:', error)
@@ -804,7 +1031,7 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
   }
 })
 
-ipcMain.handle('get-lottery-detail', async (event, { roomId, accountId }) => {
+ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, accountId }) => {
   try {
     // 获取cookie
     let cookieString = ''
@@ -820,15 +1047,36 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, accountId }) => {
       }
     }
 
-    const json = await douyinLiveRemote('/webcast/lottery/melon/lottery_info/', {
-      live_id: '1',
-      enter_from: 'link_share',
-      room_id: roomId,
-      query_from: '1'
-    }, {
-      cookie: cookieString,
-      referer: `https://live.douyin.com/${roomId}`
-    })
+    const referers = [webRid, roomId]
+      .filter(Boolean)
+      .map(v => `https://live.douyin.com/${v}`)
+    referers.push('https://live.douyin.com/')
+
+    let json = null
+    let lastError = null
+
+    for (const referer of referers) {
+      try {
+        json = await douyinLiveRemote('/webcast/lottery/melon/lottery_info/', {
+          live_id: '1',
+          enter_from: 'link_share',
+          room_id: roomId,
+          query_from: '1'
+        }, {
+          cookie: cookieString,
+          referer
+        })
+        if (json?.data?.lottery_info) break
+      } catch (error) {
+        lastError = error
+        // 短暂等待后重试，降低偶发风控页面导致的失败率
+        await new Promise(resolve => setTimeout(resolve, 250))
+      }
+    }
+
+    if (!json && lastError) {
+      throw lastError
+    }
 
     if (!json?.data?.lottery_info) {
       return { success: false, error: '福袋信息不存在' }
@@ -862,7 +1110,10 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, accountId }) => {
     return { success: true, lotteryDetail }
   } catch (error) {
     console.error('获取福袋详情失败:', error)
-    return { success: false, error: error.message }
+    const message = error?.code === 'NON_JSON_RESPONSE'
+      ? `接口返回非JSON内容(${error.statusCode || 'unknown'})`
+      : error.message
+    return { success: false, error: message, code: error?.code || 'UNKNOWN' }
   }
 })
 
