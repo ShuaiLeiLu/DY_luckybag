@@ -12,6 +12,9 @@ USE_BUILDX="${USE_BUILDX:-0}"
 PUSH_IMAGE="${PUSH_IMAGE:-0}"
 LOAD_IMAGE="${LOAD_IMAGE:-1}"
 NO_CACHE="${NO_CACHE:-0}"
+GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
+GOSUMDB="${GOSUMDB:-sum.golang.google.cn}"
+GOPRIVATE="${GOPRIVATE:-}"
 
 print_help() {
   cat <<'EOF'
@@ -28,14 +31,19 @@ print_help() {
   --push               构建后推送到仓库（自动启用 buildx）
   --no-load            buildx 模式下不加载到本地
   --no-cache           不使用构建缓存
+  --goproxy <url>      Go 代理，默认 https://goproxy.cn,direct
+  --gosumdb <value>    Go sumdb，默认 sum.golang.google.cn
+  --goprivate <value>  Go 私有模块域名（可选）
   -h, --help           显示帮助
 
 环境变量:
   IMAGE_NAME, IMAGE_TAG, PLATFORM, USE_BUILDX, PUSH_IMAGE, LOAD_IMAGE, NO_CACHE
+  GOPROXY, GOSUMDB, GOPRIVATE
 
 示例:
   bash ./scripts/build-pool-image.sh
   bash ./scripts/build-pool-image.sh --image your-registry/dy-pool-server --tag v1.0.0
+  bash ./scripts/build-pool-image.sh --goproxy https://goproxy.cn,direct
   bash ./scripts/build-pool-image.sh --platform linux/amd64,linux/arm64 --push --image your-registry/dy-pool-server --tag latest
 EOF
 }
@@ -72,6 +80,18 @@ while [[ $# -gt 0 ]]; do
       NO_CACHE=1
       shift
       ;;
+    --goproxy)
+      GOPROXY="$2"
+      shift 2
+      ;;
+    --gosumdb)
+      GOSUMDB="$2"
+      shift 2
+      ;;
+    --goprivate)
+      GOPRIVATE="$2"
+      shift 2
+      ;;
     -h|--help)
       print_help
       exit 0
@@ -91,12 +111,15 @@ fi
 
 IMAGE_REF="${IMAGE_NAME}:${IMAGE_TAG}"
 COMMON_ARGS=(--file "${DOCKERFILE_PATH}" --tag "${IMAGE_REF}")
+COMMON_ARGS+=(--build-arg "GOPROXY=${GOPROXY}" --build-arg "GOSUMDB=${GOSUMDB}" --build-arg "GOPRIVATE=${GOPRIVATE}")
 if [[ "${NO_CACHE}" == "1" ]]; then
   COMMON_ARGS+=(--no-cache)
 fi
 
 echo ">>> 镜像: ${IMAGE_REF}"
 echo ">>> 上下文: ${CONTEXT_DIR}"
+echo ">>> GOPROXY: ${GOPROXY}"
+echo ">>> GOSUMDB: ${GOSUMDB}"
 
 if [[ "${USE_BUILDX}" == "1" || "${PUSH_IMAGE}" == "1" ]]; then
   if ! docker buildx version >/dev/null 2>&1; then

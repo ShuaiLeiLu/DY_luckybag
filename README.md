@@ -161,6 +161,8 @@ npm run pool:server:go
 npm run pool:docker:build
 # 自定义镜像名与版本
 IMAGE_NAME=your-registry/dy-pool-server IMAGE_TAG=v1.0.0 npm run pool:docker:build
+# Go 依赖下载超时时，指定代理
+npm run pool:docker:build -- --goproxy https://goproxy.cn,direct
 ```
 
 一键本地部署（默认内存模式）：
@@ -169,6 +171,8 @@ IMAGE_NAME=your-registry/dy-pool-server IMAGE_TAG=v1.0.0 npm run pool:docker:bui
 npm run pool:docker:up
 # Redis 模式
 npm run pool:docker:up -- --redis
+# Go 依赖下载超时时，指定代理
+npm run pool:docker:up -- --goproxy https://goproxy.cn,direct
 ```
 
 配置文件默认读取 `pool-server-go/config.json`（或在 `pool-server-go` 目录运行时读取 `config.json`）。

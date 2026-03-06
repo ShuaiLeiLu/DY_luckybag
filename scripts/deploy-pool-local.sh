@@ -11,6 +11,9 @@ POOL_PORT="${POOL_PORT:-9090}"
 USE_REDIS="${USE_REDIS:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 NO_CLEAN="${NO_CLEAN:-0}"
+GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
+GOSUMDB="${GOSUMDB:-sum.golang.google.cn}"
+GOPRIVATE="${GOPRIVATE:-}"
 
 print_help() {
   cat <<'EOF'
@@ -26,14 +29,19 @@ print_help() {
   --image <name>       镜像名，默认 dy-pool-server
   --tag <tag>          镜像 tag，默认 latest
   --port <port>        对外端口，默认 9090
+  --goproxy <url>      Go 代理，默认 https://goproxy.cn,direct
+  --gosumdb <value>    Go sumdb，默认 sum.golang.google.cn
+  --goprivate <value>  Go 私有模块域名（可选）
   -h, --help           显示帮助
 
 环境变量:
   IMAGE_NAME, IMAGE_TAG, POOL_PORT, USE_REDIS, SKIP_BUILD, NO_CLEAN
+  GOPROXY, GOSUMDB, GOPRIVATE
 
 示例:
   bash ./scripts/deploy-pool-local.sh
   bash ./scripts/deploy-pool-local.sh --redis
+  bash ./scripts/deploy-pool-local.sh --goproxy https://goproxy.cn,direct
   bash ./scripts/deploy-pool-local.sh --image dy-pool-server --tag v1.0.1 --port 9091
 EOF
 }
@@ -62,6 +70,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --port)
       POOL_PORT="$2"
+      shift 2
+      ;;
+    --goproxy)
+      GOPROXY="$2"
+      shift 2
+      ;;
+    --gosumdb)
+      GOSUMDB="$2"
+      shift 2
+      ;;
+    --goprivate)
+      GOPRIVATE="$2"
       shift 2
       ;;
     -h|--help)
@@ -111,12 +131,18 @@ echo ">>> 部署目录: ${POOL_DIR}"
 echo ">>> 镜像: ${IMAGE_REF}"
 echo ">>> 模式: $([[ "${USE_REDIS}" == "1" ]] && echo "redis" || echo "memory")"
 echo ">>> 端口: ${POOL_PORT}"
+echo ">>> GOPROXY: ${GOPROXY}"
 
 if [[ "${SKIP_BUILD}" != "1" ]]; then
   if [[ ! -x "${BUILD_SCRIPT}" ]]; then
     chmod +x "${BUILD_SCRIPT}"
   fi
-  bash "${BUILD_SCRIPT}" --image "${IMAGE_NAME}" --tag "${IMAGE_TAG}"
+  bash "${BUILD_SCRIPT}" \
+    --image "${IMAGE_NAME}" \
+    --tag "${IMAGE_TAG}" \
+    --goproxy "${GOPROXY}" \
+    --gosumdb "${GOSUMDB}" \
+    --goprivate "${GOPRIVATE}"
 else
   echo ">>> 跳过镜像构建"
 fi

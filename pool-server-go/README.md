@@ -36,6 +36,12 @@ go run ./cmd/poolserver
 npm run pool:docker:build
 ```
 
+如果服务器访问 `proxy.golang.org` 超时，可指定 Go 代理：
+
+```bash
+npm run pool:docker:build -- --goproxy https://goproxy.cn,direct
+```
+
 默认会生成：
 
 - `dy-pool-server:latest`

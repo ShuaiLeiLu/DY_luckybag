@@ -4,9 +4,24 @@ WORKDIR /src
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+ARG GOPROXY=https://goproxy.cn,direct
+ARG GOSUMDB=sum.golang.google.cn
+ARG GOPRIVATE=
+
+ENV GOPROXY=${GOPROXY}
+ENV GOSUMDB=${GOSUMDB}
+ENV GOPRIVATE=${GOPRIVATE}
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN set -eux; \
+    n=0; \
+    until [ "$n" -ge 5 ]; do \
+      go mod download && break; \
+      n=$((n+1)); \
+      echo "go mod download failed, retry ${n}/5..."; \
+      sleep $((n * 2)); \
+    done; \
+    [ "$n" -lt 5 ]
 
 COPY cmd ./cmd
 COPY internal ./internal
