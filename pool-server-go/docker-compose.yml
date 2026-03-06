@@ -1,0 +1,16 @@
+services:
+  pool-server:
+    image: your-registry/dy-pool-server:latest
+    container_name: dy-pool-server
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    environment:
+      POOL_CONFIG_FILE: /app/config.json
+      # 如果需要强制走 Redis 模式，可打开以下变量：
+      # POOL_REDIS_ENABLED: "true"
+      # REDIS_ADDR: "redis:6379"
+      # REDIS_PASSWORD: ""
+      # REDIS_DB: "0"
+    volumes:
+      - ./config.json:/app/config.json:ro
