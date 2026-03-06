@@ -3,10 +3,14 @@
   "version": "1.0.0",
   "description": "抖音福袋自动参与助手",
   "main": "electron/main-browserview.js",
+  "engines": {
+    "node": ">=18.18.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "pool:server:go": "cd pool-server-go && sh -c 'if command -v go >/dev/null 2>&1; then exec go run ./cmd/poolserver; elif [ -x \"$HOME/.local/go/bin/go\" ]; then exec \"$HOME/.local/go/bin/go\" run ./cmd/poolserver; else echo \"go not found: install Go or add ~/.local/go/bin to PATH\"; exit 127; fi'",
+    "pool:docker:build": "bash ./scripts/build-pool-image.sh",
     "pool:dump": "node ./scripts/pool-dump.mjs",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
     "electron:build": "vite build && electron-builder",

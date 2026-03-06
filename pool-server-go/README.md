@@ -19,6 +19,80 @@ go run ./cmd/poolserver
 
 默认监听：`0.0.0.0:9090`
 
+## Docker 部署
+
+### 1) 构建镜像
+
+在项目根目录执行：
+
+```bash
+docker build -t your-registry/dy-pool-server:latest ./pool-server-go
+```
+
+多架构（例如 `amd64/arm64`）可用：
+
+```bash
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t your-registry/dy-pool-server:latest \
+  --push \
+  ./pool-server-go
+```
+
+### 2) 推送到镜像仓库（可选）
+
+```bash
+docker push your-registry/dy-pool-server:latest
+```
+
+### 3) 服务器运行（内存模式，无 Redis）
+
+先准备服务器配置文件（例如 `/opt/dy-pool/config.json`，`redis.enabled=false`）：
+
+```bash
+docker run -d \
+  --name dy-pool-server \
+  --restart unless-stopped \
+  -p 9090:9090 \
+  -v /opt/dy-pool/config.json:/app/config.json:ro \
+  -e POOL_CONFIG_FILE=/app/config.json \
+  your-registry/dy-pool-server:latest
+```
+
+### 4) 服务器运行（Redis 共享池模式）
+
+`config.json` 可以把 `redis.enabled=true` 并写入 Redis 地址，或直接用环境变量覆盖：
+
+```bash
+docker run -d \
+  --name dy-pool-server \
+  --restart unless-stopped \
+  -p 9090:9090 \
+  -v /opt/dy-pool/config.json:/app/config.json:ro \
+  -e POOL_CONFIG_FILE=/app/config.json \
+  -e POOL_REDIS_ENABLED=true \
+  -e REDIS_ADDR=10.0.0.8:6379 \
+  -e REDIS_PASSWORD=your-password \
+  -e REDIS_DB=0 \
+  your-registry/dy-pool-server:latest
+```
+
+### 5) 验证
+
+```bash
+curl http://127.0.0.1:9090/health
+curl "http://127.0.0.1:9090/pool/top?limit=50"
+```
+
+### 6) 使用 docker compose（可选）
+
+`pool-server-go/docker-compose.yml` 已提供模板：
+
+```bash
+cd pool-server-go
+docker compose up -d
+```
+
 ## 配置文件（推荐）
 
 默认会按以下顺序找配置文件：

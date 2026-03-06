@@ -1,0 +1,37 @@
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /src
+
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd ./cmd
+COPY internal ./internal
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" -o /out/poolserver ./cmd/poolserver
+
+FROM alpine:3.20
+
+RUN addgroup -S app && adduser -S -G app app \
+    && apk add --no-cache ca-certificates tzdata
+
+WORKDIR /app
+
+COPY --from=builder /out/poolserver /app/poolserver
+
+ENV POOL_SERVER_HOST=0.0.0.0
+ENV POOL_SERVER_PORT=9090
+ENV POOL_CONFIG_FILE=/app/config.json
+
+EXPOSE 9090
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+  CMD wget -q -T 2 -O - http://127.0.0.1:9090/health >/dev/null || exit 1
+
+USER app
+
+ENTRYPOINT ["/app/poolserver"]

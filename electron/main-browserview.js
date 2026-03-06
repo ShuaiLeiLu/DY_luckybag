@@ -1,4 +1,4 @@
-const { app, BrowserWindow, BrowserView, ipcMain, session, shell, safeStorage } = require('electron')
+const { app, BrowserWindow, BrowserView, ipcMain, session, safeStorage } = require('electron')
 const path = require('path')
 const https = require('https')
 const fs = require('fs')
@@ -17,6 +17,15 @@ const logger = createLogger('main-browserview', { defaultLevel: isDev ? 'info' :
 const tokenStorePath = isDev 
   ? path.join(__dirname, '..', 'tokens.json')  // 开发环境：项目根目录
   : path.join(path.dirname(app.getPath('exe')), 'tokens.json')  // 生产环境：exe所在目录
+const protocolGuardPartitions = new Set()
+
+function isBlockedExternalProtocol(url = '') {
+  return /^(bytedance|snssdk|douyinopensdk):\/\//i.test(String(url || '').trim())
+}
+
+function isHttpLikeUrl(url = '') {
+  return /^https?:\/\//i.test(String(url || '').trim())
+}
 
 logger.info(`Token存储路径: ${tokenStorePath}`)
 
@@ -543,30 +552,64 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
       partition: partition
     })
 
-    // 拦截深链协议，避免弹出“需要新应用打开 bytedance 链接”
-    const isBlockedProtocol = (url = '') => /^(bytedance|snssdk|douyinopensdk):\/\//i.test(String(url))
+    // session 级拦截：拒绝 openExternal，避免触发系统协议弹窗
+    if (!protocolGuardPartitions.has(partition)) {
+      protocolGuardPartitions.add(partition)
+      accountSession.setPermissionCheckHandler((webContents, permission) => {
+        if (permission === 'openExternal') {
+          return false
+        }
+        return true
+      })
+      accountSession.setPermissionRequestHandler((webContents, permission, callback) => {
+        if (permission === 'openExternal') {
+          callback(false)
+          return
+        }
+        callback(true)
+      })
+      accountSession.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => {
+        if (isBlockedExternalProtocol(details?.url)) {
+          logger.info(`[${accountId}] session 已拦截外部协议请求: ${details.url}`)
+          callback({ cancel: true })
+          return
+        }
+        callback({ cancel: false })
+      })
+    }
+
+    // webContents 级拦截：窗口打开与跳转都禁止外部协议
     browserWindow.webContents.setWindowOpenHandler(({ url }) => {
-      if (isBlockedProtocol(url)) {
+      if (isBlockedExternalProtocol(url)) {
         logger.info(`[${accountId}] 已拦截外部协议: ${url}`)
         return { action: 'deny' }
       }
       // http/https 正常在当前窗口打开
-      if (/^https?:\/\//i.test(String(url))) {
+      if (isHttpLikeUrl(url)) {
         browserWindow.loadURL(url).catch((e) => {
           logger.debug(`[${accountId}] 外链当前窗打开失败: ${url}`, e)
         })
       } else {
-        // 其他协议不处理，避免系统弹窗
-        try { shell.beep() } catch (e) {
-          logger.debug(`[${accountId}] shell.beep 调用失败`, e)
-        }
+        logger.info(`[${accountId}] 已阻止未知协议打开: ${url}`)
       }
       return { action: 'deny' }
     })
     browserWindow.webContents.on('will-navigate', (e, url) => {
-      if (isBlockedProtocol(url)) {
+      if (isBlockedExternalProtocol(url)) {
         e.preventDefault()
         logger.info(`[${accountId}] 已阻止页面跳转到外部协议: ${url}`)
+      }
+    })
+    browserWindow.webContents.on('will-frame-navigate', (e, url) => {
+      if (isBlockedExternalProtocol(url)) {
+        e.preventDefault()
+        logger.info(`[${accountId}] 已阻止 frame 外部协议跳转: ${url}`)
+      }
+    })
+    browserWindow.webContents.on('will-redirect', (e, url) => {
+      if (isBlockedExternalProtocol(url)) {
+        e.preventDefault()
+        logger.info(`[${accountId}] 已阻止外部协议重定向: ${url}`)
       }
     })
     
@@ -675,6 +718,9 @@ ipcMain.handle('navigate-to', async (event, { accountId, url }) => {
     const browserData = browserViews.get(accountId)
     if (!browserData) {
       throw new Error('浏览器实例不存在')
+    }
+    if (isBlockedExternalProtocol(url) || !isHttpLikeUrl(url)) {
+      throw new Error(`禁止导航到外部协议: ${url}`)
     }
     
     await browserData.window.loadURL(url)
