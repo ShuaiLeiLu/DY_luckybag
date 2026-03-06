@@ -936,7 +936,7 @@ ipcMain.handle('set-cookies', async (event, { accountId, tokenInfo }) => {
 // ==================== 福袋收集 ====================
 
 // 搜索直播间-【全部】
-ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCount = 24 } = {}) => {
+ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCount = 24, maxTime = null } = {}) => {
   try {
     // 获取cookie
     let cookieString = ''
@@ -953,7 +953,7 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCou
     }
     
     // 完全按照原项目的参数
-    const json = await douyinLiveRemote('/webcast/feed/', {
+    const params = {
       live_id: 1,
       enter_from: 'page_refresh',
       cookie_enabled: true,
@@ -967,7 +967,12 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCou
       action_type: 'loadmore',
       enter_source: 'web_homepage_hot_web_live_card',
       source_key: 'web_homepage_hot_web_live_card'
-    }, {
+    }
+    if (Number(maxTime) > 0) {
+      params.max_time = String(Number(maxTime))
+    }
+
+    const json = await douyinLiveRemote('/webcast/feed/', params, {
       cookie: cookieString
     })
     
@@ -999,14 +1004,9 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCou
       return { success: false, error: '响应数据格式错误', detail: json }
     }
     
-    // 筛选有福袋的直播间
+    // 对齐超人：仅筛选明确标记有福袋的直播间
     const roomInfoList = json.data
-      .filter(item => {
-        const benefit = item?.data?.others?.web_enter_benefit_point_data
-        if (!benefit) return true // 标记缺失时也纳入，后续由详情接口复核
-        const flag = benefit.has_ongoing_lottery
-        return flag !== false && flag !== 0 && flag !== '0'
-      })
+      .filter(room => Boolean(room?.data?.others?.web_enter_benefit_point_data?.has_ongoing_lottery))
       .map(room => ({
         webRid: room.web_rid,
         roomId: room.data.id_str,
@@ -1016,8 +1016,17 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCou
         onlineTotal: room.data.user_count
       }))
     
+    const hasMore = Boolean(json?.extra?.has_more)
+    const nextMaxTime = Number(json?.extra?.max_time || 0)
+
     logger.info(`[search-live-by-all] 找到 ${roomInfoList.length} 个有福袋的直播间`)
-    return { success: true, roomInfoList }
+    return {
+      success: true,
+      roomInfoList,
+      hasMore,
+      nextMaxTime: nextMaxTime > 0 ? nextMaxTime : null,
+      rawCount: Array.isArray(json?.data) ? json.data.length : 0
+    }
   } catch (error) {
     logger.error('搜索全部直播间失败:', error)
     return { success: false, error: error.message }
@@ -1089,22 +1098,24 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
           : []
 
     if (rawList.length === 0) {
-      logger.error(`[search-live-by-category] 数据格式错误:`, JSON.stringify(json).substring(0, 500))
-      return { success: false, error: '响应数据格式错误', detail: json }
+      const nextOffset = Math.max(0, Number(offset) || 0) + Math.max(0, Number(count) || 15)
+      return {
+        success: true,
+        roomInfoList: [],
+        rawCount: 0,
+        hasMore: false,
+        nextOffset
+      }
     }
     
-    // 分类接口在不同账号/版本下字段有差异，这里做兼容解析
+    // 分类接口字段做兼容解析，仅筛选明确有福袋标记的直播间
     const roomInfoList = rawList
       .map(item => {
         const room = item?.room || item?.data || item
-        const benefit = room?.others?.web_enter_benefit_point_data || item?.others?.web_enter_benefit_point_data
-        const hasLottery = !benefit || (
-          benefit.has_ongoing_lottery === true ||
-          benefit.has_ongoing_lottery === 1 ||
-          benefit.has_ongoing_lottery === '1' ||
-          benefit.has_ongoing_lottery === undefined
+        const hasLottery = Boolean(
+          room?.others?.web_enter_benefit_point_data?.has_ongoing_lottery ||
+          item?.others?.web_enter_benefit_point_data?.has_ongoing_lottery
         )
-
         if (!hasLottery || !room?.id_str) return null
         return {
           webRid: item?.web_rid || item?.webRid || room?.web_rid || room?.id_str,
@@ -1117,8 +1128,21 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
       })
       .filter(Boolean)
     
+    const nextOffset = Math.max(0, Number(offset) || 0) + Math.max(0, Number(count) || 15)
+    const hasMore = Boolean(
+      json?.data?.has_more ??
+      json?.extra?.has_more ??
+      (rawList.length >= Math.max(1, Number(count) || 15))
+    )
+
     logger.info(`[search-live-by-category] 原始${rawList.length}个, 筛出${roomInfoList.length}个有福袋直播间`)
-    return { success: true, roomInfoList }
+    return {
+      success: true,
+      roomInfoList,
+      rawCount: rawList.length,
+      hasMore,
+      nextOffset
+    }
   } catch (error) {
     logger.error('搜索分类直播间失败:', error)
     return { success: false, error: error.message }

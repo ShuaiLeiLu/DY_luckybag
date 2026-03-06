@@ -46,7 +46,7 @@
 </template>
 
 <script setup>
-import { ref, h, computed, onMounted, onUnmounted } from 'vue'
+import { ref, h, computed, watch, onMounted, onUnmounted } from 'vue'
 import { 
   NButton, NTag, NConfigProvider, NIcon
 } from 'naive-ui'
@@ -123,6 +123,9 @@ const mergedLotteries = computed(() => {
   })
 })
 
+const lotteryManager = new LotteryManager()
+const initialPoolServerConfig = lotteryManager.getPoolServerConfig()
+
 const config = ref({
   minProbability: 0.01,
   stayDuration: 5,
@@ -136,14 +139,17 @@ const config = ref({
   singleAccountDuration: { enabled: true, value: 3 },
   filterOnline: { enabled: false, value: 1000 },
   randomInteraction: { enabled: true },
-  closeLiveStream: { enabled: true }
+  closeLiveStream: { enabled: true },
+  poolServer: {
+    enabled: initialPoolServerConfig.enabled !== false,
+    url: initialPoolServerConfig.url || ''
+  }
 })
 
 const accounts = ref([])
 const logs = ref([])
 const lotteriesByAccount = ref({})
 const lotteryHistory = ref([])
-const lotteryManager = new LotteryManager()
 
 function getTodayKey() {
   const now = new Date()
@@ -201,8 +207,8 @@ const handleResize = () => {
 
 onMounted(async () => {
   window.addEventListener('resize', handleResize)
-  lotteryManager.setCategoryList(lotteryManager.getAllCategories())
-  lotteryManager.setScanConfig({ countPerPage: 20, pagesPerCategory: 12, allCount: 24 })
+  lotteryManager.setScanConfig({ countPerPage: 15, pagesPerCategory: 12, allCount: 24 })
+  lotteryManager.setPoolServerConfig(config.value.poolServer, { silent: true })
   await loadAllAccounts()
   if (ipcRenderer) {
     // 监听浏览器窗口关闭事件
@@ -248,6 +254,16 @@ onUnmounted(() => {
   })
   ipcUnsubscribers.length = 0
 })
+
+watch(
+  () => [config.value.poolServer?.enabled, config.value.poolServer?.url],
+  ([enabled, url]) => {
+    lotteryManager.setPoolServerConfig({
+      enabled: enabled !== false,
+      url: url || ''
+    }, { silent: true })
+  }
+)
 
 async function loadAllAccounts() {
   if (!ipcRenderer) return
@@ -449,6 +465,8 @@ function toggleAccount(account) {
 
 async function startAccountScanning(account) {
   if (!account.token || !ipcRenderer) return
+  if (account._starting) return
+  account._starting = true
   try {
     const lr = await ipcRenderer.invoke('launch-browser', account.id)
     if (!lr.success) return
@@ -474,6 +492,7 @@ async function startAccountScanning(account) {
       onLog: (m, t) => addLog(m, t)
     })
   } catch (e) { addLog(`启动失败: ${e.message}`, 'error') }
+  finally { account._starting = false }
 }
 
 async function removeAccount(id) {

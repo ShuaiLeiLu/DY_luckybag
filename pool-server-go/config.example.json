@@ -1,0 +1,27 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 9090,
+    "maxBodyBytes": 6291456
+  },
+  "pool": {
+    "topCacheMax": 2500,
+    "ttlGraceSec": 8,
+    "maxBatchSize": 1000,
+    "topRefreshMS": 400,
+    "expireSweepMS": 500,
+    "shards": 64
+  },
+  "redis": {
+    "enabled": false,
+    "addr": "127.0.0.1:6379",
+    "password": "",
+    "db": 0,
+    "prefix": "lottery_pool",
+    "poolSize": 120,
+    "minIdleConns": 16,
+    "dialTimeoutMS": 2000,
+    "readTimeoutMS": 3000,
+    "writeTimeoutMS": 3000
+  }
+}
