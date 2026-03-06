@@ -150,6 +150,7 @@ const accounts = ref([])
 const logs = ref([])
 const lotteriesByAccount = ref({})
 const lotteryHistory = ref([])
+const pendingCreateAccountIds = new Set()
 
 function getTodayKey() {
   const now = new Date()
@@ -399,32 +400,69 @@ function appendLotteryHistory(record) {
   lotteryHistory.value = [normalized, ...lotteryHistory.value].slice(0, 300)
 }
 
-function addAccount() {
+function parseAccountSeq(accountId) {
+  const m = String(accountId || '').match(/account_(\d+)/)
+  return m ? Number(m[1]) : 0
+}
+
+function getNextAccountSeq() {
   let max = 0
-  accounts.value.forEach(a => { const m = a.id.match(/account_(\d+)/); if(m) max = Math.max(max, parseInt(m[1])) })
-  const next = max + 1
+  accounts.value.forEach((a) => {
+    max = Math.max(max, parseAccountSeq(a.id))
+  })
+  pendingCreateAccountIds.forEach((id) => {
+    max = Math.max(max, parseAccountSeq(id))
+  })
+  return max + 1
+}
+
+function addAccount() {
+  const next = getNextAccountSeq()
+  const accountId = `account_${next}`
+  if (pendingCreateAccountIds.has(accountId)) return
+  pendingCreateAccountIds.add(accountId)
+
   const acc = createAccountModel({
-    id: `account_${next}`,
+    id: accountId,
     nickname: `账号${next}`,
     state: 'waiting',
     token: null
   })
-  accounts.value.push(acc)
-  addLog(`账号 ${acc.nickname} 已添加，请扫码登录`)
+  addLog(`请为 ${acc.nickname} 扫码登录，登录成功后才会加入账号列表`)
   startAccountWithLogin(acc)
 }
 
 async function startAccountWithLogin(account) {
-  if (!ipcRenderer) return
+  if (!ipcRenderer) {
+    pendingCreateAccountIds.delete(account.id)
+    return
+  }
+
+  let timer = null
+  let timeoutTimer = null
+  const clearLoginWatchers = () => {
+    if (timer) {
+      clearInterval(timer)
+      timer = null
+    }
+    if (timeoutTimer) {
+      clearTimeout(timeoutTimer)
+      timeoutTimer = null
+    }
+  }
+
   try {
     const res = await ipcRenderer.invoke('launch-browser', account.id)
-    if (!res.success) return addLog(`启动失败: ${res.error}`, 'error')
+    if (!res.success) {
+      pendingCreateAccountIds.delete(account.id)
+      return addLog(`启动失败: ${res.error}`, 'error')
+    }
     account.state = 'opened'
     await ipcRenderer.invoke('navigate-to', { accountId: account.id, url: 'https://www.douyin.com' })
-    const timer = setInterval(async () => {
+    timer = setInterval(async () => {
       const tr = await ipcRenderer.invoke('get-login-token', account.id)
       if (tr.success && tr.isLoggedIn) {
-        clearInterval(timer)
+        clearLoginWatchers()
         const info = await resolveUserInfoWithRetry(account.id, tr.userInfo)
         const fallbackInfo = {
           nickname: account.nickname,
@@ -437,10 +475,25 @@ async function startAccountWithLogin(account) {
 
         const finalNickname = normalizeNickname(info?.nickname || saveResult.savedInfo?.nickname || account.nickname)
         const finalUserId = info?.userId || saveResult.savedInfo?.userId || account.userId || account.id
-        account.nickname = finalNickname
-        account.userId = finalUserId
-        account.token = tr.tokenInfo.sessionid || tr.tokenInfo.sessionid_ss
-        account.state = 'waiting'
+        const nextState = {
+          nickname: finalNickname,
+          userId: finalUserId,
+          token: tr.tokenInfo.sessionid || tr.tokenInfo.sessionid_ss,
+          state: 'waiting'
+        }
+        const index = accounts.value.findIndex(a => a.id === account.id)
+        if (index >= 0) {
+          accounts.value[index] = {
+            ...accounts.value[index],
+            ...nextState
+          }
+        } else {
+          accounts.value.push(createAccountModel({
+            ...account,
+            ...nextState
+          }))
+        }
+        pendingCreateAccountIds.delete(account.id)
 
         if (saveResult.success) {
           addLog(`✅ [${finalNickname}] 登录成功`, 'success')
@@ -449,8 +502,18 @@ async function startAccountWithLogin(account) {
         }
       }
     }, 3000)
-    setTimeout(() => clearInterval(timer), 60000)
+    timeoutTimer = setTimeout(() => {
+      if (!pendingCreateAccountIds.has(account.id)) return
+      clearLoginWatchers()
+      pendingCreateAccountIds.delete(account.id)
+      addLog(`⚠️ [${account.nickname}] 60秒内未检测到登录成功，未加入账号列表`, 'warning')
+    }, 60000)
   } catch (e) { addLog(`错误: ${e.message}`, 'error') }
+  finally {
+    if (!pendingCreateAccountIds.has(account.id)) {
+      clearLoginWatchers()
+    }
+  }
 }
 
 function toggleAccount(account) {
