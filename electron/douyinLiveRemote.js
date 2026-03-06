@@ -587,8 +587,8 @@ async function douyinLiveRemote(uri, params, headers, method = 'GET') {
   const h = { ...commonHeaders, ...headers }
   const cookieObj = cookieToObj(h.cookie || '')
 
-  // 抖音风控下常出现 444 + HTML，增加短退避重试
-  const maxAttempts = uri.includes('/webcast/lottery/melon/lottery_info/') ? 4 : 3
+  // 抖音风控下常出现 444 + HTML。详情接口重试过多会放大风控，控制为2次。
+  const maxAttempts = uri.includes('/webcast/lottery/melon/lottery_info/') ? 2 : 3
   let lastError = null
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -615,7 +615,8 @@ async function douyinLiveRemote(uri, params, headers, method = 'GET') {
         console.log(`[a_bogus] ${a_bogus.substring(0, 30)}...`)
       }
 
-      const res = await requestJson(url, reqHeaders, 10000, method)
+      const timeoutMs = uri.includes('/webcast/lottery/melon/lottery_info/') ? 4500 : 10000
+      const res = await requestJson(url, reqHeaders, timeoutMs, method)
       return res.json
     } catch (error) {
       lastError = error
@@ -636,7 +637,7 @@ async function douyinLiveRemote(uri, params, headers, method = 'GET') {
         console.log(`[API重试] ${uri} code=${code || 'unknown'} status=${statusCode || 'unknown'} attempt=${attempt + 1}`)
       }
 
-      const backoffMs = 180 + attempt * 220 + Math.floor(Math.random() * 160)
+      const backoffMs = 350 + attempt * 450 + Math.floor(Math.random() * 220)
       await sleep(backoffMs)
     }
   }

@@ -139,10 +139,26 @@ A: 当前池逻辑会过滤不满足条件的福袋，且会员/粉丝团限制�
 
 - `npm run dev`：仅前端 Vite
 - `npm run build`：仅前端构建
+- `npm run pool:server:go`：启动 Go 高并发福袋筛选服务
 - `npm run electron:dev`：Electron + Vite 联调
 - `npm run electron:build`：Electron 打包
 - `npm run electron:build:win`：Windows 打包
 - `npm run electron:build:mac`：macOS 打包
+
+## 筛选服务（可选）
+
+当你需要多节点采集聚合时，可以单独启动筛选服务：
+
+```bash
+npm run pool:server:go
+```
+
+配置文件默认读取 `pool-server-go/config.json`（或在 `pool-server-go` 目录运行时读取 `config.json`）。
+本地无 Redis 时保持 `redis.enabled=false`；多客户端共享数据时把 `redis.enabled=true` 并填远端 Redis 地址。
+
+完整接口说明见：
+
+- `pool-server-go/README.md`
 
 ## 日志级别开关
 

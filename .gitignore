@@ -30,6 +30,7 @@ lerna-debug.log*
 tokens.json
 *.token
 *.session
+pool-server-go/config.json
 
 # 允许示例文件
 !tokens.example.json
