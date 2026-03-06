@@ -165,18 +165,18 @@ IMAGE_NAME=your-registry/dy-pool-server IMAGE_TAG=v1.0.0 npm run pool:docker:bui
 npm run pool:docker:build -- --goproxy https://goproxy.cn,direct
 ```
 
-一键本地部署（默认内存模式）：
+一键本地部署（默认 Redis 模式，读取 `pool-server-go/config.json`）：
 
 ```bash
 npm run pool:docker:up
-# Redis 模式
+# 使用内置 Redis 容器模式
 npm run pool:docker:up -- --redis
 # Go 依赖下载超时时，指定代理
 npm run pool:docker:up -- --goproxy https://goproxy.cn,direct
 ```
 
 配置文件默认读取 `pool-server-go/config.json`（或在 `pool-server-go` 目录运行时读取 `config.json`）。
-本地无 Redis 时保持 `redis.enabled=false`；多客户端共享数据时把 `redis.enabled=true` 并填远端 Redis 地址。
+默认建议 `redis.enabled=true` 并配置远端 Redis 地址用于多客户端共享池。
 
 完整接口说明见：
 

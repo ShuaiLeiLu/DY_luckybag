@@ -2,7 +2,12 @@ const DEFAULT_POOL_SERVER_URL = 'http://127.0.0.1:9090'
 const DEFAULT_TIMEOUT_MS = 3200
 
 export function normalizePoolServerUrl(text) {
-  return String(text || '').trim().replace(/\/+$/, '')
+  let url = String(text || '').trim().replace(/\/+$/, '')
+  if (!url) return ''
+  if (!/^https?:\/\//i.test(url)) {
+    url = `http://${url}`
+  }
+  return url
 }
 
 function isObject(v) {

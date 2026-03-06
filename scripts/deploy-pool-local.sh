@@ -17,13 +17,13 @@ GOPRIVATE="${GOPRIVATE:-}"
 
 print_help() {
   cat <<'EOF'
-一键部署福袋筛选服务（本地构建 + 本机 docker 启动）
+一键部署福袋筛选服务（本地构建 + 本机 docker 启动，默认 Redis 模式）
 
 用法:
   bash ./scripts/deploy-pool-local.sh [选项]
 
 选项:
-  --redis              使用 Redis 共享池 compose（docker-compose.redis.yml）
+  --redis              使用内置 Redis compose（docker-compose.redis.yml）
   --skip-build         跳过镜像构建，直接启动容器
   --no-clean           启动前不清理旧容器
   --image <name>       镜像名，默认 dy-pool-server
@@ -129,7 +129,7 @@ IMAGE_REF="${IMAGE_NAME}:${IMAGE_TAG}"
 
 echo ">>> 部署目录: ${POOL_DIR}"
 echo ">>> 镜像: ${IMAGE_REF}"
-echo ">>> 模式: $([[ "${USE_REDIS}" == "1" ]] && echo "redis" || echo "memory")"
+echo ">>> 模式: $([[ "${USE_REDIS}" == "1" ]] && echo "redis(内置容器)" || echo "redis(外部/配置文件)")"
 echo ">>> 端口: ${POOL_PORT}"
 echo ">>> GOPROXY: ${GOPROXY}"
 

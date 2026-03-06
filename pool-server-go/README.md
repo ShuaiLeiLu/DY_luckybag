@@ -63,21 +63,26 @@ cd /opt/dy-pool
 把以下文件放到服务器 `/opt/dy-pool`：
 
 - `config.json`（可从 `config.example.json` 复制修改）
-- `docker-compose.yml`（内存模式模板）
+- `docker-compose.yml`（默认 Redis 模式模板，连外部 Redis）
 - 或 `docker-compose.redis.yml`（内置 Redis 模式模板）
 
-### 3) 配置文件（先内存模式跑通）
+### 3) 配置文件（默认 Redis）
 
 `config.json` 最小示例：
 
 ```json
 {
   "server": { "host": "0.0.0.0", "port": 9090 },
-  "redis": { "enabled": false }
+  "redis": {
+    "enabled": true,
+    "addr": "你的Redis地址:6379",
+    "password": "",
+    "db": 0
+  }
 }
 ```
 
-### 4) 启动服务（内存模式）
+### 4) 启动服务（默认 Redis）
 
 方式 A：`docker run`
 
@@ -177,7 +182,7 @@ docker run -d --name dy-pool-server --restart unless-stopped -p 9090:9090 \
 
 项目已提供 `config.json` 和 `config.example.json`。
 
-### 本地无 Redis（单机内存模式）
+### 本地无 Redis（可选，不推荐）
 
 保持：
 

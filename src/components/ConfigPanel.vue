@@ -71,7 +71,7 @@
             :disabled="!config.poolServer.enabled"
             size="small"
             clearable
-            placeholder="https://pool.example.com:9090"
+            placeholder="http://pool.example.com:9090"
           />
         </div>
       </div>
