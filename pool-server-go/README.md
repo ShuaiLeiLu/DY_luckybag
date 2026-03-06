@@ -19,35 +19,61 @@ go run ./cmd/poolserver
 
 默认监听：`0.0.0.0:9090`
 
-## Docker 部署
+## Docker 部署教程（完整）
 
-### 1) 构建镜像
+### 0) 前置条件
 
-在项目根目录执行：
+- Linux 服务器（Ubuntu/CentOS 均可）
+- Docker 24+
+- Docker Compose 插件（`docker compose version` 可用）
+- 无需镜像仓库（本教程只讲本地构建+本机部署）
 
-```bash
-docker build -t your-registry/dy-pool-server:latest ./pool-server-go
-```
+### 1) 本地一键构建镜像
 
-多架构（例如 `amd64/arm64`）可用：
-
-```bash
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  -t your-registry/dy-pool-server:latest \
-  --push \
-  ./pool-server-go
-```
-
-### 2) 推送到镜像仓库（可选）
+从 GitHub 拉代码后，在项目根目录执行：
 
 ```bash
-docker push your-registry/dy-pool-server:latest
+npm run pool:docker:build
 ```
 
-### 3) 服务器运行（内存模式，无 Redis）
+默认会生成：
 
-先准备服务器配置文件（例如 `/opt/dy-pool/config.json`，`redis.enabled=false`）：
+- `dy-pool-server:latest`
+
+自定义本地镜像名和版本：
+
+```bash
+IMAGE_NAME=dy-pool-server IMAGE_TAG=v1.0.0 npm run pool:docker:build
+```
+
+### 2) 服务器准备目录
+
+```bash
+sudo mkdir -p /opt/dy-pool
+sudo chown -R $USER:$USER /opt/dy-pool
+cd /opt/dy-pool
+```
+
+把以下文件放到服务器 `/opt/dy-pool`：
+
+- `config.json`（可从 `config.example.json` 复制修改）
+- `docker-compose.yml`（内存模式模板）
+- 或 `docker-compose.redis.yml`（内置 Redis 模式模板）
+
+### 3) 配置文件（先内存模式跑通）
+
+`config.json` 最小示例：
+
+```json
+{
+  "server": { "host": "0.0.0.0", "port": 9090 },
+  "redis": { "enabled": false }
+}
+```
+
+### 4) 启动服务（内存模式）
+
+方式 A：`docker run`
 
 ```bash
 docker run -d \
@@ -56,12 +82,24 @@ docker run -d \
   -p 9090:9090 \
   -v /opt/dy-pool/config.json:/app/config.json:ro \
   -e POOL_CONFIG_FILE=/app/config.json \
-  your-registry/dy-pool-server:latest
+  dy-pool-server:latest
 ```
 
-### 4) 服务器运行（Redis 共享池模式）
+方式 B：`docker compose`（推荐）
 
-`config.json` 可以把 `redis.enabled=true` 并写入 Redis 地址，或直接用环境变量覆盖：
+```bash
+cd /opt/dy-pool
+POOL_IMAGE=dy-pool-server:latest docker compose -f docker-compose.yml up -d
+```
+
+### 5) 启动服务（Redis 共享池模式）
+
+如果你有多个客户端节点，建议启用 Redis。
+
+方案 A：连接外部 Redis（推荐生产）
+
+- `config.json` 中 `redis.enabled=true` 并填写 `addr/password/db`
+- 或通过环境变量覆盖：
 
 ```bash
 docker run -d \
@@ -74,24 +112,54 @@ docker run -d \
   -e REDIS_ADDR=10.0.0.8:6379 \
   -e REDIS_PASSWORD=your-password \
   -e REDIS_DB=0 \
-  your-registry/dy-pool-server:latest
+  dy-pool-server:latest
 ```
 
-### 5) 验证
+方案 B：服务器内置 Redis（快速验证）
+
+```bash
+cd /opt/dy-pool
+POOL_IMAGE=dy-pool-server:latest docker compose -f docker-compose.redis.yml up -d
+```
+
+### 6) 健康检查与日志
 
 ```bash
 curl http://127.0.0.1:9090/health
+curl http://127.0.0.1:9090/stats
 curl "http://127.0.0.1:9090/pool/top?limit=50"
+
+docker logs -f dy-pool-server
 ```
 
-### 6) 使用 docker compose（可选）
+### 7) 客户端接入
 
-`pool-server-go/docker-compose.yml` 已提供模板：
+前端配置面板把“筛选服务地址”设置成：
+
+- `http://你的服务器IP:9090`
+- 或域名：`https://pool.example.com`（若你前面挂了反向代理）
+
+### 8) 升级与回滚
+
+升级：
 
 ```bash
-cd pool-server-go
-docker compose up -d
+IMAGE_NAME=dy-pool-server IMAGE_TAG=v1.0.1 npm run pool:docker:build
+docker stop dy-pool-server && docker rm dy-pool-server
+docker run -d --name dy-pool-server --restart unless-stopped -p 9090:9090 \
+  -v /opt/dy-pool/config.json:/app/config.json:ro \
+  -e POOL_CONFIG_FILE=/app/config.json \
+  dy-pool-server:v1.0.1
 ```
+
+回滚就是把 tag 换回旧版本重启。
+
+### 9) 常见问题
+
+- `connection refused`：确认服务器安全组/防火墙已放行 `9090`。
+- `Redis connect fail`：检查 `REDIS_ADDR`、密码、白名单、端口。
+- `/pool/top` 长期为空：说明采集端还未上报有效候选，先看 `/stats` 的 `totalAccepted` 是否增长。
+- `404/跨域`：服务已内置 CORS，若走 Nginx 反代，确认转发到 `9090`。
 
 ## 配置文件（推荐）
 

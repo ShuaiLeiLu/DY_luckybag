@@ -1,10 +1,10 @@
 services:
   pool-server:
-    image: your-registry/dy-pool-server:latest
+    image: ${POOL_IMAGE:-dy-pool-server:latest}
     container_name: dy-pool-server
     restart: unless-stopped
     ports:
-      - "9090:9090"
+      - "${POOL_PORT:-9090}:9090"
     environment:
       POOL_CONFIG_FILE: /app/config.json
       # 如果需要强制走 Redis 模式，可打开以下变量：
