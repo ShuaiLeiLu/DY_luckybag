@@ -141,6 +141,7 @@ A: 当前池逻辑会过滤不满足条件的福袋，且会员/粉丝团限制�
 - `npm run build`：仅前端构建
 - `npm run pool:server:go`：启动 Go 高并发福袋筛选服务
 - `npm run pool:docker:build`：一键构建筛选服务 Docker 镜像（默认 `dy-pool-server:latest`）
+- `npm run pool:docker:up`：一键本地部署筛选服务（构建镜像 + 启动容器）
 - `npm run electron:dev`：Electron + Vite 联调
 - `npm run electron:build`：Electron 打包
 - `npm run electron:build:win`：Windows 打包
@@ -160,6 +161,14 @@ npm run pool:server:go
 npm run pool:docker:build
 # 自定义镜像名与版本
 IMAGE_NAME=your-registry/dy-pool-server IMAGE_TAG=v1.0.0 npm run pool:docker:build
+```
+
+一键本地部署（默认内存模式）：
+
+```bash
+npm run pool:docker:up
+# Redis 模式
+npm run pool:docker:up -- --redis
 ```
 
 配置文件默认读取 `pool-server-go/config.json`（或在 `pool-server-go` 目录运行时读取 `config.json`）。
