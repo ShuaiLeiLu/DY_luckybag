@@ -3,46 +3,6 @@
     <div class="sidebar-content">
       <!-- 参与规则分组 -->
       <div class="config-group">
-        <div class="group-title">
-          <n-icon size="16"><flash-outline /></n-icon>
-          <span>参与规则</span>
-        </div>
-        <div class="config-item">
-          <div class="item-header">
-            <div class="item-info">
-              <span class="item-label">概率筛选</span>
-              <span class="item-desc">仅参与高胜率福袋</span>
-            </div>
-            <n-switch v-model:value="config.hitRate.enabled" size="small" />
-          </div>
-          <n-input-number 
-            v-model:value="config.hitRate.value" 
-            :min="0.01" :max="1" :step="0.01"
-            :disabled="!config.hitRate.enabled"
-            size="small"
-            placeholder="0.1"
-          >
-            <template #prefix><span class="input-prefix">概率</span></template>
-          </n-input-number>
-        </div>
-        <div class="config-item">
-          <div class="item-header">
-            <div class="item-info">
-              <span class="item-label">二次复检</span>
-              <span class="item-desc">参与前再次确认</span>
-            </div>
-            <n-switch v-model:value="config.secondInspect.enabled" size="small" />
-          </div>
-          <n-input-number 
-            v-model:value="config.secondInspect.value" 
-            :min="0.01" :max="1" :step="0.01"
-            :disabled="!config.secondInspect.enabled"
-            size="small"
-            placeholder="0.05"
-          >
-            <template #prefix><span class="input-prefix">概率</span></template>
-          </n-input-number>
-        </div>
         <div class="config-item">
           <div class="item-header">
             <div class="item-info">
@@ -67,12 +27,36 @@
             <n-switch v-model:value="config.filterFanClub.enabled" size="small" />
           </div>
         </div>
+        <div class="config-item">
+          <div class="item-header card-style">
+            <div style="display: flex; align-items: center; gap: 8px">
+              <n-icon color="#0f766e" size="18"><cube-outline /></n-icon>
+              <div class="item-info">
+                <span class="item-label">只抢实物</span>
+                <span class="item-desc">仅保留实物奖品福袋</span>
+              </div>
+            </div>
+            <n-switch v-model:value="config.onlyPhysicalPrize.enabled" size="small" />
+          </div>
+        </div>
+        <div class="config-item">
+          <div class="item-header card-style">
+            <div style="display: flex; align-items: center; gap: 8px">
+              <n-icon color="#ca8a04" size="18"><wallet-outline /></n-icon>
+              <div class="item-info">
+                <span class="item-label">优先大红包</span>
+                <span class="item-desc">人均红包≥{{ (config.preferBigRedPacket && config.preferBigRedPacket.threshold) || 40 }}</span>
+              </div>
+            </div>
+            <n-switch v-model:value="config.preferBigRedPacket.enabled" size="small" />
+          </div>
+        </div>
       </div>
 
       <!-- 时间与限制分组 -->
       <div class="config-group">
         <div class="group-title">
-          <n-icon size="16"><time-outline /></n-icon>
+          <n-icon size="18"><time-outline /></n-icon>
           <span>时间与限制</span>
         </div>
         <div class="config-item">
@@ -127,7 +111,7 @@
       <!-- 交互设置分组 -->
       <div class="config-group">
         <div class="group-title">
-          <n-icon size="16"><chatbox-ellipses-outline /></n-icon>
+          <n-icon size="18"><chatbox-ellipses-outline /></n-icon>
           <span>交互设置</span>
         </div>
         <div class="config-item">
@@ -155,7 +139,11 @@
 
 <script setup>
 import { NScrollbar, NIcon, NSwitch, NInputNumber } from 'naive-ui'
-import { FlashOutline, TimeOutline, ChatboxEllipsesOutline, GiftOutline } from '@vicons/ionicons5'
+import TimeOutline from '@vicons/ionicons5/es/TimeOutline'
+import ChatboxEllipsesOutline from '@vicons/ionicons5/es/ChatboxEllipsesOutline'
+import GiftOutline from '@vicons/ionicons5/es/GiftOutline'
+import CubeOutline from '@vicons/ionicons5/es/CubeOutline'
+import WalletOutline from '@vicons/ionicons5/es/WalletOutline'
 
 const props = defineProps({
   config: {
@@ -170,27 +158,45 @@ const props = defineProps({
   flex: 1;
 }
 .sidebar-content {
-  padding: 16px 14px;
+  padding: 14px 10px 20px;
 }
-.config-group { margin-bottom: 16px; }
+.config-group { margin-bottom: 18px; }
 .group-title {
   display: flex; align-items: center; gap: 8px;
-  font-size: 13px; font-weight: 600; color: #2f3a33;
-  margin-bottom: 12px; padding-left: 4px;
+  font-size: 16px; font-weight: 800; color: #2a3748;
+  margin-bottom: 10px; padding-left: 4px;
 }
 .config-item {
   margin-bottom: 10px;
-  background: linear-gradient(180deg, #ffffff 0%, #fbfdfb 100%);
-  padding: 8px 10px;
-  border-radius: 10px;
-  border: 1px solid #edf2ee;
+  background: linear-gradient(180deg, #f9fbfe 0%, #f2f6fb 100%);
+  padding: 10px 10px;
+  border-radius: 13px;
+  border: 1px solid #e2e8f1;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.82) inset;
 }
 .item-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px; }
 .item-header.card-style { align-items: center; margin-bottom: 0; }
 .item-info { display: flex; flex-direction: column; }
-.item-label { font-size: 13px; font-weight: 500; color: #333; }
-.item-desc { font-size: 11px; color: #8f9a92; }
-.input-prefix { font-size: 12px; color: #8f9a92; }
+.item-label { font-size: 14px; font-weight: 700; color: #2e3c50; }
+.item-desc { font-size: 12px; color: #7c889b; margin-top: 1px; }
+.input-prefix { font-size: 12px; color: #7c889b; }
+
+:deep(.config-item .n-input-number) {
+  width: 100%;
+}
+
+:deep(.config-item .n-input-number-input) {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+:deep(.config-item .n-switch .n-switch__rail) {
+  background: #d8e2ef;
+}
+
+:deep(.config-item .n-switch.n-switch--active .n-switch__rail) {
+  background: #18a058;
+}
 
 .hide-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
 .hide-scrollbar::-webkit-scrollbar { display: none; }

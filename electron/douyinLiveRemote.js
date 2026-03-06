@@ -486,6 +486,8 @@ const commonHeaders = {
   dnt: '1'
 }
 
+const DEBUG_DY_API = process.env.DEBUG_DY_API === '1'
+
 function cookieToObj(cookie) {
   const obj = {}
   if (!cookie) return obj
@@ -608,8 +610,10 @@ async function douyinLiveRemote(uri, params, headers, method = 'GET') {
         reqHeaders['x-secsdk-csrf-token'] = cookieObj.passport_csrf_token
       }
 
-      console.log(`[API请求] ${uri}${attempt > 0 ? ` (retry ${attempt}/${maxAttempts - 1})` : ''}`)
-      console.log(`[a_bogus] ${a_bogus.substring(0, 30)}...`)
+      if (DEBUG_DY_API) {
+        console.log(`[API请求] ${uri}${attempt > 0 ? ` (retry ${attempt}/${maxAttempts - 1})` : ''}`)
+        console.log(`[a_bogus] ${a_bogus.substring(0, 30)}...`)
+      }
 
       const res = await requestJson(url, reqHeaders, 10000, method)
       return res.json
@@ -626,6 +630,10 @@ async function douyinLiveRemote(uri, params, headers, method = 'GET') {
 
       if (!retryable || attempt >= maxAttempts - 1) {
         throw error
+      }
+
+      if (DEBUG_DY_API) {
+        console.log(`[API重试] ${uri} code=${code || 'unknown'} status=${statusCode || 'unknown'} attempt=${attempt + 1}`)
       }
 
       const backoffMs = 180 + attempt * 220 + Math.floor(Math.random() * 160)
