@@ -18,6 +18,7 @@
 - 自动抢红包（带限制识别跳过）。
 - 默认静音。
 - 默认关闭直播画面渲染（降低资源占用）。
+- 分级日志（`error/warn/info/debug`）与环境开关。
 - 实时运行日志、账号统计、中奖与收益统计。
 
 ## 环境要求
@@ -101,13 +102,21 @@ npm run electron:build:mac
 ```text
 .
 ├── electron/
+│   ├── logger.js
 │   ├── main-browserview.js
 │   └── douyinLiveRemote.js
 ├── src/
 │   ├── App.vue
+│   ├── renderer-entry.js
 │   ├── components/
+│   ├── utils/
+│   │   ├── lotteryRules.js
+│   │   └── logger.js
 │   └── services/
-│       └── LotteryManager-lite.js
+│       ├── LotteryManager-lite.js
+│       ├── scanCollector.js
+│       ├── scanRiskPolicy.js
+│       └── joinExecutor.js
 ├── tokens.json
 └── package.json
 ```
@@ -134,6 +143,18 @@ A: 当前池逻辑会过滤不满足条件的福袋，且会员/粉丝团限制�
 - `npm run electron:build`：Electron 打包
 - `npm run electron:build:win`：Windows 打包
 - `npm run electron:build:mac`：macOS 打包
+
+## 日志级别开关
+
+- 主进程日志级别：使用环境变量 `DY_LOG_LEVEL`（可选值：`error` / `warn` / `info` / `debug`）。
+- 渲染层日志级别：开发时可在 DevTools 设置 `localStorage.setItem('DY_LOG_LEVEL', 'debug')`。
+
+示例：
+
+```bash
+DY_LOG_LEVEL=debug npm run electron:dev
+DY_LOG_LEVEL=warn npm run electron:build
+```
 
 ## License
 

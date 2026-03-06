@@ -1,9 +1,10 @@
-const { app, BrowserWindow, BrowserView, ipcMain, session } = require('electron')
+const { app, BrowserWindow, BrowserView, ipcMain, session, shell, safeStorage } = require('electron')
 const path = require('path')
 const https = require('https')
 const fs = require('fs')
 const os = require('os')
 const { douyinLiveRemote } = require('./douyinLiveRemote')
+const { createLogger } = require('./logger')
 
 let mainWindow
 let browserViews = new Map() // 存储多个BrowserView实例
@@ -12,13 +13,65 @@ let browserViews = new Map() // 存储多个BrowserView实例
 // 开发环境：项目根目录
 // 生产环境：可执行文件所在目录
 const isDev = !app.isPackaged
+const logger = createLogger('main-browserview', { defaultLevel: isDev ? 'info' : 'warn' })
 const tokenStorePath = isDev 
   ? path.join(__dirname, '..', 'tokens.json')  // 开发环境：项目根目录
   : path.join(path.dirname(app.getPath('exe')), 'tokens.json')  // 生产环境：exe所在目录
 
-console.log(`Token存储路径: ${tokenStorePath}`)
+logger.info(`Token存储路径: ${tokenStorePath}`)
 
 // ==================== 工具函数 ====================
+
+function canUseSafeStorage() {
+  try {
+    return safeStorage && typeof safeStorage.isEncryptionAvailable === 'function' && safeStorage.isEncryptionAvailable()
+  } catch (e) {
+    logger.debug('safeStorage 检测失败，降级普通存储', e)
+    return false
+  }
+}
+
+function readTokenStore() {
+  if (!fs.existsSync(tokenStorePath)) return {}
+
+  const raw = fs.readFileSync(tokenStorePath, 'utf8')
+  if (!raw || !raw.trim()) return {}
+
+  const parsed = JSON.parse(raw)
+  if (!parsed || typeof parsed !== 'object') return {}
+
+  // 新格式：加密存储
+  if (parsed.__encrypted === true && typeof parsed.payload === 'string') {
+    if (!canUseSafeStorage()) {
+      throw new Error('当前系统不支持解密本地Token，请在原系统环境使用')
+    }
+    const decrypted = safeStorage.decryptString(Buffer.from(parsed.payload, 'base64'))
+    const tokens = JSON.parse(decrypted)
+    return (tokens && typeof tokens === 'object') ? tokens : {}
+  }
+
+  // 旧格式：明文 JSON（兼容）
+  return parsed
+}
+
+function writeTokenStore(tokens) {
+  const payloadObj = tokens && typeof tokens === 'object' ? tokens : {}
+  const jsonText = JSON.stringify(payloadObj)
+
+  // 优先加密存储
+  if (canUseSafeStorage()) {
+    const encrypted = safeStorage.encryptString(jsonText).toString('base64')
+    fs.writeFileSync(
+      tokenStorePath,
+      JSON.stringify({ __encrypted: true, payload: encrypted }, null, 2)
+    )
+    return { encrypted: true }
+  }
+
+  // 不支持加密时降级明文（兼容 Linux/无钥匙串场景）
+  fs.writeFileSync(tokenStorePath, JSON.stringify(payloadObj, null, 2))
+  return { encrypted: false }
+}
 
 /**
  * 生成随机msToken
@@ -161,7 +214,7 @@ async function fetchUserInfoFromApis(cookieString) {
       if (info) return info
     }
   } catch (e) {
-    console.log(`[user-info] creator 接口失败: ${e.message}`)
+    logger.info(`[user-info] creator 接口失败: ${e.message}`)
   }
 
   // 回退到 aweme 用户信息接口
@@ -173,7 +226,7 @@ async function fetchUserInfoFromApis(cookieString) {
     const info = normalizeUserInfo(awemeRes?.data?.user_info, 'aweme_api')
     if (info) return info
   } catch (e) {
-    console.log(`[user-info] aweme 接口失败: ${e.message}`)
+    logger.info(`[user-info] aweme 接口失败: ${e.message}`)
   }
 
   return null
@@ -216,7 +269,7 @@ async function fetchUserInfoFromPage(webContents) {
       }
     }
   } catch (e) {
-    console.log(`[user-info] 页面兜底失败: ${e.message}`)
+    logger.info(`[user-info] 页面兜底失败: ${e.message}`)
   }
   return null
 }
@@ -244,8 +297,9 @@ function createWindow() {
     width: 1400,
     height: 1000,
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js')
     }
   })
 
@@ -263,34 +317,36 @@ app.whenReady().then(createWindow)
 // 全局静音兜底（多账号场景避免偶发出声）
 try {
   app.commandLine.appendSwitch('mute-audio')
-} catch (_) {}
+} catch (e) {
+  logger.debug('追加 mute-audio 启动参数失败', e)
+}
 
 // 打印所有已注册的 IPC handlers（用于调试）
 app.whenReady().then(() => {
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-  console.log('✅ Electron 应用已启动')
-  console.log('📋 已注册的 IPC Handlers:')
-  console.log('  - load-all-tokens')
-  console.log('  - check-browser-exists')
-  console.log('  - launch-browser')
-  console.log('  - navigate-to')
-  console.log('  - execute-script')
-  console.log('  - close-browser')
-  console.log('  - delete-token')
-  console.log('  - get-user-info')
-  console.log('  - clear-account-cache')
-  console.log('  - get-login-token')
-  console.log('  - save-token')
-  console.log('  - load-token')
-  console.log('  - set-cookies')
-  console.log('  - search-live-by-all')
-  console.log('  - search-live-by-category')
-  console.log('  - get-lottery-detail')
-  console.log('  - collect-lotteries-by-category')
-  console.log('  - attend-lottery')
-  console.log('  - room-like')
-  console.log('  - room-chat')
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+  logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+  logger.info('✅ Electron 应用已启动')
+  logger.info('📋 已注册的 IPC Handlers:')
+  logger.info('  - load-all-tokens')
+  logger.info('  - check-browser-exists')
+  logger.info('  - launch-browser')
+  logger.info('  - navigate-to')
+  logger.info('  - execute-script')
+  logger.info('  - close-browser')
+  logger.info('  - delete-token')
+  logger.info('  - get-user-info')
+  logger.info('  - clear-account-cache')
+  logger.info('  - get-login-token')
+  logger.info('  - save-token')
+  logger.info('  - load-token')
+  logger.info('  - set-cookies')
+  logger.info('  - search-live-by-all')
+  logger.info('  - search-live-by-category')
+  logger.info('  - get-lottery-detail')
+  logger.info('  - collect-lotteries-by-category')
+  logger.info('  - attend-lottery')
+  logger.info('  - room-like')
+  logger.info('  - room-chat')
+  logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
 })
 
 // ... 前面的代码保持不变 ...
@@ -336,7 +392,9 @@ ipcMain.handle('attend-lottery', async (event, { roomId, lotteryId, webRid = nul
         room_id: roomId,
         lottery_id: lotteryId
       })
-    } catch (_) {}
+    } catch (e) {
+      logger.debug(`[${accountId}] 使用 room_id 参与失败，准备回退 roomId 参数`, e)
+    }
 
     if (!result || !result.success) {
       result = await attemptAttend({
@@ -426,17 +484,11 @@ app.on('activate', () => {
 
 ipcMain.handle('load-all-tokens', async () => {
   try {
-    if (!fs.existsSync(tokenStorePath)) {
-      return { success: true, tokens: {} }
-    }
-    
-    const data = fs.readFileSync(tokenStorePath, 'utf8')
-    const tokens = JSON.parse(data)
-    
-    console.log(`已加载 ${Object.keys(tokens).length} 个账号的Token`)
+    const tokens = readTokenStore()
+    logger.info(`已加载 ${Object.keys(tokens).length} 个账号的Token`)
     return { success: true, tokens }
   } catch (error) {
-    console.error('加载所有Token失败:', error)
+    logger.error('加载所有Token失败:', error)
     return { success: false, error: error.message, tokens: {} }
   }
 })
@@ -476,23 +528,56 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
       storages: ['cookies', 'localstorage', 'sessionstorage', 'cachestorage', 'indexdb']
     })
     
-    console.log(`[${accountId}] 已创建独立session: ${partition}`)
+    logger.info(`[${accountId}] 已创建独立session: ${partition}`)
 
     // 参考超人福袋：默认静音，避免多账号运行时音频干扰
     try {
       browserWindow.webContents.setAudioMuted(true)
-    } catch (_) {}
+    } catch (e) {
+      logger.debug(`[${accountId}] 启动后静音失败`, e)
+    }
     
     browserViews.set(accountId, {
       window: browserWindow,
       session: accountSession,
       partition: partition
     })
+
+    // 拦截深链协议，避免弹出“需要新应用打开 bytedance 链接”
+    const isBlockedProtocol = (url = '') => /^(bytedance|snssdk|douyinopensdk):\/\//i.test(String(url))
+    browserWindow.webContents.setWindowOpenHandler(({ url }) => {
+      if (isBlockedProtocol(url)) {
+        logger.info(`[${accountId}] 已拦截外部协议: ${url}`)
+        return { action: 'deny' }
+      }
+      // http/https 正常在当前窗口打开
+      if (/^https?:\/\//i.test(String(url))) {
+        browserWindow.loadURL(url).catch((e) => {
+          logger.debug(`[${accountId}] 外链当前窗打开失败: ${url}`, e)
+        })
+      } else {
+        // 其他协议不处理，避免系统弹窗
+        try { shell.beep() } catch (e) {
+          logger.debug(`[${accountId}] shell.beep 调用失败`, e)
+        }
+      }
+      return { action: 'deny' }
+    })
+    browserWindow.webContents.on('will-navigate', (e, url) => {
+      if (isBlockedProtocol(url)) {
+        e.preventDefault()
+        logger.info(`[${accountId}] 已阻止页面跳转到外部协议: ${url}`)
+      }
+    })
     
     // 监听页面加载完成
     browserWindow.webContents.on('did-finish-load', () => {
-      console.log(`[${accountId}] 页面加载完成`)
-      try { browserWindow.webContents.setAudioMuted(true) } catch (_) {}
+      logger.info(`[${accountId}] 页面加载完成`)
+      try {
+        browserWindow.webContents.setAudioMuted(true)
+      } catch (e) {
+        logger.debug(`[${accountId}] did-finish-load 静音失败`, e)
+      }
       
       // 开启调试模式以监听网络响应体
       try {
@@ -501,7 +586,7 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
           wc.debugger.attach('1.3')
         }
         wc.debugger.on('detach', (event, reason) => {
-          console.log(`[${accountId}] Debugger detached:`, reason)
+          logger.info(`[${accountId}] Debugger detached:`, reason)
         })
         wc.debugger.sendCommand('Network.enable')
         wc.debugger.on('message', async (event, method, params) => {
@@ -526,27 +611,35 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
                   data: json.data
                 })
               } catch (e) {
-                // 忽略获取响应体失败的情况
+                logger.debug(`[${accountId}] 读取网络响应体失败`, e)
               }
             }
           }
         })
       } catch (err) {
-        console.error(`[${accountId}] Debugger attach error:`, err)
+        logger.error(`[${accountId}] Debugger attach error:`, err)
       }
     })
 
     // 页面跳转后再次强制静音，防止站点恢复音量
     browserWindow.webContents.on('did-navigate', () => {
-      try { browserWindow.webContents.setAudioMuted(true) } catch (_) {}
+      try {
+        browserWindow.webContents.setAudioMuted(true)
+      } catch (e) {
+        logger.debug(`[${accountId}] did-navigate 静音失败`, e)
+      }
     })
     browserWindow.webContents.on('did-navigate-in-page', () => {
-      try { browserWindow.webContents.setAudioMuted(true) } catch (_) {}
+      try {
+        browserWindow.webContents.setAudioMuted(true)
+      } catch (e) {
+        logger.debug(`[${accountId}] did-navigate-in-page 静音失败`, e)
+      }
     })
     
     // 监听窗口关闭
     browserWindow.on('closed', () => {
-      console.log(`[${accountId}] 窗口已关闭`)
+      logger.info(`[${accountId}] 窗口已关闭`)
       browserViews.delete(accountId)
       
       // 通知渲染进程窗口已关闭，停止该账号的所有活动
@@ -572,7 +665,7 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
     
     return { success: true, accountId, partition }
   } catch (error) {
-    console.error('启动浏览器失败:', error)
+    logger.error('启动浏览器失败:', error)
     return { success: false, error: error.message }
   }
 })
@@ -587,7 +680,7 @@ ipcMain.handle('navigate-to', async (event, { accountId, url }) => {
     await browserData.window.loadURL(url)
     return { success: true }
   } catch (error) {
-    console.error('导航失败:', error.message)
+    logger.error('导航失败:', error.message)
     return { success: false, error: error.message }
   }
 })
@@ -602,7 +695,7 @@ ipcMain.handle('execute-script', async (event, { accountId, script }) => {
     const result = await browserData.window.webContents.executeJavaScript(script)
     return { success: true, result }
   } catch (error) {
-    console.error('执行脚本失败:', error)
+    logger.error('执行脚本失败:', error)
     return { success: false, error: error.message }
   }
 })
@@ -627,20 +720,19 @@ ipcMain.handle('delete-token', async (event, accountId) => {
     if (!fs.existsSync(tokenStorePath)) {
       return { success: true, message: 'Token文件不存在' }
     }
-    
-    const data = fs.readFileSync(tokenStorePath, 'utf8')
-    const tokens = JSON.parse(data)
+
+    const tokens = readTokenStore()
     
     if (tokens[accountId]) {
       delete tokens[accountId]
-      fs.writeFileSync(tokenStorePath, JSON.stringify(tokens, null, 2))
-      console.log(`Token已删除: ${accountId}`)
+      writeTokenStore(tokens)
+      logger.info(`Token已删除: ${accountId}`)
       return { success: true, message: 'Token已删除' }
     } else {
       return { success: true, message: '该账号Token不存在' }
     }
   } catch (error) {
-    console.error('删除Token失败:', error)
+    logger.error('删除Token失败:', error)
     return { success: false, error: error.message }
   }
 })
@@ -649,18 +741,18 @@ ipcMain.handle('delete-token', async (event, accountId) => {
 
 ipcMain.handle('get-user-info', async (event, accountId) => {
   try {
-    console.log(`[${accountId}] 开始获取用户信息...`)
+    logger.info(`[${accountId}] 开始获取用户信息...`)
     const userInfo = await resolveUserInfo(accountId, { waitMs: 1500 })
     
     if (userInfo && userInfo.nickname) {
-      console.log(`✅ [${accountId}] 获取到用户信息 (${userInfo.method}): ${userInfo.nickname} ${userInfo.userId || ''}`)
+      logger.info(`✅ [${accountId}] 获取到用户信息 (${userInfo.method}): ${userInfo.nickname} ${userInfo.userId || ''}`)
       return { success: true, userInfo }
     } else {
-      console.log(`⚠️ [${accountId}] 未能获取到用户信息`)
+      logger.info(`⚠️ [${accountId}] 未能获取到用户信息`)
       return { success: false, error: '未能获取到用户信息' }
     }
   } catch (error) {
-    console.error(`❌ [${accountId}] 获取用户信息异常:`, error)
+    logger.error(`❌ [${accountId}] 获取用户信息异常:`, error)
     return { success: false, error: error.message }
   }
 })
@@ -674,7 +766,7 @@ ipcMain.handle('clear-account-cache', async (event, accountId) => {
       throw new Error('浏览器实例不存在')
     }
     
-    console.log(`[${accountId}] 开始清除缓存...`)
+    logger.info(`[${accountId}] 开始清除缓存...`)
     
     // 清除所有缓存和存储数据
     await browserData.session.clearStorageData({
@@ -684,11 +776,11 @@ ipcMain.handle('clear-account-cache', async (event, accountId) => {
     // 清除缓存
     await browserData.session.clearCache()
     
-    console.log(`✅ [${accountId}] 缓存已清除`)
+    logger.info(`✅ [${accountId}] 缓存已清除`)
     
     return { success: true, message: '缓存已清除' }
   } catch (error) {
-    console.error(`❌ [${accountId}] 清除缓存失败:`, error)
+    logger.error(`❌ [${accountId}] 清除缓存失败:`, error)
     return { success: false, error: error.message }
   }
 })
@@ -723,12 +815,12 @@ ipcMain.handle('get-login-token', async (event, accountId) => {
       try {
         userInfo = await resolveUserInfo(accountId, { waitMs: 1200 })
         if (userInfo && userInfo.nickname) {
-          console.log(`✅ 获取到用户信息: ${userInfo.nickname} ${userInfo.userId ? '(' + userInfo.userId + ')' : ''}`)
+          logger.info(`✅ 获取到用户信息: ${userInfo.nickname} ${userInfo.userId ? '(' + userInfo.userId + ')' : ''}`)
         } else {
-          console.log('⚠️ 未能获取到用户信息，将使用默认值')
+          logger.info('⚠️ 未能获取到用户信息，将使用默认值')
         }
       } catch (e) {
-        console.log('⚠️ 获取用户信息异常:', e.message)
+        logger.info('⚠️ 获取用户信息异常:', e.message)
       }
     }
     
@@ -747,10 +839,8 @@ ipcMain.handle('get-login-token', async (event, accountId) => {
 ipcMain.handle('save-token', async (event, { accountId, tokenInfo, userInfo = null }) => {
   try {
     let tokens = {}
-    
     if (fs.existsSync(tokenStorePath)) {
-      const data = fs.readFileSync(tokenStorePath, 'utf8')
-      tokens = JSON.parse(data)
+      tokens = readTokenStore()
     }
     
     tokens[accountId] = {
@@ -760,12 +850,12 @@ ipcMain.handle('save-token', async (event, { accountId, tokenInfo, userInfo = nu
       savedAt: Date.now()
     }
     
-    fs.writeFileSync(tokenStorePath, JSON.stringify(tokens, null, 2))
-    console.log(`Token已保存: ${accountId} (${tokens[accountId].nickname})`)
+    const writeResult = writeTokenStore(tokens)
+    logger.info(`Token已保存: ${accountId} (${tokens[accountId].nickname})`)
     
-    return { success: true, savedInfo: tokens[accountId] }
+    return { success: true, savedInfo: tokens[accountId], encrypted: writeResult.encrypted }
   } catch (error) {
-    console.error('保存Token失败:', error)
+    logger.error('保存Token失败:', error)
     return { success: false, error: error.message }
   }
 })
@@ -775,9 +865,8 @@ ipcMain.handle('load-token', async (event, accountId) => {
     if (!fs.existsSync(tokenStorePath)) {
       return { success: false, error: 'Token文件不存在' }
     }
-    
-    const data = fs.readFileSync(tokenStorePath, 'utf8')
-    const tokens = JSON.parse(data)
+
+    const tokens = readTokenStore()
     
     if (!tokens[accountId]) {
       return { success: false, error: '该账号Token不存在' }
@@ -785,7 +874,7 @@ ipcMain.handle('load-token', async (event, accountId) => {
     
     return { success: true, tokenInfo: tokens[accountId] }
   } catch (error) {
-    console.error('加载Token失败:', error)
+    logger.error('加载Token失败:', error)
     return { success: false, error: error.message }
   }
 })
@@ -829,17 +918,17 @@ ipcMain.handle('set-cookies', async (event, { accountId, tokenInfo }) => {
             sameSite: 'lax'
           })
           setCookieCount++
-          console.log(`✅ [${accountId}] 已设置 cookie: ${name}`)
+          logger.info(`✅ [${accountId}] 已设置 cookie: ${name}`)
         } catch (e) {
-          console.error(`❌ [${accountId}] 设置 cookie 失败 (${name}):`, e.message)
+          logger.error(`❌ [${accountId}] 设置 cookie 失败 (${name}):`, e.message)
         }
       }
     }
     
-    console.log(`✅ [${accountId}] 共设置 ${setCookieCount} 个 cookies`)
+    logger.info(`✅ [${accountId}] 共设置 ${setCookieCount} 个 cookies`)
     return { success: true, count: setCookieCount }
   } catch (error) {
-    console.error(`❌ [${accountId}] 设置Cookie失败:`, error)
+    logger.error(`❌ [${accountId}] 设置Cookie失败:`, error)
     return { success: false, error: error.message }
   }
 })
@@ -847,7 +936,7 @@ ipcMain.handle('set-cookies', async (event, { accountId, tokenInfo }) => {
 // ==================== 福袋收集 ====================
 
 // 搜索直播间-【全部】
-ipcMain.handle('search-live-by-all', async (event, { accountId = null } = {}) => {
+ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCount = 24 } = {}) => {
   try {
     // 获取cookie
     let cookieString = ''
@@ -858,7 +947,7 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null } = {}) =>
           const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
           cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
         } catch (e) {
-          console.warn('⚠️ 获取Cookie失败:', e.message)
+          logger.warn('⚠️ 获取Cookie失败:', e.message)
         }
       }
     }
@@ -873,7 +962,7 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null } = {}) =>
       liveid: '1',
       is_draw: '1',
       inner_from_drawer: '0',
-      custom_count: '8',
+      custom_count: String(Math.max(8, Number(customCount) || 24)),
       action: 'load_more',
       action_type: 'loadmore',
       enter_source: 'web_homepage_hot_web_live_card',
@@ -883,9 +972,9 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null } = {}) =>
     })
     
     // 详细日志
-    console.log(`[search-live-by-all] 响应状态:`, json ? 'OK' : 'NULL')
+    logger.info(`[search-live-by-all] 响应状态:`, json ? 'OK' : 'NULL')
     if (json) {
-      console.log(`[search-live-by-all] 响应结构:`, {
+      logger.info(`[search-live-by-all] 响应结构:`, {
         hasData: !!json.data,
         dataType: Array.isArray(json.data) ? 'array' : typeof json.data,
         dataLength: Array.isArray(json.data) ? json.data.length : 'N/A',
@@ -901,18 +990,23 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null } = {}) =>
     // 检查错误码
     if (json.status_code !== undefined && json.status_code !== 0) {
       const errorMsg = json.extra?.error_msg || json.extra?.description || '未知错误'
-      console.error(`[search-live-by-all] API错误: ${json.status_code} - ${errorMsg}`)
+      logger.error(`[search-live-by-all] API错误: ${json.status_code} - ${errorMsg}`)
       return { success: false, error: `API错误(${json.status_code}): ${errorMsg}` }
     }
     
     if (!json.data || !Array.isArray(json.data)) {
-      console.error(`[search-live-by-all] 数据格式错误:`, JSON.stringify(json).substring(0, 500))
+      logger.error(`[search-live-by-all] 数据格式错误:`, JSON.stringify(json).substring(0, 500))
       return { success: false, error: '响应数据格式错误', detail: json }
     }
     
     // 筛选有福袋的直播间
     const roomInfoList = json.data
-      .filter(item => item?.data?.others?.web_enter_benefit_point_data?.has_ongoing_lottery)
+      .filter(item => {
+        const benefit = item?.data?.others?.web_enter_benefit_point_data
+        if (!benefit) return true // 标记缺失时也纳入，后续由详情接口复核
+        const flag = benefit.has_ongoing_lottery
+        return flag !== false && flag !== 0 && flag !== '0'
+      })
       .map(room => ({
         webRid: room.web_rid,
         roomId: room.data.id_str,
@@ -922,10 +1016,10 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null } = {}) =>
         onlineTotal: room.data.user_count
       }))
     
-    console.log(`[search-live-by-all] 找到 ${roomInfoList.length} 个有福袋的直播间`)
+    logger.info(`[search-live-by-all] 找到 ${roomInfoList.length} 个有福袋的直播间`)
     return { success: true, roomInfoList }
   } catch (error) {
-    console.error('搜索全部直播间失败:', error)
+    logger.error('搜索全部直播间失败:', error)
     return { success: false, error: error.message }
   }
 })
@@ -942,7 +1036,7 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
           const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
           cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
         } catch (e) {
-          console.warn('⚠️ 获取Cookie失败:', e.message)
+          logger.warn('⚠️ 获取Cookie失败:', e.message)
         }
       }
     }
@@ -963,9 +1057,9 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
     })
     
     // 详细日志
-    console.log(`[search-live-by-category] 分类:${categoryId}, offset:${offset}`)
+    logger.info(`[search-live-by-category] 分类:${categoryId}, offset:${offset}`)
     if (json) {
-      console.log(`[search-live-by-category] 响应结构:`, {
+      logger.info(`[search-live-by-category] 响应结构:`, {
         hasData: !!json.data,
         hasDataData: !!json.data?.data,
         dataType: Array.isArray(json.data?.data) ? 'array' : typeof json.data?.data,
@@ -982,7 +1076,7 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
     // 检查错误码
     if (json.status_code !== undefined && json.status_code !== 0) {
       const errorMsg = json.extra?.error_msg || json.extra?.description || '未知错误'
-      console.error(`[search-live-by-category] API错误: ${json.status_code} - ${errorMsg}`)
+      logger.error(`[search-live-by-category] API错误: ${json.status_code} - ${errorMsg}`)
       return { success: false, error: `API错误(${json.status_code}): ${errorMsg}` }
     }
     
@@ -995,7 +1089,7 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
           : []
 
     if (rawList.length === 0) {
-      console.error(`[search-live-by-category] 数据格式错误:`, JSON.stringify(json).substring(0, 500))
+      logger.error(`[search-live-by-category] 数据格式错误:`, JSON.stringify(json).substring(0, 500))
       return { success: false, error: '响应数据格式错误', detail: json }
     }
     
@@ -1004,7 +1098,7 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
       .map(item => {
         const room = item?.room || item?.data || item
         const benefit = room?.others?.web_enter_benefit_point_data || item?.others?.web_enter_benefit_point_data
-        const hasLottery = !!benefit && (
+        const hasLottery = !benefit || (
           benefit.has_ongoing_lottery === true ||
           benefit.has_ongoing_lottery === 1 ||
           benefit.has_ongoing_lottery === '1' ||
@@ -1023,10 +1117,10 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
       })
       .filter(Boolean)
     
-    console.log(`[search-live-by-category] 原始${rawList.length}个, 筛出${roomInfoList.length}个有福袋直播间`)
+    logger.info(`[search-live-by-category] 原始${rawList.length}个, 筛出${roomInfoList.length}个有福袋直播间`)
     return { success: true, roomInfoList }
   } catch (error) {
-    console.error('搜索分类直播间失败:', error)
+    logger.error('搜索分类直播间失败:', error)
     return { success: false, error: error.message }
   }
 })
@@ -1042,7 +1136,7 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, acco
           const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
           cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
         } catch (e) {
-          console.warn('⚠️ 获取Cookie失败:', e.message)
+          logger.warn('⚠️ 获取Cookie失败:', e.message)
         }
       }
     }
@@ -1084,7 +1178,7 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, acco
 
     const lottery_info = json.data.lottery_info
 
-    // 检查福袋条件（优化版：只要包含类型3和6即可）
+    // 条件检查：必须同时包含口令(type=3) + 手动参与(type=6)
     const conditions = lottery_info.conditions || []
     const hasType3 = conditions.some(c => c.type === 3) // 发口令
     const hasType6 = conditions.some(c => c.type === 6) // 手动参与
@@ -1102,6 +1196,9 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, acco
       lotteryTotal: lottery_info.prize_count || 0,
       lotteryName: lottery_info.prize_info?.name || '未知奖品',
       prize_name: lottery_info.prize_info?.name || '未知奖品',
+      prizeType: lottery_info.prize_type || lottery_info.prize_info?.type || lottery_info.prize_info?.prize_type || 0,
+      prizeInfo: lottery_info.prize_info || {},
+      total_amount: lottery_info.total_amount || lottery_info.prize_info?.total_amount || 0,
       start_time: lottery_info.start_time,
       end_time: lottery_info.draw_time,
       conditions
@@ -1109,7 +1206,7 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, acco
 
     return { success: true, lotteryDetail }
   } catch (error) {
-    console.error('获取福袋详情失败:', error)
+    logger.error('获取福袋详情失败:', error)
     const message = error?.code === 'NON_JSON_RESPONSE'
       ? `接口返回非JSON内容(${error.statusCode || 'unknown'})`
       : error.message
@@ -1140,9 +1237,9 @@ ipcMain.handle('collect-lotteries-by-category', async (event, { categoryId = '0'
             const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
             cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
             dynamicParams = extractParamsFromCookie(cookieString)
-            console.log(`[分类扫描] 使用账号 ${accountId} 的Cookie`)
+            logger.info(`[分类扫描] 使用账号 ${accountId} 的Cookie`)
           } catch (e) {
-            console.warn('⚠️ 获取Cookie失败:', e.message)
+            logger.warn('⚠️ 获取Cookie失败:', e.message)
           }
         }
       }

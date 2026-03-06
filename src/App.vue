@@ -1,47 +1,46 @@
 <template>
-  <n-config-provider :theme-overrides="themeOverrides">
-    <div class="app-container">
-      <!-- 左侧侧边栏 - 参数配置 -->
-      <aside class="sidebar">
-        <header class="header-base sidebar-header">
-          <n-icon size="20" color="#18a058"><settings-outline /></n-icon>
-          <h2 class="title-text">参数配置</h2>
-        </header>
+  <n-config-provider :theme-overrides="themeOverrides" class="app-root">
+    <div class="desktop-shell">
+      <div class="window-frame">
+        <div class="app-container">
+          <aside class="sidebar">
+            <header class="header-base sidebar-header">
+              <n-icon size="20" color="#18a058"><settings-outline /></n-icon>
+              <h2 class="title-text">参数配置</h2>
+            </header>
+            <ConfigPanel :config="config" />
+          </aside>
 
-        <ConfigPanel :config="config" />
-
-        <footer class="sidebar-footer">
-          <n-button type="primary" block size="large" @click="addAccount" class="add-btn">
-            <template #icon><n-icon><add-outline /></n-icon></template>
-            添加账号
-          </n-button>
-        </footer>
-      </aside>
-
-      <!-- 右侧主体区域 -->
-      <main class="main-content">
-        <HeaderStats 
-          :total-diamonds="totalDiamonds"
-          :total-participation="totalParticipation"
-          :total-winning="totalWinning"
-        />
-
-        <div class="content-body">
-          <div class="column-left">
-            <AccountList 
-              :accounts="accounts"
-              :running-count="runningCount"
-              :columns="responsiveColumns"
-              :scroll-x="accountTableScrollX"
+          <main class="main-content">
+            <HeaderStats
+              :total-diamonds="totalDiamonds"
+              :total-participation="totalParticipation"
+              :total-winning="totalWinning"
             />
-            <LotteryDetail :lotteries="mergedLotteries" @block="handleBlockRoom" />
-          </div>
 
-          <div class="column-right">
-            <LogPanel :logs="logs" @clear="logs = []" />
-          </div>
+            <div class="content-body">
+              <div class="column-left">
+                <AccountList
+                  :accounts="accounts"
+                  :running-count="runningCount"
+                  :columns="responsiveColumns"
+                  :scroll-x="accountTableScrollX"
+                  @add="addAccount"
+                />
+                <LotteryDetail
+                  :lotteries="mergedLotteries"
+                  :history-records="lotteryHistory"
+                  @block="handleBlockRoom"
+                />
+              </div>
+
+              <div class="column-right">
+                <LogPanel :logs="logs" @clear="logs = []" />
+              </div>
+            </div>
+          </main>
         </div>
-      </main>
+      </div>
     </div>
   </n-config-provider>
 </template>
@@ -49,11 +48,9 @@
 <script setup>
 import { ref, h, computed, onMounted, onUnmounted } from 'vue'
 import { 
-  NButton, NTag, NSpace, NConfigProvider, NIcon
+  NButton, NTag, NConfigProvider, NIcon
 } from 'naive-ui'
-import {
-  SettingsOutline, AddOutline
-} from '@vicons/ionicons5'
+import SettingsOutline from '@vicons/ionicons5/es/SettingsOutline'
 
 // 导入提取的组件
 import ConfigPanel from './components/ConfigPanel.vue'
@@ -68,11 +65,18 @@ const themeOverrides = {
   common: {
     primaryColor: '#18a058',
     primaryColorHover: '#36ad6a',
-    borderRadius: '8px'
+    borderRadius: '12px',
+    fontFamily: "'SF Pro Display', 'PingFang SC', 'MiSans', 'Helvetica Neue', sans-serif"
   },
   Card: {
-    titleFontSizeMedium: '14px',
-    headerPaddingMedium: '12px 16px'
+    titleFontSizeMedium: '14px'
+  },
+  Input: {
+    heightSmall: '32px'
+  },
+  DataTable: {
+    thPaddingSmall: '10px 12px',
+    tdPaddingSmall: '10px 12px'
   }
 }
 
@@ -92,7 +96,6 @@ const mergedLotteries = computed(() => {
   const allLists = Object.values(lotteriesByAccount.value || {})
   const all = allLists
     .flatMap(list => (Array.isArray(list) ? list : []))
-    .filter(item => !(config.value.filterFanClub?.enabled && hasFanClubRequirement(item)))
 
   for (const item of all) {
     const roomId = item?.roomId ?? ''
@@ -127,6 +130,8 @@ const config = ref({
   hitRate: { enabled: true, value: 0.1 },
   secondInspect: { enabled: true, value: 0.05 },
   filterFanClub: { enabled: true },
+  onlyPhysicalPrize: { enabled: false },
+  preferBigRedPacket: { enabled: true, threshold: 40 },
   participationCount: { enabled: true, value: 80 },
   singleAccountDuration: { enabled: true, value: 3 },
   filterOnline: { enabled: false, value: 1000 },
@@ -137,6 +142,7 @@ const config = ref({
 const accounts = ref([])
 const logs = ref([])
 const lotteriesByAccount = ref({})
+const lotteryHistory = ref([])
 const lotteryManager = new LotteryManager()
 
 function getTodayKey() {
@@ -150,7 +156,7 @@ function getTodayKey() {
 function createAccountModel(base = {}) {
   return {
     id: base.id || '',
-    nickname: base.nickname || '',
+    nickname: normalizeNickname(base.nickname || ''),
     userId: base.userId || base.id || '',
     state: base.state || 'waiting',
     currentRoom: base.currentRoom || '',
@@ -177,24 +183,16 @@ function ensureDailyStats(account) {
   }
 }
 
-function hasFanClubRequirement(lottery) {
-  const conditions = Array.isArray(lottery?.conditions) ? lottery.conditions : []
-  return conditions.some(c => {
-    const typeNum = Number(c?.type)
-    const content = String(c?.content || '')
-    return typeNum === 2 || content.includes('粉丝团')
-  })
-}
-
 let ipcRenderer = null
 try {
-  if (window.require) {
-    const electron = window.require('electron')
-    ipcRenderer = electron.ipcRenderer
+  if (window.electronAPI) {
+    ipcRenderer = window.electronAPI
   }
 } catch (e) {
   console.error('无法加载 electron:', e)
 }
+
+const ipcUnsubscribers = []
 
 // 监听串口大小
 const handleResize = () => {
@@ -203,12 +201,12 @@ const handleResize = () => {
 
 onMounted(async () => {
   window.addEventListener('resize', handleResize)
-  lotteryManager.setCategoryList(lotteryManager.getAllCategories().slice(0, 3))
-  lotteryManager.setScanConfig({ countPerPage: 12, pagesPerCategory: 4 })
+  lotteryManager.setCategoryList(lotteryManager.getAllCategories())
+  lotteryManager.setScanConfig({ countPerPage: 20, pagesPerCategory: 12, allCount: 24 })
   await loadAllAccounts()
   if (ipcRenderer) {
     // 监听浏览器窗口关闭事件
-    ipcRenderer.on('browser-closed', (event, { accountId }) => {
+    const offBrowserClosed = ipcRenderer.on('browser-closed', ({ accountId }) => {
       const account = accounts.value.find(a => a.id === accountId)
       if (account) {
         lotteryManager.stopAccount(accountId)
@@ -216,8 +214,9 @@ onMounted(async () => {
         addLog(`⚠️ [${account.nickname}] 浏览器窗口已手动关闭，活动已停止`, 'warning')
       }
     })
+    ipcUnsubscribers.push(offBrowserClosed)
 
-    ipcRenderer.on('douyin-response', (event, { accountId, type, data }) => {
+    const offDouyinResponse = ipcRenderer.on('douyin-response', ({ accountId, type, data }) => {
       const account = accounts.value.find(a => a.id === accountId)
       if (!account) return
       ensureDailyStats(account)
@@ -238,11 +237,16 @@ onMounted(async () => {
         account.totalDiamonds = currentWallet
       }
     })
+    ipcUnsubscribers.push(offDouyinResponse)
   }
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
+  ipcUnsubscribers.forEach(off => {
+    try { off && off() } catch (_) {}
+  })
+  ipcUnsubscribers.length = 0
 })
 
 async function loadAllAccounts() {
@@ -255,7 +259,7 @@ async function loadAllAccounts() {
         const fallbackNickname = match ? `账号${match[1]}` : `账号_${id}`
         accounts.value.push(createAccountModel({
           id,
-          nickname: info.nickname || fallbackNickname,
+          nickname: normalizeNickname(info.nickname || fallbackNickname),
           userId: info.userId || id,
           state: 'waiting',
           token: info.sessionid || info.sessionid_ss
@@ -266,6 +270,13 @@ async function loadAllAccounts() {
 }
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+
+function normalizeNickname(name) {
+  const text = String(name || '').trim()
+  if (!text) return ''
+  if (text.length >= 2 && text[0] === text[1]) return text.slice(1)
+  return text
+}
 
 async function resolveUserInfoWithRetry(accountId, fromLoginToken = null) {
   if (!ipcRenderer) return fromLoginToken || null
@@ -283,10 +294,19 @@ async function resolveUserInfoWithRetry(accountId, fromLoginToken = null) {
 
 const responsiveColumns = computed(() => {
   const actionFixed = isMobile.value ? undefined : 'right'
-  const compact = windowWidth.value < 1360
+  const compact = windowWidth.value < 1480
 
   const base = [
-    { title: '昵称', key: 'nickname', width: isMobile.value ? 92 : 120, ellipsis: { tooltip: true } },
+    {
+      title: '昵称',
+      key: 'nickname',
+      width: isMobile.value ? 82 : 98,
+      ellipsis: { tooltip: true },
+      render: (row) => {
+        const displayName = normalizeNickname(row.nickname || '')
+        return h('span', { class: 'account-name-text', title: displayName || '' }, displayName || '未命名账号')
+      }
+    },
     {
       title: '状态', key: 'state', width: isMobile.value ? 74 : 90,
       render: (row) => {
@@ -298,15 +318,19 @@ const responsiveColumns = computed(() => {
     {
       title: '统计',
       key: 'stats',
-      width: compact ? 160 : 230,
+      width: compact ? 166 : 228,
       render: (row) => {
         const rate = row.participationCount > 0
           ? ((row.lotteryWinCount / row.participationCount) * 100).toFixed(1)
           : '0.0'
-        const text = compact
-          ? `参${row.participationCount} 中${row.lotteryWinCount} 成${rate}% 收¥${(Number(row.todayEarnedDiamonds || 0) / 10).toFixed(2)}`
-          : `参与${row.participationCount} 福袋中${row.lotteryWinCount} 红包中${row.redPacketWinCount} 成功率${rate}% 收益¥${(Number(row.todayEarnedDiamonds || 0) / 10).toFixed(2)}`
-        return h('span', { style: 'font-family: JetBrains Mono, monospace; font-size: 12px;' }, text)
+        const todayDiamonds = Number(row.todayEarnedDiamonds || 0)
+        const partText = compact
+          ? `参 ${row.participationCount} · 中 ${row.lotteryWinCount}`
+          : `参与 ${row.participationCount} · 福袋中 ${row.lotteryWinCount} · 红包中 ${row.redPacketWinCount}`
+        return h('div', { class: 'account-stats-cell' }, [
+          h('div', { class: 'account-stats-main' }, partText),
+          h('div', { class: 'account-stats-sub' }, `成功率 ${rate}% · 今日 ${todayDiamonds} 抖币`)
+        ])
       }
     }
   ]
@@ -314,21 +338,23 @@ const responsiveColumns = computed(() => {
   base.push({
     title: '操作',
     key: 'actions',
-    width: compact ? 120 : 220,
+    width: compact ? 120 : 150,
     fixed: actionFixed,
-    render: (row) => compact
-      ? h(NButton, {
-        size: 'small',
+    render: (row) => h('div', { class: 'account-actions-cell' }, [
+      h(NButton, {
+        size: compact ? 'tiny' : 'small',
         type: row.state === 'running' ? 'warning' : 'primary',
+        secondary: true,
+        strong: true,
         onClick: () => toggleAccount(row)
-      }, { default: () => row.state === 'running' ? '暂停' : '启动' })
-      : h(NSpace, { size: 6 }, {
-        default: () => [
-          h(NButton, { size: 'tiny', type: row.state === 'running' ? 'warning' : 'primary', onClick: () => toggleAccount(row) }, { default: () => row.state === 'running' ? '暂停' : '启动' }),
-          h(NButton, { size: 'tiny', type: 'info', onClick: () => refreshUserInfo(row.id), disabled: !row.token }, { default: () => '刷新' }),
-          h(NButton, { size: 'tiny', type: 'error', onClick: () => removeAccount(row.id) }, { default: () => '删除' })
-        ]
-      })
+      }, { default: () => row.state === 'running' ? '暂停' : '启动' }),
+      h(NButton, {
+        size: compact ? 'tiny' : 'small',
+        quaternary: true,
+        type: 'error',
+        onClick: () => removeAccount(row.id)
+      }, { default: () => '删除' })
+    ])
   })
 
   return base
@@ -337,6 +363,25 @@ const responsiveColumns = computed(() => {
 const accountTableScrollX = computed(() => {
   return responsiveColumns.value.reduce((sum, col) => sum + Number(col.width || 120), 0) + 40
 })
+
+function appendLotteryHistory(record) {
+  if (!record || typeof record !== 'object') return
+  const normalized = {
+    accountId: record.accountId || '',
+    accountNickname: record.accountNickname || record.accountId || '未知账号',
+    roomId: record.roomId || '',
+    webRid: record.webRid || '',
+    authorNickname: record.authorNickname || '',
+    lotteryName: record.lotteryName || '',
+    predictedProbability: Number(record.predictedProbability || 0),
+    joinMode: record.joinMode || 'API',
+    joinStatus: record.joinStatus || 'success',
+    resultReason: record.resultReason || '',
+    joinedAt: Number(record.joinedAt || Date.now()),
+    endTime: Number(record.endTime || 0)
+  }
+  lotteryHistory.value = [normalized, ...lotteryHistory.value].slice(0, 300)
+}
 
 function addAccount() {
   let max = 0
@@ -374,7 +419,7 @@ async function startAccountWithLogin(account) {
           saveResult = await ipcRenderer.invoke('save-token', { accountId: account.id, tokenInfo: tr.tokenInfo, userInfo: fallbackInfo })
         }
 
-        const finalNickname = info?.nickname || saveResult.savedInfo?.nickname || account.nickname
+        const finalNickname = normalizeNickname(info?.nickname || saveResult.savedInfo?.nickname || account.nickname)
         const finalUserId = info?.userId || saveResult.savedInfo?.userId || account.userId || account.id
         account.nickname = finalNickname
         account.userId = finalUserId
@@ -416,16 +461,16 @@ async function startAccountScanning(account) {
       onStatusUpdate: (upd) => { const i = accounts.value.findIndex(a => a.id === upd.id); if(i !== -1) accounts.value[i] = { ...accounts.value[i], ...upd } },
       onLotteryListUpdate: ({ accountId, list }) => {
         const a = accounts.value.find(acc => acc.id === accountId)
-        const filteredList = (list || []).filter(item => !(config.value.filterFanClub?.enabled && hasFanClubRequirement(item)))
         lotteriesByAccount.value = {
           ...lotteriesByAccount.value,
-          [accountId]: filteredList.map(item => ({
+          [accountId]: (list || []).map(item => ({
           ...item,
           _scanAccountId: accountId,
-          _scanAccountNickname: a?.nickname || accountId
+            _scanAccountNickname: a?.nickname || accountId
           }))
         }
       },
+      onHistoryRecord: (record) => appendLotteryHistory(record),
       onLog: (m, t) => addLog(m, t)
     })
   } catch (e) { addLog(`启动失败: ${e.message}`, 'error') }
@@ -452,42 +497,79 @@ function handleBlockRoom(roomId) {
   addLog(`🚫 已屏蔽直播间: ${roomId}`)
 }
 
-async function refreshUserInfo(id) {
-  if (!ipcRenderer) return
-  try {
-    const ir = await ipcRenderer.invoke('get-user-info', id)
-    if (ir.success) {
-      const a = accounts.value.find(acc => acc.id === id)
-      if (a) {
-        a.nickname = ir.userInfo.nickname
-        if (ir.userInfo.userId) a.userId = ir.userInfo.userId
-      }
-    }
-  } catch (e) {}
-}
-
 function addLog(message, type = 'info') {
   logs.value.push({ time: new Date().toLocaleTimeString(), message, type })
-  if (logs.value.length > 100) logs.value.shift()
+  if (logs.value.length > 300) logs.value.shift()
 }
 </script>
 
+<style>
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  overflow: hidden;
+  background: #e8edf4;
+}
+</style>
+
 <style scoped>
+.app-root {
+  width: 100%;
+  height: 100%;
+}
+
+.desktop-shell {
+  --shell-bg-start: #f1f4f8;
+  --shell-bg-end: #e5ebf3;
+  --card-border: #e2e9f2;
+  --card-shadow: rgba(15, 23, 42, 0.08);
+  --card-shadow-strong: rgba(15, 23, 42, 0.12);
+  width: 100%;
+  height: 100vh;
+  min-height: 100vh;
+  padding: 0;
+  box-sizing: border-box;
+  background:
+    radial-gradient(900px 500px at -12% -14%, rgba(24, 160, 88, 0.16), transparent 70%),
+    radial-gradient(1040px 620px at 112% -8%, rgba(77, 144, 255, 0.13), transparent 66%),
+    linear-gradient(180deg, var(--shell-bg-start) 0%, var(--shell-bg-end) 100%);
+}
+
+.window-frame {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-radius: 0;
+  border: 0;
+  box-shadow: none;
+  overflow: hidden;
+  background: #eef3f7;
+  font-family: 'SF Pro Display', 'PingFang SC', 'MiSans', 'Helvetica Neue', sans-serif;
+}
+
 .app-container {
   display: flex;
-  width: 100vw;
-  height: 100vh;
+  flex: 1;
+  min-height: 0;
   background:
-    radial-gradient(1200px 500px at -10% -20%, rgba(24, 160, 88, 0.14), transparent 65%),
-    radial-gradient(900px 600px at 110% 0%, rgba(255, 122, 24, 0.1), transparent 60%),
-    linear-gradient(180deg, #f7faf8 0%, #f2f5f3 100%);
+    radial-gradient(1200px 560px at -8% -18%, rgba(24, 160, 88, 0.14), transparent 67%),
+    radial-gradient(980px 640px at 112% -4%, rgba(68, 132, 255, 0.12), transparent 64%),
+    linear-gradient(180deg, #f9fbfe 0%, #eef3f8 100%);
   overflow: hidden;
 }
 
 .header-base {
-  height: 64px;
-  background-color: #fff;
-  border-bottom: 1px solid #efeff5;
+  height: 66px;
+  background-color: rgba(255, 255, 255, 0.9);
+  border-bottom: 1px solid #e3e9f1;
   display: flex;
   align-items: center;
   flex-shrink: 0;
@@ -496,29 +578,25 @@ function addLog(message, type = 'info') {
 
 /* 侧边栏样式 */
 .sidebar {
-  width: 292px;
+  width: 278px;
   display: flex;
   flex-direction: column;
-  background-color: rgba(255, 255, 255, 0.92);
-  border-right: 1px solid #e7ece8;
-  box-shadow: 0 10px 30px rgba(31, 41, 55, 0.08);
-  backdrop-filter: blur(8px);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.93) 0%, rgba(250, 252, 255, 0.91) 100%);
+  border-right: 1px solid #d8e1ed;
+  box-shadow: 8px 0 18px rgba(31, 41, 55, 0.045);
+  backdrop-filter: blur(10px);
   z-index: 10;
 }
 .sidebar-header {
-  padding: 0 18px;
-  gap: 8px;
+  padding: 0 16px;
+  gap: 10px;
 }
 .title-text {
   margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-}
-.sidebar-footer {
-  padding: 14px 16px 18px;
-  border-top: 1px solid #eef2ef;
-  background-color: rgba(255, 255, 255, 0.9);
-  flex-shrink: 0;
+  font-size: 29px;
+  font-weight: 700;
+  color: #203247;
+  letter-spacing: 0.3px;
 }
 
 /* 主体内容样式 */
@@ -533,10 +611,10 @@ function addLog(message, type = 'info') {
 /* 内容体布局 */
 .content-body {
   flex: 1;
-  padding: 16px 18px 18px;
+  padding: 14px 16px 16px;
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(320px, 1fr);
-  gap: 16px;
+  grid-template-columns: minmax(0, 1.63fr) minmax(308px, 0.86fr);
+  gap: 14px;
   overflow: hidden;
   box-sizing: border-box;
   min-height: 0;
@@ -544,7 +622,7 @@ function addLog(message, type = 'info') {
 .column-left {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
   height: 100%;
   min-width: 0;
   min-height: 0;
@@ -559,11 +637,21 @@ function addLog(message, type = 'info') {
 @media (max-width: 1200px) {
   .content-body {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(300px, auto) minmax(280px, 38vh);
+    grid-template-rows: minmax(320px, auto) minmax(280px, 40vh);
   }
 }
 
 @media (max-width: 900px) {
+  .desktop-shell {
+    padding: 0;
+  }
+
+  .window-frame {
+    border-radius: 0;
+    border: 0;
+    box-shadow: none;
+  }
+
   .app-container {
     flex-direction: column;
     height: auto;
@@ -594,6 +682,44 @@ function addLog(message, type = 'info') {
     height: auto;
     min-height: 320px;
   }
+}
+
+.account-name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: #2b3a4c;
+}
+
+.account-stats-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.account-stats-main {
+  font-size: 12px;
+  color: #314155;
+  font-family: 'JetBrains Mono', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-stats-sub {
+  font-size: 11px;
+  color: #7d8ba0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-actions-cell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .hide-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }

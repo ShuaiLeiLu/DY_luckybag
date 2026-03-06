@@ -1,0 +1,69 @@
+# 依赖
+node_modules/
+package-lock.json
+
+# 构建输出
+dist/
+dist-electron/
+超人福袋助手/
+
+# 日志
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# 编辑器
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# 隐私信息（重要！）
+tokens.json
+*.token
+*.session
+
+# 允许示例文件
+!tokens.example.json
+!*.example.json
+
+# 用户数据
+.kiro/
+~/.douyin-lottery-tokens.json
+
+# 测试文件
+test-*.js
+*.test.js
+
+# 临时文件
+*.tmp
+*.temp
+.cache/
+.temp/
+
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# 系统文件
+Thumbs.db
+Desktop.ini
+
+# Electron
+out/
+.webpack/
+
+# 备份文件
+*.backup
+*.bak
+*.old
+App.vue.backup
