@@ -251,8 +251,20 @@ const handleResize = () => {
   windowWidth.value = window.innerWidth
 }
 
+/**
+ * handleBeforeUnload 方法：应用退出前立即停止本地扫描与轮询任务，避免窗口关闭后仍继续执行脚本。
+ */
+function handleBeforeUnload() {
+  try {
+    lotteryManager.shutdownAllAccounts()
+  } catch (_) {
+    // ignore
+  }
+}
+
 onMounted(async () => {
   window.addEventListener('resize', handleResize)
+  window.addEventListener('beforeunload', handleBeforeUnload)
   lotteryManager.setScanConfig({ countPerPage: 15, pagesPerCategory: 12, allCount: 24 })
   lotteryManager.setPoolServerConfig(config.value.poolServer, { silent: true })
   await loadAllAccounts()
@@ -336,6 +348,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
+  window.removeEventListener('beforeunload', handleBeforeUnload)
+  handleBeforeUnload()
   ipcUnsubscribers.forEach(off => {
     try { off && off() } catch (_) {}
   })
@@ -776,7 +790,12 @@ async function startAccountScanning(account) {
     if (!lr.success) return
     const tr = await ipcRenderer.invoke('load-token', account.id)
     if (!tr.success) return
-    await ipcRenderer.invoke('set-cookies', { accountId: account.id, tokenInfo: tr.tokenInfo })
+    const setRes = await ipcRenderer.invoke('set-cookies', { accountId: account.id, tokenInfo: tr.tokenInfo })
+    if (!setRes?.success || setRes?.isLoginCookieReady === false) {
+      addLog(`账号 ${account.nickname} Token写入失败: ${setRes?.error || '关键登录cookie未写入成功'}`, 'error')
+      account.state = 'waiting'
+      return
+    }
     await ipcRenderer.invoke('navigate-to', { accountId: account.id, url: 'https://www.douyin.com' })
     account.state = 'running'
     lotteryManager.startAccount(account, config.value, {

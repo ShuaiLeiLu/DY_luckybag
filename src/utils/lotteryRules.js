@@ -4,6 +4,8 @@ export const RESTRICTED_JOIN_RE = /(粉丝团|粉丝专属|仅粉丝|仅限粉�
 const PHYSICAL_NAME_RE = /(实物|包邮|礼盒|手机|平板|电脑|耳机|手表|鼠标|键盘|洗衣液|纸巾|零食|玩偶|公仔|盲盒|礼品|奖品|抱枕|杯子)/
 const VIRTUAL_NAME_RE = /(抖币|钻石|红包|优惠券|代金券|金币|福豆|会员|体验卡|流量|点券)/
 const REDPACK_NAME_RE = /(红包|抖币|钻石|现金|元)/
+const EN_FANCLUB_RE = /\b(fan\s*club|fanclub|fans\s*club|fansclub)\b/i
+const EN_MEMBER_RE = /\b(member\s*only|subscriber|subscription|subscribe)\b/i
 
 /**
  * 提取参与条件中的可读文本，供规则判断复用。
@@ -19,13 +21,22 @@ function extractConditionText(condition) {
     condition?.title,
     condition?.text,
     condition?.condition_desc,
-    condition?.condition_text,
-    JSON.stringify(condition || {})
+    condition?.condition_text
   ].filter(Boolean).join(' ')
   return {
     raw: String(raw || ''),
     lower: String(raw || '').toLowerCase()
   }
+}
+
+/**
+ * 判断条件对象上是否存在显式布尔标记。
+ * @param {object} condition 单条参与条件
+ * @param {string[]} keys 候选键列表
+ * @returns {boolean}
+ */
+function hasTruthyFlag(condition, keys = []) {
+  return keys.some((key) => condition?.[key] === true)
 }
 
 /**
@@ -38,11 +49,21 @@ export function hasFanClubJoinRequirement(lottery) {
   return conditions.some((c) => {
     const typeNum = Number(c?.type)
     if (typeNum === 2) return true
+    if (hasTruthyFlag(c, [
+      'need_fans_club',
+      'need_fan_club',
+      'fanclub_required',
+      'fansclub_required',
+      'join_fans_club',
+      'join_fan_club'
+    ])) {
+      return true
+    }
     const { raw, lower } = extractConditionText(c)
     return (
       FANCLUB_JOIN_RE.test(raw) ||
-      lower.includes('fans') ||
-      lower.includes('fanclub')
+      EN_FANCLUB_RE.test(raw) ||
+      lower.includes('加入粉丝团')
     )
   })
 }
@@ -55,11 +76,20 @@ export function hasFanClubJoinRequirement(lottery) {
 export function hasMemberJoinRequirement(lottery) {
   const conditions = Array.isArray(lottery?.conditions) ? lottery.conditions : []
   return conditions.some((c) => {
+    if (hasTruthyFlag(c, [
+      'member_only',
+      'need_member',
+      'need_subscribe',
+      'subscribe_required',
+      'subscription_required'
+    ])) {
+      return true
+    }
     const { raw, lower } = extractConditionText(c)
     return (
       MEMBER_JOIN_RE.test(raw) ||
+      EN_MEMBER_RE.test(raw) ||
       lower.includes('member_only') ||
-      lower.includes('subscriber') ||
       lower.includes('subscription')
     )
   })

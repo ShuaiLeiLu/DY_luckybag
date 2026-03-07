@@ -21,6 +21,30 @@ const tokenStorePath = isDev
 const protocolGuardPartitions = new Set()
 
 /**
+ * 判断扫描追踪日志是否启用（环境变量 DY_SCAN_TRACE，默认关闭）。
+ */
+function isScanTraceEnabled() {
+  const raw = String(process.env.DY_SCAN_TRACE ?? '0').trim().toLowerCase()
+  return !['0', 'false', 'off', 'no'].includes(raw)
+}
+
+/**
+ * 输出扫描追踪日志（直接打印到 IDE 终端）。
+ */
+function traceScan(tag, payload = null) {
+  if (!isScanTraceEnabled()) return
+  if (payload === null || payload === undefined) {
+    console.log(`[scan-trace] ${tag}`)
+    return
+  }
+  try {
+    console.log(`[scan-trace] ${tag}`, JSON.stringify(payload))
+  } catch (_) {
+    console.log(`[scan-trace] ${tag}`, payload)
+  }
+}
+
+/**
  * isBlockedExternalProtocol 方法：判断 URL 是否为需要拦截的外部协议。
  */
 function isBlockedExternalProtocol(url = '') {
@@ -162,6 +186,48 @@ function cookieObjToString(cookieObj) {
 }
 
 /**
+ * normalizeCookieValue 方法：清洗 cookie 值（兼容“name=value; path=...”格式）。
+ */
+function normalizeCookieValue(name, rawValue) {
+  let value = String(rawValue ?? '').trim().replace(/[\r\n]/g, '')
+  if (!value) return ''
+  const kvPrefix = `${name}=`
+  if (value.startsWith(kvPrefix)) {
+    value = value.slice(kvPrefix.length).trim()
+  }
+  const semiIdx = value.indexOf(';')
+  if (semiIdx >= 0) {
+    value = value.slice(0, semiIdx).trim()
+  }
+  return value
+}
+
+/**
+ * setCookieWithFallback 方法：按多组参数回退写入 cookie，提升兼容性。
+ */
+async function setCookieWithFallback(accountSession, name, value, currentTime) {
+  const isSessionCookie = name === 'sessionid' || name === 'sessionid_ss'
+  const tryList = [
+    { label: 'www-dot-lax', payload: { url: 'https://www.douyin.com/', name, value, domain: '.douyin.com', path: '/', secure: true, httpOnly: isSessionCookie, sameSite: 'lax', expirationDate: currentTime + 86400 * 30 } },
+    { label: 'live-dot-lax', payload: { url: 'https://live.douyin.com/', name, value, domain: '.douyin.com', path: '/', secure: true, httpOnly: isSessionCookie, sameSite: 'lax', expirationDate: currentTime + 86400 * 30 } },
+    { label: 'www-root-unspecified', payload: { url: 'https://www.douyin.com/', name, value, domain: 'douyin.com', path: '/', secure: true, httpOnly: isSessionCookie, sameSite: 'unspecified', expirationDate: currentTime + 86400 * 30 } },
+    { label: 'live-host-session', payload: { url: 'https://live.douyin.com/', name, value, path: '/', secure: true, httpOnly: isSessionCookie, sameSite: 'unspecified' } },
+    { label: 'www-host-session', payload: { url: 'https://www.douyin.com/', name, value, path: '/', secure: true, httpOnly: isSessionCookie, sameSite: 'unspecified' } }
+  ]
+
+  let lastError = null
+  for (const item of tryList) {
+    try {
+      await accountSession.cookies.set(item.payload)
+      return { ok: true, via: item.label }
+    } catch (e) {
+      lastError = e
+    }
+  }
+  return { ok: false, error: lastError || new Error('Setting cookie failed') }
+}
+
+/**
  * 使用 session 获取账号 cookie，并拼接为 header 字符串
  * @param {string} accountId
  * @returns {Promise<{ cookies: Array, cookieString: string }>}
@@ -171,9 +237,38 @@ async function getAccountCookiesAndString(accountId) {
   if (!browserData) {
     throw new Error('浏览器实例不存在')
   }
-  const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
-  const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
+
+  const [cDomain, cWww, cLive] = await Promise.all([
+    browserData.session.cookies.get({ domain: '.douyin.com' }).catch(() => []),
+    browserData.session.cookies.get({ url: 'https://www.douyin.com/' }).catch(() => []),
+    browserData.session.cookies.get({ url: 'https://live.douyin.com/' }).catch(() => [])
+  ])
+  const map = new Map()
+  for (const c of [...cDomain, ...cWww, ...cLive]) {
+    if (!c?.name) continue
+    const key = `${c.name}|${c.domain || ''}|${c.path || ''}`
+    map.set(key, c)
+  }
+  const cookies = Array.from(map.values())
+  const cookieString = cookies
+    .filter(c => c?.name && c?.value)
+    .map(c => `${c.name}=${c.value}`)
+    .join('; ')
   return { cookies, cookieString }
+}
+
+/**
+ * safeGetAccountCookieString 方法：获取账号 cookie header 字符串（失败时返回空串）。
+ */
+async function safeGetAccountCookieString(accountId) {
+  if (!accountId) return ''
+  try {
+    const { cookieString } = await getAccountCookiesAndString(accountId)
+    return cookieString
+  } catch (e) {
+    logger.warn('⚠️ 获取Cookie失败:', e.message)
+    return ''
+  }
 }
 
 /**
@@ -241,7 +336,7 @@ async function fetchUserInfoFromApis(cookieString) {
     'Cookie': cookieString
   }
 
-  // 参考“超人福袋助手”优先使用 creator 接口
+  // 参考“福袋助手”优先使用 creator 接口
   try {
     const creatorRes = await requestJson('https://creator.douyin.com/web/api/media/user/info/', {
       ...commonHeaders,
@@ -420,24 +515,41 @@ app.whenReady().then(() => {
   logger.debug('  - attend-lottery')
   logger.debug('  - room-like')
   logger.debug('  - room-chat')
+  logger.debug('  - scan-debug-log')
   logger.debug('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
 })
 
 // ... 前面的代码保持不变 ...
+
+/**
+ * scan-debug-log 方法：接收渲染进程扫描汇总并输出到主进程控制台，便于 IDE 观察每轮结果。
+ */
+ipcMain.handle('scan-debug-log', async (_event, payload = {}) => {
+  try {
+    const accountId = String(payload?.accountId || '')
+    const stage = String(payload?.stage || payload?.type || 'scan')
+    const request = Number(payload?.requestIndex || 0)
+    const summary = payload?.summary && typeof payload.summary === 'object'
+      ? payload.summary
+      : payload
+    const safeJson = JSON.stringify(summary || {})
+    const maxLen = 3200
+    const compact = safeJson.length > maxLen ? `${safeJson.slice(0, maxLen)}...` : safeJson
+    const requestText = request > 0 ? ` request=${request}` : ''
+    console.log(`[main-browserview] [scan-summary] [${accountId || 'unknown'}] [${stage}]${requestText} ${compact}`)
+    return { success: true }
+  } catch (error) {
+    console.log('[main-browserview] [scan-summary] print-failed', error?.message || error)
+    return { success: false, error: error?.message || String(error) }
+  }
+})
 
 // ==================== 互动操作 ====================
 
 // 参与福袋
 ipcMain.handle('attend-lottery', async (event, { roomId, lotteryId, webRid = null, accountId }) => {
   try {
-    let cookieString = ''
-    if (accountId) {
-      const browserData = browserViews.get(accountId)
-      if (browserData) {
-        const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
-        cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
-      }
-    }
+    const cookieString = await safeGetAccountCookieString(accountId)
 
     const commonHeaders = {
       cookie: cookieString,
@@ -496,14 +608,7 @@ ipcMain.handle('attend-lottery', async (event, { roomId, lotteryId, webRid = nul
 // 直播间点赞
 ipcMain.handle('room-like', async (event, { roomId, accountId, count = 1 }) => {
   try {
-    let cookieString = ''
-    if (accountId) {
-      const browserData = browserViews.get(accountId)
-      if (browserData) {
-        const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
-        cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
-      }
-    }
+    const cookieString = await safeGetAccountCookieString(accountId)
 
     const json = await douyinLiveRemote('/webcast/room/digg/', {
       room_id: roomId,
@@ -522,14 +627,7 @@ ipcMain.handle('room-like', async (event, { roomId, accountId, count = 1 }) => {
 // 发送弹幕
 ipcMain.handle('room-chat', async (event, { roomId, content, accountId }) => {
   try {
-    let cookieString = ''
-    if (accountId) {
-      const browserData = browserViews.get(accountId)
-      if (browserData) {
-        const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
-        cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
-      }
-    }
+    const cookieString = await safeGetAccountCookieString(accountId)
 
     const json = await douyinLiveRemote('/webcast/room/chat/', {
       room_id: roomId,
@@ -608,7 +706,7 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
     
     logger.info(`[${accountId}] 已创建独立session: ${partition}`)
 
-    // 参考超人福袋：默认静音，避免多账号运行时音频干扰
+    // 参考福袋：默认静音，避免多账号运行时音频干扰
     try {
       browserWindow.webContents.setAudioMuted(true)
     } catch (e) {
@@ -1001,7 +1099,6 @@ ipcMain.handle('set-cookies', async (event, { accountId, tokenInfo }) => {
       throw new Error('浏览器实例不存在')
     }
     
-    const domain = '.douyin.com'
     const currentTime = Math.floor(Date.now() / 1000)
     
     // 只设置真正的 cookie 字段，排除其他字段
@@ -1016,32 +1113,54 @@ ipcMain.handle('set-cookies', async (event, { accountId, tokenInfo }) => {
     ]
     
     let setCookieCount = 0
+    const setStatus = {}
     
     for (const name of cookieFields) {
-      const value = tokenInfo[name]
-      if (value && typeof value === 'string' && value.length > 0) {
+      const rawValue = tokenInfo?.[name]
+      const value = normalizeCookieValue(name, rawValue)
+      if (value && value.length > 0) {
         try {
-          await browserData.session.cookies.set({
-            url: 'https://www.douyin.com',
-            name,
-            value,
-            domain,
-            path: '/',
-            expirationDate: currentTime + 86400 * 30,
-            httpOnly: false,
-            secure: true,
-            sameSite: 'lax'
-          })
-          setCookieCount++
-          logger.info(`✅ [${accountId}] 已设置 cookie: ${name}`)
+          const result = await setCookieWithFallback(browserData.session, name, value, currentTime)
+          if (!result.ok) {
+            throw result.error
+          }
+          setCookieCount += 1
+          setStatus[name] = 'ok'
+          logger.info(`✅ [${accountId}] 已设置 cookie: ${name} (${result.via})`)
         } catch (e) {
-          logger.error(`❌ [${accountId}] 设置 cookie 失败 (${name}):`, e.message)
+          setStatus[name] = 'failed'
+          logger.error(`❌ [${accountId}] 设置 cookie 失败 (${name}):`, e?.message || e)
         }
       }
     }
-    
+
+    // 校验关键登录cookie是否写入成功
+    const verifyLiveCookies = await browserData.session.cookies.get({ url: 'https://live.douyin.com/' })
+    const verifyWwwCookies = await browserData.session.cookies.get({ url: 'https://www.douyin.com/' })
+    const merged = [...verifyLiveCookies, ...verifyWwwCookies]
+    const hasSessionid = merged.some(c => c?.name === 'sessionid' && c?.value)
+    const hasSessionidSs = merged.some(c => c?.name === 'sessionid_ss' && c?.value)
+    const hasTtwid = merged.some(c => c?.name === 'ttwid' && c?.value)
+    const isLoginCookieReady = hasSessionid || hasSessionidSs
+
     logger.info(`✅ [${accountId}] 共设置 ${setCookieCount} 个 cookies`)
-    return { success: true, count: setCookieCount }
+    if (!isLoginCookieReady) {
+      logger.warn(`⚠️ [${accountId}] 登录关键cookie未就绪: sessionid=${hasSessionid} sessionid_ss=${hasSessionidSs} ttwid=${hasTtwid}`)
+      return {
+        success: false,
+        count: setCookieCount,
+        status: setStatus,
+        isLoginCookieReady: false,
+        error: '关键登录cookie写入失败'
+      }
+    }
+
+    return {
+      success: true,
+      count: setCookieCount,
+      status: setStatus,
+      isLoginCookieReady: true
+    }
   } catch (error) {
     logger.error(`❌ [${accountId}] 设置Cookie失败:`, error)
     return { success: false, error: error.message }
@@ -1053,19 +1172,13 @@ ipcMain.handle('set-cookies', async (event, { accountId, tokenInfo }) => {
 // 搜索直播间-【全部】
 ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCount = 24, maxTime = null } = {}) => {
   try {
-    // 获取cookie
-    let cookieString = ''
-    if (accountId) {
-      const browserData = browserViews.get(accountId)
-      if (browserData) {
-        try {
-          const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
-          cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
-        } catch (e) {
-          logger.warn('⚠️ 获取Cookie失败:', e.message)
-        }
-      }
-    }
+    traceScan('request search-live-by-all', {
+      accountId: accountId || '',
+      customCount: Math.max(8, Number(customCount) || 24),
+      maxTime: Number(maxTime) > 0 ? Number(maxTime) : null
+    })
+
+    const cookieString = await safeGetAccountCookieString(accountId)
     
     // 完全按照原项目的参数
     const params = {
@@ -1119,22 +1232,39 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCou
       return { success: false, error: '响应数据格式错误', detail: json }
     }
     
-    // 对齐超人：仅筛选明确标记有福袋的直播间
-    const roomInfoList = json.data
-      .filter(room => Boolean(room?.data?.others?.web_enter_benefit_point_data?.has_ongoing_lottery))
-      .map(room => ({
-        webRid: room.web_rid,
-        roomId: room.data.id_str,
-        roomTitle: room.data.title,
-        authorNickname: room.data.owner.nickname,
-        authorSecUid: room.data.owner.sec_uid,
-        onlineTotal: room.data.user_count
-      }))
-    
+    // 放宽预筛选：不强依赖 has_ongoing_lottery 标记，避免漏扫真实可参与福袋。
+    const mappedRooms = json.data
+      .map(room => {
+        const roomData = room?.data || {}
+        const roomId = String(roomData?.id_str || '')
+        if (!roomId) return null
+        return {
+          webRid: room?.web_rid || roomId,
+          roomId,
+          roomTitle: roomData?.title || '',
+          authorNickname: roomData?.owner?.nickname || '',
+          authorSecUid: roomData?.owner?.sec_uid || '',
+          onlineTotal: roomData?.user_count || 0,
+          hasLotteryHint: Boolean(roomData?.others?.web_enter_benefit_point_data?.has_ongoing_lottery)
+        }
+      })
+      .filter(Boolean)
+    const roomInfoList = mappedRooms
+
     const hasMore = Boolean(json?.extra?.has_more)
     const nextMaxTime = Number(json?.extra?.max_time || 0)
+    const hintedCount = roomInfoList.filter(v => v?.hasLotteryHint === true).length
 
     logger.debug(`[search-live-by-all] 找到 ${roomInfoList.length} 个有福袋的直播间`)
+    traceScan('response search-live-by-all', {
+      accountId: accountId || '',
+      success: true,
+      rawCount: Array.isArray(json?.data) ? json.data.length : 0,
+      lotteryRooms: roomInfoList.length,
+      lotteryHintCount: hintedCount,
+      hasMore,
+      nextMaxTime: nextMaxTime > 0 ? nextMaxTime : null
+    })
     return {
       success: true,
       roomInfoList,
@@ -1143,6 +1273,11 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCou
       rawCount: Array.isArray(json?.data) ? json.data.length : 0
     }
   } catch (error) {
+    traceScan('response search-live-by-all', {
+      accountId: accountId || '',
+      success: false,
+      error: error?.message || 'unknown'
+    })
     logger.error('搜索全部直播间失败:', error)
     return { success: false, error: error.message }
   }
@@ -1151,19 +1286,14 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCou
 // 搜索直播间-【分类】
 ipcMain.handle('search-live-by-category', async (event, { accountId = null, categoryId = '0', offset = 0, count = 15 } = {}) => {
   try {
-    // 获取cookie
-    let cookieString = ''
-    if (accountId) {
-      const browserData = browserViews.get(accountId)
-      if (browserData) {
-        try {
-          const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
-          cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
-        } catch (e) {
-          logger.warn('⚠️ 获取Cookie失败:', e.message)
-        }
-      }
-    }
+    traceScan('request search-live-by-category', {
+      accountId: accountId || '',
+      categoryId: String(categoryId || '0'),
+      offset: Math.max(0, Number(offset) || 0),
+      count: Math.max(1, Number(count) || 15)
+    })
+
+    const cookieString = await safeGetAccountCookieString(accountId)
     
     // 完全按照原项目的参数
     const json = await douyinLiveRemote('/webcast/web/partition/detail/room/v2/', {
@@ -1223,22 +1353,23 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
       }
     }
     
-    // 分类接口字段做兼容解析，仅筛选明确有福袋标记的直播间
+    // 分类接口字段做兼容解析；不强依赖 has_ongoing_lottery，避免漏扫。
     const roomInfoList = rawList
       .map(item => {
         const room = item?.room || item?.data || item
-        const hasLottery = Boolean(
-          room?.others?.web_enter_benefit_point_data?.has_ongoing_lottery ||
-          item?.others?.web_enter_benefit_point_data?.has_ongoing_lottery
-        )
-        if (!hasLottery || !room?.id_str) return null
+        const roomId = String(room?.id_str || '')
+        if (!roomId) return null
         return {
-          webRid: item?.web_rid || item?.webRid || room?.web_rid || room?.id_str,
-          roomId: room.id_str,
+          webRid: item?.web_rid || item?.webRid || room?.web_rid || roomId,
+          roomId,
           roomTitle: room.title || '',
           authorNickname: room?.owner?.nickname || '',
           authorSecUid: room?.owner?.sec_uid || '',
-          onlineTotal: room?.user_count || 0
+          onlineTotal: room?.user_count || 0,
+          hasLotteryHint: Boolean(
+            room?.others?.web_enter_benefit_point_data?.has_ongoing_lottery ||
+            item?.others?.web_enter_benefit_point_data?.has_ongoing_lottery
+          )
         }
       })
       .filter(Boolean)
@@ -1251,6 +1382,16 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
     )
 
     logger.debug(`[search-live-by-category] 原始${rawList.length}个, 筛出${roomInfoList.length}个有福袋直播间`)
+    traceScan('response search-live-by-category', {
+      accountId: accountId || '',
+      categoryId: String(categoryId || '0'),
+      success: true,
+      rawCount: rawList.length,
+      lotteryRooms: roomInfoList.length,
+      lotteryHintCount: roomInfoList.filter(v => v?.hasLotteryHint === true).length,
+      hasMore,
+      nextOffset
+    })
     return {
       success: true,
       roomInfoList,
@@ -1259,6 +1400,12 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
       nextOffset
     }
   } catch (error) {
+    traceScan('response search-live-by-category', {
+      accountId: accountId || '',
+      categoryId: String(categoryId || '0'),
+      success: false,
+      error: error?.message || 'unknown'
+    })
     logger.error('搜索分类直播间失败:', error)
     return { success: false, error: error.message }
   }
@@ -1266,19 +1413,13 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
 
 ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, accountId }) => {
   try {
-    // 获取cookie
-    let cookieString = ''
-    if (accountId) {
-      const browserData = browserViews.get(accountId)
-      if (browserData) {
-        try {
-          const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
-          cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
-        } catch (e) {
-          logger.warn('⚠️ 获取Cookie失败:', e.message)
-        }
-      }
-    }
+    traceScan('request get-lottery-detail', {
+      accountId: accountId || '',
+      roomId: String(roomId || ''),
+      webRid: String(webRid || '')
+    })
+
+    const cookieString = await safeGetAccountCookieString(accountId)
 
     const referers = [webRid, roomId]
       .filter(Boolean)
@@ -1317,13 +1458,14 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, acco
 
     const lottery_info = json.data.lottery_info
 
-    // 对齐超人福袋：仅允许两条条件且必须是 type=3 + type=6，同时过滤会员/粉丝团限制
+    // 条件预过滤：仅保留可自动参与的基础类型（type=3+6），会员限制直接过滤。
+    // 粉丝团是否过滤由前端开关控制，因此这里不做粉丝团硬过滤，避免误杀候选。
     const conditions = Array.isArray(lottery_info.conditions) ? lottery_info.conditions : []
     const conditionTypes = conditions.map(c => Number(c?.type)).filter(n => Number.isFinite(n))
-    const sortedTypes = [...conditionTypes].sort((a, b) => a - b)
-    const hasExactType36 = conditions.length === 2 && sortedTypes[0] === 3 && sortedTypes[1] === 6
-    const restrictedRe = /(粉丝团|粉丝专属|仅粉丝|仅限粉丝|铁粉|团员|加团|加入粉丝团|会员|会员专属|会员可参与|主播会员|vip|VIP|订阅后可参与|需订阅|fanclub|member_only|fans)/i
-    const hasRestrictedCondition = conditions.some((c) => {
+    const hasType3 = conditionTypes.includes(3)
+    const hasType6 = conditionTypes.includes(6)
+    const memberOnlyRe = /(会员|会员专属|会员可参与|主播会员|仅会员|vip|VIP|订阅后可参与|需订阅|member_only|subscriber|subscription)/i
+    const hasMemberRestriction = conditions.some((c) => {
       const text = [
         c?.content,
         c?.desc,
@@ -1335,11 +1477,19 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, acco
         c?.condition_text,
         JSON.stringify(c || {})
       ].filter(Boolean).join(' ')
-      return restrictedRe.test(String(text || ''))
+      return memberOnlyRe.test(String(text || ''))
     })
-    const hasValidConditions = hasExactType36 && !hasRestrictedCondition
+    const hasValidConditions = hasType3 && hasType6 && !hasMemberRestriction
 
     if (!hasValidConditions) {
+      traceScan('filter get-lottery-detail reject', {
+        accountId: accountId || '',
+        roomId: String(roomId || ''),
+        conditionTypes,
+        hasType3,
+        hasType6,
+        hasMemberRestriction
+      })
       return { success: false, error: `福袋条件不符合(${conditionTypes.join(',') || 'none'})` }
     }
 
@@ -1359,13 +1509,34 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, acco
       conditions
     }
 
+    traceScan('response get-lottery-detail', {
+      accountId: accountId || '',
+      roomId: String(roomId || ''),
+      success: true,
+      lotteryId: String(lotteryDetail.lottery_id || ''),
+      joinTotal: Number(lotteryDetail.joinTotal || 0),
+      luckyCount: Number(lotteryDetail.winningTotal || 0),
+      conditions: conditionTypes
+    })
     return { success: true, lotteryDetail }
   } catch (error) {
+    traceScan('response get-lottery-detail', {
+      accountId: accountId || '',
+      roomId: String(roomId || ''),
+      success: false,
+      error: error?.message || 'unknown',
+      code: error?.code || ''
+    })
     logger.error('获取福袋详情失败:', error)
     const message = error?.code === 'NON_JSON_RESPONSE'
       ? `接口返回非JSON内容(${error.statusCode || 'unknown'})`
       : error.message
-    return { success: false, error: message, code: error?.code || 'UNKNOWN' }
+    return {
+      success: false,
+      error: message,
+      code: error?.code || 'UNKNOWN',
+      statusCode: Number(error?.statusCode || 0)
+    }
   }
 })
 
@@ -1386,17 +1557,9 @@ ipcMain.handle('collect-lotteries-by-category', async (event, { categoryId = '0'
       let dynamicParams = {}
       
       if (accountId) {
-        const browserData = browserViews.get(accountId)
-        if (browserData) {
-          try {
-            const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
-            cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
-            dynamicParams = extractParamsFromCookie(cookieString)
-            logger.debug(`[分类扫描] 使用账号 ${accountId} 的Cookie`)
-          } catch (e) {
-            logger.warn('⚠️ 获取Cookie失败:', e.message)
-          }
-        }
+        cookieString = await safeGetAccountCookieString(accountId)
+        dynamicParams = extractParamsFromCookie(cookieString)
+        logger.debug(`[分类扫描] 使用账号 ${accountId} 的Cookie`)
       }
       
       try {

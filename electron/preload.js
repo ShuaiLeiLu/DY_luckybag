@@ -20,7 +20,8 @@ const INVOKE_CHANNELS = new Set([
   'collect-lotteries-by-category',
   'attend-lottery',
   'room-like',
-  'room-chat'
+  'room-chat',
+  'scan-debug-log'
 ])
 
 const EVENT_CHANNELS = new Set([

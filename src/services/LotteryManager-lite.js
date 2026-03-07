@@ -903,7 +903,8 @@ class LotteryManager {
         tokenInfo: null,
         participationCount: 0,
         startedAt: Date.now(),
-        monitoringStarted: false
+        monitoringStarted: false,
+        firstRoundScanDone: false
       }
       
       this.accounts.set(account.id, accountData)
@@ -944,7 +945,7 @@ class LotteryManager {
           tokenInfo: tokenResult.tokenInfo
         })
         
-        if (setCookieResult.success) {
+        if (setCookieResult.success && setCookieResult.isLoginCookieReady !== false) {
           accountData.tokenInfo = tokenResult.tokenInfo
           callbacks.onLog(`✅ Token已加载，自动登录成功`)
           callbacks.onStatusUpdate({ 
@@ -964,6 +965,8 @@ class LotteryManager {
             this.startMonitoring(account.id)
           }, 2000)
           return
+        } else {
+          callbacks.onLog(`⚠️ Token写入失败: ${setCookieResult?.error || '关键登录cookie未写入成功'}`, 'warning')
         }
       }
       
@@ -1086,6 +1089,27 @@ class LotteryManager {
   }
 
   /**
+   * shutdownAllAccounts 方法：应用退出前同步关闭所有扫描与等待任务，避免卸载阶段继续执行轮询。
+   */
+  shutdownAllAccounts() {
+    const accountIds = Array.from(this.accounts.keys())
+    for (const accountId of accountIds) {
+      this.setPaused(accountId, true)
+      this.clearAccountTimer(accountId)
+      this.setCollectLoading(accountId, false)
+      this.attendFailureStreak.delete(accountId)
+      this.minPoolEndTimeByAccount.delete(accountId)
+      this.scanRoleByAccount.delete(accountId)
+      this.scanRiskByAccount.delete(accountId)
+      this.skipLotteryUntilByAccount.delete(accountId)
+      this.clearWaitRandomChatState(accountId)
+    }
+    this.scannerAccountId = null
+    this.waitScanDispatchLockUntil = 0
+    this.accounts.clear()
+  }
+
+  /**
    * 检查浏览器是否仍在运行
    */
   async isBrowserAlive(accountId) {
@@ -1143,7 +1167,27 @@ class LotteryManager {
       let scanProfile = scanOnly
         ? this.getDeepScanProfile(baseScanProfile, { deadlineMs })
         : { ...baseScanProfile }
-      if (!scanOnly && quickCycle) {
+      const useSupermanFirstRound = !scanOnly && quickCycle && accountData.firstRoundScanDone !== true
+      if (useSupermanFirstRound) {
+        scanProfile = {
+          ...scanProfile,
+          supermanFirstRound: true,
+          forceLotteryHintOnly: true,
+          allTimes: Math.max(10, Number(scanProfile.allTimes || 10)),
+          maxAllRounds: Math.max(10, Number(scanProfile.maxAllRounds || 10)),
+          noGrowthBreakRounds: Math.max(100, Number(scanProfile.noGrowthBreakRounds || 100)),
+          allCount: 8,
+          pagesPerCategory: 0,
+          maxCategoryPages: 0,
+          categoryNoGrowthBreakPages: 0,
+          detailConcurrency: 1,
+          itemGapMs: Math.max(520, Number(scanProfile.itemGapMs || 0)),
+          detailRoomCap: 6,
+          cycleDelayMinMs: 1200,
+          cycleDelayMaxMs: 2200
+        }
+        accountData.callbacks.onLog('🔧 首轮扫描使用模式（仅全站10轮，跳过分类扫描）')
+      } else if (!scanOnly && quickCycle) {
         scanProfile = {
           ...scanProfile,
           allTimes: Math.max(2, Math.min(4, Number(scanProfile.allTimes || 4))),
@@ -1176,7 +1220,7 @@ class LotteryManager {
         return
       }
 
-      if (scanProfile.cooldownRemainMs > 0) {
+      if (!useSupermanFirstRound && scanProfile.cooldownRemainMs > 0) {
         const waitMs = Math.min(scanProfile.cooldownRemainMs + 600, 60000)
         if (!scanOnly) {
           accountData.callbacks.onLog(`🛡️ 风控冷却中，${Math.ceil(waitMs / 1000)}秒后继续扫描...`, 'warning')
@@ -1185,7 +1229,7 @@ class LotteryManager {
         return
       }
 
-      // 1) 先清理过期项，保留仍可用池子（参考超人：不每轮清空）
+      // 1) 先清理过期项，保留仍可用池子（参考：不每轮清空）
       this.removeExpiredLotteries(accountId)
       this.calculatePredictedProbabilities(accountId)
       this.sortLotteriesByProbability(accountId)
@@ -1197,11 +1241,11 @@ class LotteryManager {
         return
       }
 
-      // 2. 按超人逻辑：先全站，再按分类采集补充池子
+      // 2. 按逻辑：先全站，再按分类采集补充池子
       await this.searchLiveByAll(accountId, scanProfile.allTimes, scanProfile)
       if (this.isPaused(accountId) || !(await this.isBrowserAlive(accountId))) return
       const afterAllProfile = this.getAdaptiveScanProfile(accountId)
-      if (afterAllProfile.level >= 2 && afterAllProfile.cooldownRemainMs > 0) {
+      if (!useSupermanFirstRound && afterAllProfile.level >= 2 && afterAllProfile.cooldownRemainMs > 0) {
         const waitMs = Math.min(afterAllProfile.cooldownRemainMs + 800, 60000)
         if (!scanOnly) {
           accountData.callbacks.onLog(`🛡️ 全站扫描后命中风控冷却，${Math.ceil(waitMs / 1000)}秒后继续`, 'warning')
@@ -1210,13 +1254,14 @@ class LotteryManager {
         return
       }
 
-      // 分类扫描补充池子
-      if (Array.isArray(this.categoryList) && this.categoryList.length > 0) {
+      // 首轮只跑全站扫描，后续轮次再用分类补充池子
+      const shouldRunCategoryScan = !useSupermanFirstRound && Array.isArray(this.categoryList) && this.categoryList.length > 0
+      if (shouldRunCategoryScan) {
         await this.startCollectLive(accountId, scanProfile)
       }
       if (this.isPaused(accountId) || !(await this.isBrowserAlive(accountId))) return
-      const afterCategoryProfile = this.getAdaptiveScanProfile(accountId)
-      if (afterCategoryProfile.level >= 2 && afterCategoryProfile.cooldownRemainMs > 0) {
+      const afterCategoryProfile = shouldRunCategoryScan ? this.getAdaptiveScanProfile(accountId) : null
+      if (shouldRunCategoryScan && afterCategoryProfile.level >= 2 && afterCategoryProfile.cooldownRemainMs > 0) {
         const waitMs = Math.min(afterCategoryProfile.cooldownRemainMs + 800, 60000)
         if (!scanOnly) {
           accountData.callbacks.onLog(`🛡️ 分类扫描后命中风控冷却，${Math.ceil(waitMs / 1000)}秒后继续`, 'warning')
@@ -1230,6 +1275,11 @@ class LotteryManager {
       this.calculatePredictedProbabilities(accountId)
       this.sortLotteriesByProbability(accountId)
       this.emitLotteryListUpdate(accountData)
+
+      if (useSupermanFirstRound && accountData.firstRoundScanDone !== true) {
+        accountData.firstRoundScanDone = true
+        accountData.callbacks.onLog('✅ 首轮扫描完成，后续切换常规扫描')
+      }
 
       if (scanOnly) {
         return
@@ -1536,11 +1586,42 @@ class LotteryManager {
    * 根据条件过滤福袋（优化版：只要包含类型3和6即可）
    */
   filterLotteryByConditions(lotteryList, config = {}) {
-    return lotteryList.filter((item) => {
-      if (!isSupermanJoinableLottery(item)) return false
-      if (this.shouldFilterByJoinRequirement(item, config)) return false
-      return true
-    })
+    return this.filterLotteryByConditionsWithStats(lotteryList, config).list
+  }
+
+  /**
+   * filterLotteryByConditionsWithStats 方法：过滤福袋并返回按规则分类的统计信息。
+   */
+  filterLotteryByConditionsWithStats(lotteryList, config = {}) {
+    const source = Array.isArray(lotteryList) ? lotteryList : []
+    const shouldFilterFanClub = config?.filterFanClub?.enabled !== false
+    const stats = {
+      total: source.length,
+      kept: 0,
+      dropType: 0,
+      dropMember: 0,
+      dropFanClub: 0
+    }
+    const list = []
+
+    for (const item of source) {
+      if (!isSupermanJoinableLottery(item)) {
+        stats.dropType += 1
+        continue
+      }
+      if (hasMemberJoinRequirement(item)) {
+        stats.dropMember += 1
+        continue
+      }
+      if (shouldFilterFanClub && hasFanClubJoinRequirement(item)) {
+        stats.dropFanClub += 1
+        continue
+      }
+      list.push(item)
+    }
+
+    stats.kept = list.length
+    return { list, stats }
   }
 
   /**

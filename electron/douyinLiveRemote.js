@@ -646,9 +646,10 @@ async function douyinLiveRemote(uri, params, headers, method = 'GET') {
   const p = { ...params, ...commonParams }
   const h = { ...commonHeaders, ...headers }
   const cookieObj = cookieToObj(h.cookie || '')
+  const isLotteryInfoApi = uri.includes('/webcast/lottery/melon/lottery_info/')
 
   // 抖音风控下常出现 444 + HTML。详情接口重试过多会放大风控，控制为2次。
-  const maxAttempts = uri.includes('/webcast/lottery/melon/lottery_info/') ? 2 : 3
+  const maxAttempts = isLotteryInfoApi ? 2 : 3
   let lastError = null
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -688,8 +689,9 @@ async function douyinLiveRemote(uri, params, headers, method = 'GET') {
         statusCode === 403 ||
         statusCode === 429 ||
         statusCode === 444
+      const skipRetryForHardRisk = isLotteryInfoApi && (code === 'NON_JSON_RESPONSE' || statusCode === 444)
 
-      if (!retryable || attempt >= maxAttempts - 1) {
+      if (!retryable || attempt >= maxAttempts - 1 || skipRetryForHardRisk) {
         throw error
       }
 
