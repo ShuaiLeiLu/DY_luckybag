@@ -69,7 +69,7 @@
 
 <script setup>
 import { computed, h, ref } from 'vue'
-import { NCard, NIcon, NButton, NDataTable, NTag } from 'naive-ui'
+import { NCard, NIcon, NDataTable, NTag } from 'naive-ui'
 import GiftOutline from '@vicons/ionicons5/es/GiftOutline'
 import SearchOutline from '@vicons/ionicons5/es/SearchOutline'
 
@@ -84,7 +84,6 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['block'])
 const activeView = ref('active')
 
 const activeRows = computed(() => {
@@ -109,12 +108,83 @@ const filteredRows = computed(() => {
   return activeView.value === 'active' ? activeRows.value : historyRows.value
 })
 
+function formatCompactNumber(value) {
+  const num = Number(value || 0)
+  if (!Number.isFinite(num) || num <= 0) return ''
+  if (num >= 10000) return `${(num / 10000).toFixed(num >= 100000 ? 0 : 1)}w`
+  return `${num}`
+}
+
+function getLotteryMeta(row) {
+  const prizeInfo = (row?.prizeInfo && typeof row.prizeInfo === 'object')
+    ? row.prizeInfo
+    : ((row?.prize_info && typeof row.prize_info === 'object') ? row.prize_info : {})
+
+  const totalAmount = Number(
+    row?.total_amount ||
+    row?.totalAmount ||
+    prizeInfo?.total_amount ||
+    prizeInfo?.totalAmount ||
+    prizeInfo?.total_diamond_count ||
+    prizeInfo?.total_coin_count ||
+    0
+  )
+  const prizeCount = Number(row?.lotteryTotal || row?.prize_count || prizeInfo?.prize_count || 0)
+  const winnerCount = Number(row?.winningTotal || row?.luckyCount || row?.lucky_count || 0)
+  const parts = []
+
+  if (totalAmount > 0) {
+    parts.push(`总量 ${formatCompactNumber(totalAmount)}`)
+  } else if (prizeCount > 0) {
+    parts.push(`数量 ${formatCompactNumber(prizeCount)}`)
+  }
+
+  if (winnerCount > 0) {
+    parts.push(`${formatCompactNumber(winnerCount)}名`)
+  }
+
+  const desc = String(
+    prizeInfo?.display_text ||
+    prizeInfo?.desc ||
+    prizeInfo?.sub_title ||
+    row?.rewardDesc ||
+    ''
+  ).trim()
+
+  if (desc && parts.length < 2) {
+    parts.push(desc)
+  }
+
+  return parts.join(' · ') || '内容待补充'
+}
+
+function renderLotteryContentCell(row) {
+  const title = row?.lotteryName || row?.prize_name || prizeNameFromInfo(row) || '福袋'
+  const meta = getLotteryMeta(row)
+  return h('div', { class: 'lottery-content-cell' }, [
+    h('div', { class: 'lottery-content-title', title }, title),
+    h('div', { class: 'lottery-content-meta', title: meta }, meta)
+  ])
+}
+
+function prizeNameFromInfo(row) {
+  const prizeInfo = (row?.prizeInfo && typeof row.prizeInfo === 'object')
+    ? row.prizeInfo
+    : ((row?.prize_info && typeof row.prize_info === 'object') ? row.prize_info : {})
+  return String(prizeInfo?.name || '').trim()
+}
+
 const activeColumns = computed(() => [
   { title: '#', key: '_idx', width: 44 },
   { title: '账号', key: '_scanAccountNickname', width: 104, ellipsis: { tooltip: true } },
   { title: '主播', key: 'authorNickname', width: 104, ellipsis: { tooltip: true } },
   { title: '房间', key: 'webRid', width: 110, ellipsis: { tooltip: true } },
-  { title: '福袋', key: 'lotteryName', ellipsis: { tooltip: true } },
+  {
+    title: '福袋内容',
+    key: 'lotteryName',
+    minWidth: 224,
+    render: (row) => renderLotteryContentCell(row)
+  },
   {
     title: '概率',
     key: 'predictedProbability',
@@ -125,28 +195,6 @@ const activeColumns = computed(() => [
       const type = p >= 10 ? 'success' : p >= 5 ? 'warning' : 'default'
       return h(NTag, { size: 'small', type }, { default: () => text })
     }
-  },
-  {
-    title: '开奖',
-    key: 'end_time',
-    width: 86,
-    render: (row) => {
-      if (!row.end_time) return '-'
-      const d = new Date(row.end_time * 1000)
-      return d.toLocaleTimeString()
-    }
-  },
-  {
-    title: '操作',
-    key: 'actions',
-    width: 70,
-    fixed: 'right',
-    render: (row) => h(NButton, {
-      size: 'tiny',
-      quaternary: true,
-      type: 'error',
-      onClick: () => emit('block', row.roomId)
-    }, { default: () => '屏蔽' })
   }
 ])
 

@@ -25,23 +25,29 @@ var (
 )
 
 type Config struct {
-	TopCacheMax   int
-	TTLGraceSec   int64
-	MaxBatchSize  int
-	TopRefreshMS  int64
-	ExpireSweepMS int64
-	MinHeapShards int
+	TopCacheMax        int
+	TTLGraceSec        int64
+	MaxBatchSize       int
+	TopRefreshMS       int64
+	ExpireSweepMS      int64
+	MinHeapShards      int
+	LearningJoinWeight float64
+	LearningWinWeight  float64
+	FeedbackLogPath    string
 }
 
 // DefaultConfig 方法：返回默认配置。
 func DefaultConfig() Config {
 	return Config{
-		TopCacheMax:   2500,
-		TTLGraceSec:   8,
-		MaxBatchSize:  1000,
-		TopRefreshMS:  400,
-		ExpireSweepMS: 500,
-		MinHeapShards: 64,
+		TopCacheMax:        2500,
+		TTLGraceSec:        8,
+		MaxBatchSize:       1000,
+		TopRefreshMS:       400,
+		ExpireSweepMS:      500,
+		MinHeapShards:      64,
+		LearningJoinWeight: 0,
+		LearningWinWeight:  0,
+		FeedbackLogPath:    "",
 	}
 }
 
@@ -104,27 +110,40 @@ type Candidate struct {
 }
 
 type ScoredCandidate struct {
-	RoomID         string      `json:"roomId"`
-	WebRid         string      `json:"webRid"`
-	LotteryID      string      `json:"lotteryId"`
-	LotteryName    string      `json:"lotteryName"`
-	Score          float64     `json:"score"`
-	Probability    float64     `json:"probability"`
-	RemainingSec   int64       `json:"remainingSec"`
-	JoinTotal      float64     `json:"joinTotal"`
-	LuckyCount     float64     `json:"luckyCount"`
-	LotteryTotal   float64     `json:"lotteryTotal"`
-	OnlineTotal    float64     `json:"onlineTotal"`
-	Conditions     []Condition `json:"conditions"`
-	PrizeType      any         `json:"prizeType"`
-	PrizeInfo      any         `json:"prizeInfo"`
-	TotalAmount    float64     `json:"totalAmount"`
-	RedPacketInfo  any         `json:"redPacketInfo"`
-	SourceID       string      `json:"sourceId"`
-	FetchedAt      int64       `json:"fetchedAt"`
-	EndTime        int64       `json:"endTime"`
-	AuthorNickname string      `json:"authorNickname"`
-	RoomTitle      string      `json:"roomTitle"`
+	Key                string      `json:"key"`
+	RoomID             string      `json:"roomId"`
+	WebRid             string      `json:"webRid"`
+	LotteryID          string      `json:"lotteryId"`
+	LotteryName        string      `json:"lotteryName"`
+	Score              float64     `json:"score"`
+	ReviewScore        float64     `json:"reviewScore"`
+	Probability        float64     `json:"probability"`
+	CurrentProbability float64     `json:"currentProbability"`
+	PredictedJoinTotal float64     `json:"predictedJoinTotal"`
+	EVScore            float64     `json:"evScore"`
+	LearningBoost      float64     `json:"learningBoost"`
+	LearningBucket     string      `json:"learningBucket,omitempty"`
+	RemainingSec       int64       `json:"remainingSec"`
+	JoinTotal          float64     `json:"joinTotal"`
+	LuckyCount         float64     `json:"luckyCount"`
+	LotteryTotal       float64     `json:"lotteryTotal"`
+	OnlineTotal        float64     `json:"onlineTotal"`
+	Conditions         []Condition `json:"conditions"`
+	PrizeType          any         `json:"prizeType"`
+	PrizeInfo          any         `json:"prizeInfo"`
+	TotalAmount        float64     `json:"totalAmount"`
+	RedPacketInfo      any         `json:"redPacketInfo"`
+	SourceID           string      `json:"sourceId"`
+	FetchedAt          int64       `json:"fetchedAt"`
+	EndTime            int64       `json:"endTime"`
+	StartTime          int64       `json:"startTime"`
+	AuthorNickname     string      `json:"authorNickname"`
+	RoomTitle          string      `json:"roomTitle"`
+	Claimed            bool        `json:"claimed"`
+	LeaseCount         int         `json:"leaseCount"`
+	MaxLeaseSlots      int         `json:"maxLeaseSlots"`
+	AvailableSlots     int         `json:"availableSlots"`
+	Lease              *LeaseInfo  `json:"lease,omitempty"`
 }
 
 type BatchResult struct {
@@ -332,6 +351,21 @@ type Service struct {
 
 	stats   Stats
 	statsMu sync.Mutex
+
+	leaseMu sync.Mutex
+	leases  map[string]*LeaseInfo
+
+	learningMu sync.RWMutex
+	learning   map[string]*LearningBucket
+
+	scanClientMu sync.Mutex
+	scanClients  map[string]scanClientState
+
+	scanPermitMu sync.Mutex
+	scanPermits  map[string]scanPermitState
+
+	allScanMu     sync.Mutex
+	allScanCursor allScanCursorState
 }
 
 // NewService 方法：创建服务。
@@ -353,6 +387,11 @@ func NewService(cfg Config) *Service {
 		profile:        DefaultFilterProfile(),
 		profileVersion: 1,
 		store:          newStore(cfg.MinHeapShards),
+		leases:         make(map[string]*LeaseInfo),
+		learning:       make(map[string]*LearningBucket),
+		scanClients:    make(map[string]scanClientState),
+		scanPermits:    make(map[string]scanPermitState),
+		allScanCursor:  defaultAllScanCursorState(time.Now().UnixMilli()),
 	}
 	s.dirty.Store(true)
 	heap.Init(&s.exp)
@@ -432,6 +471,19 @@ func normalizeTopLimit(limit, maxLimit int) int {
 
 // selectTopCandidates 方法：筛选优选结果候选项列表。
 func selectTopCandidates(all []Candidate, profile FilterProfile, nowMS int64, capSize int) ([]ScoredCandidate, int) {
+	return selectTopCandidatesWithLease(all, profile, nowMS, capSize, nil, ClaimOwner{}, false, nil)
+}
+
+func selectTopCandidatesWithLease(
+	all []Candidate,
+	profile FilterProfile,
+	nowMS int64,
+	capSize int,
+	leaseGroups map[string][]LeaseInfo,
+	owner ClaimOwner,
+	includeClaimedSelf bool,
+	learningLookup LearningLookupFunc,
+) ([]ScoredCandidate, int) {
 	if capSize <= 0 {
 		return []ScoredCandidate{}, 0
 	}
@@ -450,7 +502,39 @@ func selectTopCandidates(all []Candidate, profile FilterProfile, nowMS int64, ca
 			continue
 		}
 		validCount++
-		sc := scoreCandidate(c, profile, nowMS)
+		sc := scoreCandidate(c, profile, nowMS, learningLookup)
+		leases := leaseGroups[c.Key]
+		sc.MaxLeaseSlots = maxLeaseSlotsForCandidate(c, sc, profile.BigRedPacketThreshold)
+		sc.LeaseCount = len(leases)
+		sc.AvailableSlots = maxInt(sc.MaxLeaseSlots-sc.LeaseCount, 0)
+
+		var ownerLease *LeaseInfo
+		if len(leases) > 0 {
+			for _, lease := range leases {
+				if ownerMatches(lease, owner) {
+					leaseCopy := lease
+					ownerLease = &leaseCopy
+					break
+				}
+			}
+			sc.Claimed = true
+			if ownerLease != nil {
+				sc.Lease = ownerLease
+			} else {
+				leaseCopy := leases[0]
+				sc.Lease = &leaseCopy
+			}
+		}
+
+		if sc.LeaseCount >= sc.MaxLeaseSlots {
+			if ownerLease == nil {
+				continue
+			}
+			if !includeClaimedSelf {
+				continue
+			}
+			sc.Claimed = true
+		}
 		if h.Len() < capSize {
 			heap.Push(h, sc)
 			continue
@@ -472,6 +556,35 @@ func selectTopCandidates(all []Candidate, profile FilterProfile, nowMS int64, ca
 		return out[i].Score > out[j].Score
 	})
 	return out, validCount
+}
+
+// buildLeaseGroupMap 方法：按 candidateKey 聚合活跃租约。
+func buildLeaseGroupMap(leases []LeaseInfo) map[string][]LeaseInfo {
+	if len(leases) == 0 {
+		return map[string][]LeaseInfo{}
+	}
+	out := make(map[string][]LeaseInfo, len(leases))
+	for _, lease := range leases {
+		if lease.CandidateKey == "" {
+			continue
+		}
+		out[lease.CandidateKey] = append(out[lease.CandidateKey], lease)
+	}
+	return out
+}
+
+type learningSnapshot struct {
+	buckets []LearningBucket
+	index   map[string]LearningBucket
+	summary LearningSummary
+}
+
+func (ls learningSnapshot) lookup(bucketKey string) (LearningBucket, LearningSummary, bool) {
+	if len(ls.index) == 0 {
+		return LearningBucket{}, ls.summary, false
+	}
+	bucket, ok := ls.index[bucketKey]
+	return bucket, ls.summary, ok
 }
 
 // UpdateProfile 方法：更新策略。
@@ -578,12 +691,12 @@ func (s *Service) SweepExpired(nowMS int64) {
 		s.expMu.Lock()
 		if s.exp.Len() == 0 {
 			s.expMu.Unlock()
-			return
+			break
 		}
 		top := s.exp[0]
 		if top.ExpireAtMS > nowMS {
 			s.expMu.Unlock()
-			return
+			break
 		}
 		heap.Pop(&s.exp)
 		s.expMu.Unlock()
@@ -600,6 +713,581 @@ func (s *Service) SweepExpired(nowMS int64) {
 			s.dirty.Store(true)
 		}
 	}
+
+	s.leaseMu.Lock()
+	s.sweepExpiredLeasesLocked(nowMS)
+	s.leaseMu.Unlock()
+}
+
+func cloneLeaseInfo(src *LeaseInfo) *LeaseInfo {
+	if src == nil {
+		return nil
+	}
+	out := *src
+	return &out
+}
+
+func (s *Service) sweepExpiredLeasesLocked(nowMS int64) {
+	for leaseID, lease := range s.leases {
+		if lease == nil || lease.ExpiresAtMS <= nowMS {
+			delete(s.leases, leaseID)
+		}
+	}
+}
+
+func (s *Service) activeLeaseGroups(nowMS int64) map[string][]LeaseInfo {
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	s.sweepExpiredLeasesLocked(nowMS)
+	out := make(map[string][]LeaseInfo, len(s.leases))
+	for _, lease := range s.leases {
+		if lease == nil || lease.ExpiresAtMS <= nowMS || lease.CandidateKey == "" {
+			continue
+		}
+		out[lease.CandidateKey] = append(out[lease.CandidateKey], *lease)
+	}
+	return out
+}
+
+func (s *Service) activeLeases(nowMS int64) []LeaseInfo {
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	s.sweepExpiredLeasesLocked(nowMS)
+	out := make([]LeaseInfo, 0, len(s.leases))
+	for _, lease := range s.leases {
+		if lease == nil || lease.ExpiresAtMS <= nowMS {
+			continue
+		}
+		out = append(out, *lease)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ExpiresAtMS == out[j].ExpiresAtMS {
+			return out[i].ClaimedAtMS > out[j].ClaimedAtMS
+		}
+		return out[i].ExpiresAtMS < out[j].ExpiresAtMS
+	})
+	return out
+}
+
+func (s *Service) countCandidateLeasesLocked(candidateKey string, owner ClaimOwner, nowMS int64) (int, bool) {
+	count := 0
+	ownerClaimed := false
+	for _, lease := range s.leases {
+		if lease == nil || lease.ExpiresAtMS <= nowMS || lease.CandidateKey != candidateKey {
+			continue
+		}
+		count++
+		if ownerMatches(*lease, owner) {
+			ownerClaimed = true
+		}
+	}
+	return count, ownerClaimed
+}
+
+func (s *Service) learningSnapshot() learningSnapshot {
+	s.learningMu.RLock()
+	defer s.learningMu.RUnlock()
+	items := make([]LearningBucket, 0, len(s.learning))
+	index := make(map[string]LearningBucket, len(s.learning))
+	for key, bucket := range s.learning {
+		if bucket == nil {
+			continue
+		}
+		copyBucket := *bucket
+		if copyBucket.Key == "" {
+			copyBucket.Key = key
+		}
+		items = append(items, copyBucket)
+		index[key] = copyBucket
+	}
+	return learningSnapshot{
+		buckets: items,
+		index:   index,
+		summary: applyLearningSummaryWeights(summarizeLearningBuckets(items), s.cfg.LearningJoinWeight, s.cfg.LearningWinWeight),
+	}
+}
+
+func buildTaskDebugSnapshot(all []Candidate, profile FilterProfile, nowMS int64, owner ClaimOwner, leaseGroups map[string][]LeaseInfo, leases []LeaseInfo, learningLookup LearningLookupFunc, leaseLimit int) TaskDebugSnapshot {
+	summary := TaskDebugSummary{
+		GeneratedAtMS:    nowMS,
+		ActiveCandidates: len(all),
+		LeaseCount:       len(leases),
+	}
+
+	if owner.ClientID != "" {
+		for _, lease := range leases {
+			if stringsTrim(lease.ClientID) == owner.ClientID {
+				summary.ClientLeaseCount++
+			}
+			if ownerMatches(lease, owner) {
+				summary.AccountLeaseCount++
+			}
+		}
+	}
+
+	validCount := 0
+	availableCount := 0
+	for i := range all {
+		candidate := all[i]
+		if candidate.ExpireAtMS > 0 && candidate.ExpireAtMS <= nowMS {
+			continue
+		}
+		ok, _ := passFilter(candidate, profile, nowMS)
+		if !ok {
+			continue
+		}
+		validCount++
+		scored := scoreCandidate(candidate, profile, nowMS, learningLookup)
+		scored.MaxLeaseSlots = maxLeaseSlotsForCandidate(candidate, scored, profile.BigRedPacketThreshold)
+		leaseCount := len(leaseGroups[candidate.Key])
+		if scored.MaxLeaseSlots > 1 {
+			summary.MultiSlotCandidates++
+		}
+		if leaseCount >= scored.MaxLeaseSlots {
+			summary.SaturatedCandidates++
+		}
+		if leaseCount < scored.MaxLeaseSlots {
+			availableCount++
+		}
+	}
+	summary.ValidCandidates = validCount
+	summary.AvailableCandidates = availableCount
+
+	if leaseLimit <= 0 || leaseLimit > len(leases) {
+		leaseLimit = len(leases)
+	}
+	snapshot := TaskDebugSnapshot{
+		Summary: summary,
+	}
+	if leaseLimit > 0 {
+		snapshot.Leases = make([]LeaseInfo, leaseLimit)
+		copy(snapshot.Leases, leases[:leaseLimit])
+	} else {
+		snapshot.Leases = []LeaseInfo{}
+	}
+	return snapshot
+}
+
+func (s *Service) sweepExpiredScanClientsLocked(nowMS int64) {
+	ttlMS := DefaultScanHeartbeatTTLMS
+	for clientID, state := range s.scanClients {
+		if state.UpdatedAtMS+ttlMS <= nowMS {
+			delete(s.scanClients, clientID)
+		}
+	}
+}
+
+func (s *Service) activeScanClientStates(nowMS int64) map[string]scanClientState {
+	s.scanClientMu.Lock()
+	defer s.scanClientMu.Unlock()
+	s.sweepExpiredScanClientsLocked(nowMS)
+	out := make(map[string]scanClientState, len(s.scanClients))
+	for clientID, state := range s.scanClients {
+		out[clientID] = state
+	}
+	return out
+}
+
+func (s *Service) buildScanPoolSummary(nowMS int64) scanPoolSummary {
+	s.RefreshTop(false)
+	s.topMu.RLock()
+	meta := s.topMeta
+	s.topMu.RUnlock()
+	leases := s.activeLeases(nowMS)
+	return scanPoolSummary{
+		ValidCandidates:     maxInt(meta.ValidCount, 0),
+		AvailableCandidates: maxInt(meta.ValidCount-len(leases), 0),
+		LeaseCount:          len(leases),
+	}
+}
+
+func (s *Service) activeScanClientIDs(nowMS int64) []string {
+	s.scanClientMu.Lock()
+	defer s.scanClientMu.Unlock()
+	s.sweepExpiredScanClientsLocked(nowMS)
+	out := make([]string, 0, len(s.scanClients))
+	for clientID := range s.scanClients {
+		out = append(out, clientID)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TopAvailable 方法：返回“当前可分配视角”的优选结果，可选择保留当前 owner 已持有的租约任务。
+func (s *Service) TopAvailable(limit int, profile FilterProfile, owner ClaimOwner, includeClaimedSelf bool) (items []ScoredCandidate, meta TopMeta, profileVersion int64) {
+	limit = normalizeTopLimit(limit, s.cfg.TopCacheMax)
+	now := time.Now().UnixMilli()
+	s.SweepExpired(now)
+	all := s.store.snapshot()
+	leaseGroups := s.activeLeaseGroups(now)
+	learningSnapshot := s.learningSnapshot()
+	out, validCount := selectTopCandidatesWithLease(all, profile, now, limit, leaseGroups, normalizeClaimOwner(owner), includeClaimedSelf, learningSnapshot.lookup)
+	_, pv := s.Profile()
+	return out, TopMeta{
+		BuiltAtMS:   now,
+		ActiveCount: len(all),
+		ValidCount:  validCount,
+	}, pv
+}
+
+func buildCandidateMap(all []Candidate) map[string]Candidate {
+	out := make(map[string]Candidate, len(all))
+	for _, candidate := range all {
+		out[candidate.Key] = candidate
+	}
+	return out
+}
+
+func buildOrderedTaskCandidates(
+	all []Candidate,
+	profile FilterProfile,
+	now int64,
+	capSize int,
+	leaseGroups map[string][]LeaseInfo,
+	owner ClaimOwner,
+	includeClaimedSelf bool,
+	learningLookup LearningLookupFunc,
+	preferKeys []string,
+	excludeKeys []string,
+) ([]ScoredCandidate, map[string]Candidate) {
+	candidateMap := buildCandidateMap(all)
+	scored, _ := selectTopCandidatesWithLease(all, profile, now, capSize, leaseGroups, owner, includeClaimedSelf, learningLookup)
+	ordered := make([]ScoredCandidate, 0, len(scored))
+	preferSet := make(map[string]struct{}, len(preferKeys))
+	excludeSet := make(map[string]struct{}, len(excludeKeys))
+	for _, key := range preferKeys {
+		if trimmed := stringsTrim(key); trimmed != "" {
+			preferSet[trimmed] = struct{}{}
+		}
+	}
+	for _, key := range excludeKeys {
+		if trimmed := stringsTrim(key); trimmed != "" {
+			excludeSet[trimmed] = struct{}{}
+		}
+	}
+	if len(preferSet) > 0 {
+		for _, item := range scored {
+			key := scoredCandidateKey(item)
+			if _, blocked := excludeSet[key]; blocked {
+				continue
+			}
+			if _, ok := preferSet[key]; ok {
+				ordered = append(ordered, item)
+			}
+		}
+	}
+	for _, item := range scored {
+		key := scoredCandidateKey(item)
+		if _, blocked := excludeSet[key]; blocked {
+			continue
+		}
+		if _, ok := preferSet[key]; ok {
+			continue
+		}
+		ordered = append(ordered, item)
+	}
+	preferredItems := make([]ScoredCandidate, 0, len(preferSet))
+	regularItems := make([]ScoredCandidate, 0, len(ordered))
+	for _, item := range ordered {
+		if _, ok := preferSet[scoredCandidateKey(item)]; ok {
+			preferredItems = append(preferredItems, item)
+			continue
+		}
+		regularItems = append(regularItems, item)
+	}
+	preferredItems = rankClaimCandidates(preferredItems, candidateMap, now, 8)
+	if len(regularItems) > 48 {
+		regularItems = regularItems[:48]
+	}
+	regularItems = rankClaimCandidates(regularItems, candidateMap, now, 24)
+	return append(preferredItems, regularItems...), candidateMap
+}
+
+// ClaimTask 方法：按 owner 和过滤条件从当前候选池中领取一个未被占用的任务。
+func (s *Service) ClaimTask(options ClaimOptions) (ClaimResult, error) {
+	now := time.Now().UnixMilli()
+	s.SweepExpired(now)
+	owner := normalizeClaimOwner(options.Owner)
+	leaseSec := normalizeLeaseSec(options.LeaseSec)
+
+	profile := options.Profile
+	_, pv := s.Profile()
+	all := s.store.snapshot()
+	leaseGroups := s.activeLeaseGroups(now)
+	learningSnapshot := s.learningSnapshot()
+	ordered, _ := buildOrderedTaskCandidates(
+		all,
+		profile,
+		now,
+		s.cfg.TopCacheMax,
+		leaseGroups,
+		ClaimOwner{},
+		false,
+		learningSnapshot.lookup,
+		options.PreferKeys,
+		options.ExcludeKeys,
+	)
+	exclude := make(map[string]struct{}, len(options.ExcludeKeys))
+	for _, key := range options.ExcludeKeys {
+		if trimmed := stringsTrim(key); trimmed != "" {
+			exclude[trimmed] = struct{}{}
+		}
+	}
+
+	for _, item := range ordered {
+		key := scoredCandidateKey(item)
+		if key == "" {
+			continue
+		}
+		if _, blocked := exclude[key]; blocked {
+			continue
+		}
+
+		s.leaseMu.Lock()
+		s.sweepExpiredLeasesLocked(now)
+		leaseCount, ownerAlreadyClaimed := s.countCandidateLeasesLocked(key, owner, now)
+		if ownerAlreadyClaimed || leaseCount >= item.MaxLeaseSlots {
+			s.leaseMu.Unlock()
+			continue
+		}
+
+		leaseID := "lease-" + strconv.FormatInt(s.seq.Add(1), 10)
+		lease := &LeaseInfo{
+			LeaseID:      leaseID,
+			CandidateKey: key,
+			RoomID:       item.RoomID,
+			LotteryID:    item.LotteryID,
+			ClientID:     owner.ClientID,
+			AccountID:    owner.AccountID,
+			SlotLimit:    item.MaxLeaseSlots,
+			ClaimedAtMS:  now,
+			UpdatedAtMS:  now,
+			ExpiresAtMS:  now + leaseSec*1000,
+		}
+		s.leases[leaseID] = lease
+		s.leaseMu.Unlock()
+
+		item.Claimed = true
+		item.Lease = cloneLeaseInfo(lease)
+		item.LeaseCount = leaseCount + 1
+		item.AvailableSlots = maxInt(item.MaxLeaseSlots-item.LeaseCount, 0)
+		return ClaimResult{
+			Claimed:        true,
+			Item:           &item,
+			Lease:          cloneLeaseInfo(lease),
+			ProfileVersion: pv,
+			GeneratedAtMS:  now,
+		}, nil
+	}
+
+	return ClaimResult{
+		Claimed:        false,
+		Reason:         "no_available_task",
+		ProfileVersion: pv,
+		GeneratedAtMS:  now,
+	}, nil
+}
+
+// ReviewTask 方法：在预热阶段执行服务端临开奖再重排，输出 keep/switch/drop 建议。
+func (s *Service) ReviewTask(options ReviewOptions) (ReviewResult, error) {
+	now := time.Now().UnixMilli()
+	s.SweepExpired(now)
+	owner := normalizeClaimOwner(options.Owner)
+	stage := normalizeReviewStage(options.Stage, 0)
+	_, pv := s.Profile()
+	all := s.store.snapshot()
+	leaseGroups := s.activeLeaseGroups(now)
+	learningSnapshot := s.learningSnapshot()
+	limit := normalizeTopLimit(options.Limit, 24)
+
+	ordered, candidateMap := buildOrderedTaskCandidates(
+		all,
+		options.Profile,
+		now,
+		s.cfg.TopCacheMax,
+		leaseGroups,
+		owner,
+		true,
+		learningSnapshot.lookup,
+		[]string{options.CurrentCandidateKey},
+		options.ExcludeKeys,
+	)
+	if len(ordered) == 0 {
+		return ReviewResult{
+			Reviewed:       true,
+			Stage:          stage,
+			Decision:       "drop",
+			Reason:         "no_available_candidate",
+			ProfileVersion: pv,
+			GeneratedAtMS:  now,
+			Alternatives:   []ScoredCandidate{},
+		}, nil
+	}
+
+	currentKey := stringsTrim(options.CurrentCandidateKey)
+	currentRoomID := stringsTrim(options.CurrentRoomID)
+	reviewed := rankReviewCandidates(ordered, candidateMap, now, stage, currentKey, currentRoomID, limit)
+	var currentItem *ScoredCandidate
+	for idx := range reviewed {
+		item := reviewed[idx]
+		if currentKey != "" && item.Key == currentKey {
+			copyItem := item
+			currentItem = &copyItem
+			break
+		}
+		if currentItem == nil && currentRoomID != "" && item.RoomID == currentRoomID {
+			copyItem := item
+			currentItem = &copyItem
+		}
+	}
+
+	bestItem := reviewed[0]
+	decision, reason := decideReviewSwitch(currentItem, &bestItem, stage, currentRoomID)
+	return ReviewResult{
+		Reviewed:       true,
+		Stage:          stage,
+		Decision:       decision,
+		Reason:         reason,
+		Item:           &bestItem,
+		Current:        currentItem,
+		Alternatives:   reviewed,
+		ProfileVersion: pv,
+		GeneratedAtMS:  now,
+	}, nil
+}
+
+// RenewTaskLease 方法：续约当前任务租约，避免预热阶段被其他客户端抢占。
+func (s *Service) RenewTaskLease(owner ClaimOwner, leaseID string, leaseSec int64) (*LeaseInfo, bool, error) {
+	now := time.Now().UnixMilli()
+	owner = normalizeClaimOwner(owner)
+	leaseSec = normalizeLeaseSec(leaseSec)
+
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	s.sweepExpiredLeasesLocked(now)
+
+	lease, ok := s.leases[stringsTrim(leaseID)]
+	if !ok || lease == nil {
+		return nil, false, nil
+	}
+	if !ownerMatches(*lease, owner) {
+		return nil, false, nil
+	}
+	lease.UpdatedAtMS = now
+	lease.ExpiresAtMS = now + leaseSec*1000
+	return cloneLeaseInfo(lease), true, nil
+}
+
+// ReleaseTaskLease 方法：主动释放当前任务租约，使候选回到服务端池中。
+func (s *Service) ReleaseTaskLease(owner ClaimOwner, leaseID string, reason string) (bool, error) {
+	now := time.Now().UnixMilli()
+	owner = normalizeClaimOwner(owner)
+
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	s.sweepExpiredLeasesLocked(now)
+
+	lease, ok := s.leases[stringsTrim(leaseID)]
+	if !ok || lease == nil || !ownerMatches(*lease, owner) {
+		return false, nil
+	}
+	lease.Reason = reason
+	delete(s.leases, lease.LeaseID)
+	return true, nil
+}
+
+// FinishTaskLease 方法：标记任务已执行完成，并按需要从候选池移除。
+func (s *Service) FinishTaskLease(owner ClaimOwner, leaseID string, result string, removeCandidate bool) (bool, error) {
+	now := time.Now().UnixMilli()
+	owner = normalizeClaimOwner(owner)
+
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	s.sweepExpiredLeasesLocked(now)
+
+	lease, ok := s.leases[stringsTrim(leaseID)]
+	if !ok || lease == nil || !ownerMatches(*lease, owner) {
+		return false, nil
+	}
+	lease.Result = result
+	delete(s.leases, lease.LeaseID)
+	if removeCandidate {
+		s.store.delete(lease.CandidateKey)
+		s.dirty.Store(true)
+	}
+	return true, nil
+}
+
+// ScanPermit 方法：为全站/分类/详情扫描请求发放集群级硬限流许可证。
+func (s *Service) ScanPermit(options ScanPermitOptions) (ScanPermitResult, error) {
+	now := time.Now().UnixMilli()
+	normalized := normalizeScanPermitOptions(options)
+	activeStates := s.activeScanClientStates(now)
+	refillPerSec, burst, clusterRiskLevel, clusterRiskScore := buildScanPermitPolicy(normalized.Kind, activeStates, s.buildScanPoolSummary(now))
+
+	s.scanPermitMu.Lock()
+	state := s.scanPermits[normalized.Kind]
+	nextState, result := applyScanPermitState(state, normalized, now, refillPerSec, burst, clusterRiskLevel, clusterRiskScore)
+	s.scanPermits[normalized.Kind] = nextState
+	s.scanPermitMu.Unlock()
+
+	return result, nil
+}
+
+// ClaimAllScanCursor 方法：领取当前共享全站 maxTime 游标，避免多个客户端从头重复扫描。
+func (s *Service) ClaimAllScanCursor(options AllScanClaimOptions) (AllScanClaimResult, error) {
+	now := time.Now().UnixMilli()
+	s.allScanMu.Lock()
+	defer s.allScanMu.Unlock()
+	nextState, result := claimAllScanCursorState(s.allScanCursor, options, now)
+	s.allScanCursor = nextState
+	return result, nil
+}
+
+// ReportAllScanCursor 方法：回传本次全站扫描推进结果，更新共享 maxTime 游标链路。
+func (s *Service) ReportAllScanCursor(options AllScanReportOptions) (AllScanReportResult, error) {
+	now := time.Now().UnixMilli()
+	s.allScanMu.Lock()
+	defer s.allScanMu.Unlock()
+	nextState, result := reportAllScanCursorState(s.allScanCursor, options, now)
+	s.allScanCursor = nextState
+	return result, nil
+}
+
+// ScanAssignment 方法：更新客户端扫描心跳与风控遥测，并返回服务端分配的扫描分片与预算。
+func (s *Service) ScanAssignment(clientID string, categoryIDs []string, telemetry ScanTelemetry) (ScanAssignment, error) {
+	now := time.Now().UnixMilli()
+	normalizedClientID := stringsTrim(clientID)
+	if normalizedClientID == "" {
+		return ScanAssignment{}, errors.New("clientId is required")
+	}
+
+	s.scanClientMu.Lock()
+	s.scanClients[normalizedClientID] = scanClientState{
+		ClientID:    normalizedClientID,
+		UpdatedAtMS: now,
+		Telemetry:   normalizeScanTelemetry(telemetry),
+	}
+	s.sweepExpiredScanClientsLocked(now)
+	activeStates := make(map[string]scanClientState, len(s.scanClients))
+	for item, state := range s.scanClients {
+		activeStates[item] = state
+	}
+	s.scanClientMu.Unlock()
+
+	return buildScanAssignment(normalizedClientID, activeStates, categoryIDs, now, DefaultScanHeartbeatTTLMS, s.buildScanPoolSummary(now)), nil
+}
+
+// TaskDebug 方法：返回当前共享池和租约的调试快照，便于前端观察服务端分配状态。
+func (s *Service) TaskDebug(profile FilterProfile, owner ClaimOwner, leaseLimit int) (TaskDebugSnapshot, int64) {
+	now := time.Now().UnixMilli()
+	s.SweepExpired(now)
+	all := s.store.snapshot()
+	leases := s.activeLeases(now)
+	leaseGroups := buildLeaseGroupMap(leases)
+	learningSnapshot := s.learningSnapshot()
+	_, pv := s.Profile()
+	return buildTaskDebugSnapshot(all, profile, now, normalizeClaimOwner(owner), leaseGroups, leases, learningSnapshot.lookup, leaseLimit), pv
 }
 
 // RefreshTop 方法：刷新优选结果。
@@ -616,7 +1304,8 @@ func (s *Service) RefreshTop(force bool) {
 	if capSize <= 0 {
 		capSize = 2500
 	}
-	out, validCount := selectTopCandidates(all, profile, now, capSize)
+	learningSnapshot := s.learningSnapshot()
+	out, validCount := selectTopCandidatesWithLease(all, profile, now, capSize, nil, ClaimOwner{}, false, learningSnapshot.lookup)
 
 	s.topMu.Lock()
 	s.topCache = out
@@ -651,13 +1340,50 @@ func (s *Service) TopWithProfile(limit int, profile FilterProfile) (items []Scor
 	now := time.Now().UnixMilli()
 	s.SweepExpired(now)
 	all := s.store.snapshot()
-	out, validCount := selectTopCandidates(all, profile, now, limit)
+	learningSnapshot := s.learningSnapshot()
+	out, validCount := selectTopCandidatesWithLease(all, profile, now, limit, nil, ClaimOwner{}, false, learningSnapshot.lookup)
 	_, pv := s.Profile()
 	return out, TopMeta{
 		BuiltAtMS:   now,
 		ActiveCount: len(all),
 		ValidCount:  validCount,
 	}, pv
+}
+
+// RecordTaskFeedback 方法：接收执行侧反馈并更新学习桶。
+func (s *Service) RecordTaskFeedback(feedback TaskFeedback) error {
+	normalized := normalizeTaskFeedback(feedback)
+	if normalized.Event == "" {
+		return nil
+	}
+	bucketKey := buildLearningBucketKey(normalized)
+	now := time.Now().UnixMilli()
+
+	s.learningMu.Lock()
+	bucket, ok := s.learning[bucketKey]
+	if !ok || bucket == nil {
+		next := newLearningBucketFromFeedback(normalized, bucketKey)
+		bucket = &next
+		s.learning[bucketKey] = bucket
+	}
+	applyTaskFeedback(bucket, normalized, now)
+	s.learningMu.Unlock()
+	s.dirty.Store(true)
+	if err := appendFeedbackJSONL(s.cfg.FeedbackLogPath, normalized); err != nil {
+		return err
+	}
+	return nil
+}
+
+// LearningDebug 方法：输出当前学习桶快照与校准摘要，便于观察学习闭环是否生效。
+func (s *Service) LearningDebug(limit int) (LearningDebugSnapshot, error) {
+	snapshot := s.learningSnapshot()
+	items := make([]LearningBucket, 0, len(snapshot.buckets))
+	items = append(items, snapshot.buckets...)
+	return LearningDebugSnapshot{
+		Summary: snapshot.summary,
+		Items:   sortLearningBuckets(items, limit),
+	}, nil
 }
 
 // Stats 方法：处理统计。
@@ -806,11 +1532,8 @@ func passFilter(c Candidate, p FilterProfile, nowMS int64) (bool, string) {
 		return false, "online_too_high"
 	}
 
-	prob := 0.0
-	if c.JoinTotal > 0 {
-		prob = c.LuckyCount / c.JoinTotal
-	}
-	if prob < p.MinProbability {
+	_, predictedProb := predictFinalJoinAndProbability(c, nowMS)
+	if predictedProb < p.MinProbability {
 		return false, "probability_too_low"
 	}
 	return true, ""
@@ -885,15 +1608,16 @@ func isPhysicalPrize(c Candidate) bool {
 }
 
 // scoreCandidate 方法：计算候选项。
-func scoreCandidate(c Candidate, p FilterProfile, nowMS int64) ScoredCandidate {
+func scoreCandidate(c Candidate, p FilterProfile, nowMS int64, learningLookup LearningLookupFunc) ScoredCandidate {
 	nowSec := float64(nowMS) / 1000
 	endSec := float64(c.EndTimeMS) / 1000
 	remainingSec := maxFloat(0, endSec-nowSec)
 
-	prob := 0.0
+	currentProb := 0.0
 	if c.JoinTotal > 0 {
-		prob = c.LuckyCount / c.JoinTotal
+		currentProb = c.LuckyCount / c.JoinTotal
 	}
+	predictedJoinTotal, predictedProb := predictFinalJoinAndProbability(c, nowMS)
 
 	timeFactor := 0.2
 	if remainingSec >= 35 && remainingSec <= 120 {
@@ -919,37 +1643,136 @@ func scoreCandidate(c Candidate, p FilterProfile, nowMS int64) ScoredCandidate {
 	}
 	riskPenalty := math.Min(math.Max(c.RiskScore, 0), 1) * 8
 
-	score := prob*100*0.62 +
+	score := predictedProb*100*0.62 +
 		timeFactor*100*0.2 +
 		rewardBonus*100*0.12 -
 		crowdPenalty*100*0.04 -
 		onlinePenalty*100*0.02 +
 		bigRedPacketBonus -
 		riskPenalty
+	learningBoost, learningBucket := learningMultiplierForCandidate(c, p, nowMS, learningLookup)
+	boostedScore := score * learningBoost
 
 	return ScoredCandidate{
-		RoomID:         c.RoomID,
-		WebRid:         c.WebRid,
-		LotteryID:      c.LotteryID,
-		LotteryName:    c.LotteryName,
-		Score:          round(score, 4),
-		Probability:    round(prob*100, 4),
-		RemainingSec:   int64(remainingSec),
-		JoinTotal:      c.JoinTotal,
-		LuckyCount:     c.LuckyCount,
-		LotteryTotal:   c.LotteryTotal,
-		OnlineTotal:    c.OnlineTotal,
-		Conditions:     c.Conditions,
-		PrizeType:      c.PrizeType,
-		PrizeInfo:      c.PrizeInfo,
-		TotalAmount:    c.TotalAmount,
-		RedPacketInfo:  redInfo,
-		SourceID:       c.SourceID,
-		FetchedAt:      c.FetchedAtMS,
-		EndTime:        c.EndTimeMS,
-		AuthorNickname: c.AuthorNickname,
-		RoomTitle:      c.RoomTitle,
+		Key:                c.Key,
+		RoomID:             c.RoomID,
+		WebRid:             c.WebRid,
+		LotteryID:          c.LotteryID,
+		LotteryName:        c.LotteryName,
+		Score:              round(boostedScore, 4),
+		ReviewScore:        round(boostedScore, 4),
+		Probability:        round(predictedProb*100, 4),
+		CurrentProbability: round(currentProb*100, 4),
+		PredictedJoinTotal: round(predictedJoinTotal, 2),
+		EVScore:            round(score, 4),
+		LearningBoost:      round(learningBoost, 4),
+		LearningBucket:     learningBucket,
+		RemainingSec:       int64(remainingSec),
+		JoinTotal:          c.JoinTotal,
+		LuckyCount:         c.LuckyCount,
+		LotteryTotal:       c.LotteryTotal,
+		OnlineTotal:        c.OnlineTotal,
+		Conditions:         c.Conditions,
+		PrizeType:          c.PrizeType,
+		PrizeInfo:          c.PrizeInfo,
+		TotalAmount:        c.TotalAmount,
+		RedPacketInfo:      redInfo,
+		SourceID:           c.SourceID,
+		FetchedAt:          c.FetchedAtMS,
+		EndTime:            c.EndTimeMS,
+		StartTime:          c.StartTimeMS,
+		AuthorNickname:     c.AuthorNickname,
+		RoomTitle:          c.RoomTitle,
 	}
+}
+
+// predictFinalJoinAndProbability 方法：估算开奖前最终参与人数和预测概率，降低尾盘涌入带来的误判。
+func predictFinalJoinAndProbability(c Candidate, nowMS int64) (float64, float64) {
+	currentPeople := math.Max(c.JoinTotal, 0)
+	bagCount := math.Max(c.LuckyCount, 0)
+	onlinePeople := math.Max(c.OnlineTotal, 0)
+	endSec := float64(c.EndTimeMS) / 1000
+	startSec := float64(c.StartTimeMS) / 1000
+	nowSec := float64(nowMS) / 1000
+
+	totalDuration := endSec - startSec
+	if totalDuration <= 0 {
+		totalDuration = 300
+	}
+	remainingTime := math.Max(0, endSec-nowSec)
+	if totalDuration < 60 {
+		totalDuration = 60
+	}
+
+	isNearEnd := totalDuration > 0 && (remainingTime/totalDuration) <= 0.2
+	baseFinalPeople := currentPeople
+	if !isNearEnd {
+		elapsedTime := totalDuration - remainingTime
+		elapsedRatio := 0.0
+		if totalDuration > 0 {
+			elapsedRatio = elapsedTime / totalDuration
+		}
+		growth := 1 - math.Pow(1-elapsedRatio, 2)
+		baseRatio := 0.2
+		if elapsedRatio > 0 {
+			baseRatio = growth
+		}
+		if baseRatio < 0.08 {
+			baseRatio = 0.08
+		}
+		baseFinalPeople = math.Ceil(currentPeople / baseRatio)
+	}
+
+	saturationCap := math.Ceil(onlinePeople * 0.85)
+	if saturationCap <= 0 {
+		saturationCap = currentPeople
+	}
+	if saturationCap > 0 {
+		baseFinalPeople = math.Min(baseFinalPeople, saturationCap)
+	}
+
+	potentialNewPeople := 0.0
+	if !isNearEnd {
+		remainingMinutes := remainingTime / 60
+		timeDecayRatio := 0.0
+		if totalDuration > 0 {
+			timeDecayRatio = remainingTime / totalDuration
+		}
+		totalMinutes := totalDuration / 60
+		convertRatio := 0.4 - totalMinutes*0.01
+		if convertRatio < 0.1 {
+			convertRatio = 0.1
+		}
+		if convertRatio > 0.35 {
+			convertRatio = 0.35
+		}
+		elapsedTime := totalDuration - remainingTime
+		stageDecayFactor := 1.0
+		if elapsedTime > 3*60 && elapsedTime <= 6*60 {
+			stageDecayFactor = 0.2
+		} else if elapsedTime > 6*60 {
+			stageDecayFactor = 0.05
+		}
+		convertRatio *= stageDecayFactor
+		maxPotential := currentPeople * 0.5
+		potentialNewPeople = math.Min(math.Ceil(onlinePeople*convertRatio*remainingMinutes*timeDecayRatio), maxPotential)
+	}
+
+	finalPeople := math.Max(baseFinalPeople+potentialNewPeople, currentPeople)
+	if saturationCap > 0 {
+		finalPeople = math.Min(finalPeople, saturationCap)
+	}
+	if finalPeople <= 0 {
+		finalPeople = currentPeople
+	}
+	if finalPeople <= 0 {
+		finalPeople = 1
+	}
+	probability := 0.0
+	if bagCount > 0 && finalPeople > 0 {
+		probability = math.Min(bagCount/finalPeople, 1)
+	}
+	return finalPeople, probability
 }
 
 type RedPacketInfo struct {
@@ -1138,6 +1961,22 @@ func firstNonEmpty(vals ...string) string {
 // maxFloat 方法：处理最大值浮点数。
 func maxFloat(a, b float64) float64 {
 	if a >= b {
+		return a
+	}
+	return b
+}
+
+// maxInt 方法：返回两个整数中的较大值。
+func maxInt(a, b int) int {
+	if a >= b {
+		return a
+	}
+	return b
+}
+
+// minInt 方法：返回两个整数中的较小值。
+func minInt(a, b int) int {
+	if a <= b {
 		return a
 	}
 	return b

@@ -21,6 +21,11 @@ type serverConfig struct {
 	MaxBodyBytes int64
 }
 
+type taskOwnerRequest struct {
+	ClientID  string `json:"clientId"`
+	AccountID string `json:"accountId"`
+}
+
 type fileConfig struct {
 	Server struct {
 		Host         string `json:"host"`
@@ -28,12 +33,15 @@ type fileConfig struct {
 		MaxBodyBytes int64  `json:"maxBodyBytes"`
 	} `json:"server"`
 	Pool struct {
-		TopCacheMax   int   `json:"topCacheMax"`
-		TTLGraceSec   int64 `json:"ttlGraceSec"`
-		MaxBatchSize  int   `json:"maxBatchSize"`
-		TopRefreshMS  int64 `json:"topRefreshMS"`
-		ExpireSweepMS int64 `json:"expireSweepMS"`
-		Shards        int   `json:"shards"`
+		TopCacheMax        int     `json:"topCacheMax"`
+		TTLGraceSec        int64   `json:"ttlGraceSec"`
+		MaxBatchSize       int     `json:"maxBatchSize"`
+		TopRefreshMS       int64   `json:"topRefreshMS"`
+		ExpireSweepMS      int64   `json:"expireSweepMS"`
+		Shards             int     `json:"shards"`
+		LearningJoinWeight float64 `json:"learningJoinWeight"`
+		LearningWinWeight  float64 `json:"learningWinWeight"`
+		FeedbackLogPath    string  `json:"feedbackLogPath"`
 	} `json:"pool"`
 	Redis struct {
 		Enabled        bool   `json:"enabled"`
@@ -189,6 +197,34 @@ func parseFloatQuery(v string) (float64, bool) {
 	return n, err == nil
 }
 
+// parsePositiveIntQuery 方法：解析正整数查询参数。
+func parsePositiveIntQuery(v string, fallback int) int {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
+}
+
+// parseCSVQuery 方法：解析逗号分隔查询参数列表。
+func parseCSVQuery(v string) []string {
+	parts := strings.Split(strings.TrimSpace(v), ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
+}
+
 // parseTopFilterPatch 方法：解析优选结果过滤条件。
 func parseTopFilterPatch(r *http.Request) map[string]any {
 	q := r.URL.Query()
@@ -243,6 +279,40 @@ func parseTopFilterPatch(r *http.Request) map[string]any {
 	return patch
 }
 
+func parseClaimOwnerFromQuery(r *http.Request) pool.ClaimOwner {
+	q := r.URL.Query()
+	return pool.ClaimOwner{
+		ClientID:  strings.TrimSpace(q.Get("clientId")),
+		AccountID: strings.TrimSpace(q.Get("accountId")),
+	}
+}
+
+func parseScanTelemetryFromQuery(r *http.Request) pool.ScanTelemetry {
+	q := r.URL.Query()
+	telemetry := pool.ScanTelemetry{}
+	if v := strings.TrimSpace(q.Get("riskLevel")); v != "" {
+		telemetry.RiskLevel = parsePositiveIntQuery(v, 0)
+	}
+	if v := strings.TrimSpace(q.Get("cooldownRemainMs")); v != "" {
+		if n, ok := parseInt64Query(v); ok {
+			telemetry.CooldownRemainMS = n
+		}
+	}
+	if v := strings.TrimSpace(q.Get("hardRiskCount")); v != "" {
+		telemetry.HardRiskCount = parsePositiveIntQuery(v, 0)
+	}
+	if v := strings.TrimSpace(q.Get("busyAccounts")); v != "" {
+		telemetry.BusyAccounts = parsePositiveIntQuery(v, 0)
+	}
+	if v := strings.TrimSpace(q.Get("idleAccounts")); v != "" {
+		telemetry.IdleAccounts = parsePositiveIntQuery(v, 0)
+	}
+	if v := strings.TrimSpace(q.Get("activeScanners")); v != "" {
+		telemetry.ActiveScanners = parsePositiveIntQuery(v, 0)
+	}
+	return telemetry
+}
+
 // main 方法：初始化服务配置并启动 HTTP 接口与后台维护任务。
 func main() {
 	configFilePath := resolveConfigPath()
@@ -291,6 +361,15 @@ func main() {
 		if fileCfg.Pool.Shards > 0 {
 			pc.MinHeapShards = fileCfg.Pool.Shards
 		}
+		if fileCfg.Pool.LearningJoinWeight > 0 {
+			pc.LearningJoinWeight = fileCfg.Pool.LearningJoinWeight
+		}
+		if fileCfg.Pool.LearningWinWeight > 0 {
+			pc.LearningWinWeight = fileCfg.Pool.LearningWinWeight
+		}
+		if strings.TrimSpace(fileCfg.Pool.FeedbackLogPath) != "" {
+			pc.FeedbackLogPath = strings.TrimSpace(fileCfg.Pool.FeedbackLogPath)
+		}
 	}
 	pc.TopCacheMax = getenvInt("POOL_SERVER_TOP_CACHE_MAX", pc.TopCacheMax)
 	pc.TTLGraceSec = getenvInt64("POOL_SERVER_TTL_GRACE_SEC", pc.TTLGraceSec)
@@ -298,6 +377,19 @@ func main() {
 	pc.TopRefreshMS = getenvInt64("POOL_SERVER_TOP_CACHE_REFRESH_MS", pc.TopRefreshMS)
 	pc.ExpireSweepMS = getenvInt64("POOL_SERVER_EXPIRE_SWEEP_MS", pc.ExpireSweepMS)
 	pc.MinHeapShards = getenvInt("POOL_SERVER_SHARDS", pc.MinHeapShards)
+	if v := strings.TrimSpace(os.Getenv("POOL_SERVER_LEARNING_JOIN_WEIGHT")); v != "" {
+		if parsed, err := strconv.ParseFloat(v, 64); err == nil && parsed > 0 {
+			pc.LearningJoinWeight = parsed
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("POOL_SERVER_LEARNING_WIN_WEIGHT")); v != "" {
+		if parsed, err := strconv.ParseFloat(v, 64); err == nil && parsed > 0 {
+			pc.LearningWinWeight = parsed
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("POOL_SERVER_FEEDBACK_LOG")); v != "" {
+		pc.FeedbackLogPath = v
+	}
 
 	rc := pool.DefaultRedisConfig()
 	redisEnabled := false
@@ -481,13 +573,22 @@ func main() {
 		baseProfile, _ := svc.Profile()
 		filterPatch := parseTopFilterPatch(r)
 		effectiveProfile := pool.ApplyProfilePatch(baseProfile, filterPatch)
+		owner := parseClaimOwnerFromQuery(r)
+		includeClaimedSelf := false
+		if v := strings.TrimSpace(r.URL.Query().Get("includeClaimedSelf")); v != "" {
+			if b, ok := parseBoolQuery(v); ok {
+				includeClaimedSelf = b
+			}
+		}
 
 		var (
 			items []pool.ScoredCandidate
 			meta  pool.TopMeta
 			pv    int64
 		)
-		if len(filterPatch) > 0 {
+		if owner.ClientID != "" && owner.AccountID != "" {
+			items, meta, pv = svc.TopAvailable(limit, effectiveProfile, owner, includeClaimedSelf)
+		} else if len(filterPatch) > 0 {
 			items, meta, pv = svc.TopWithProfile(limit, effectiveProfile)
 		} else {
 			items, meta, pv = svc.Top(limit)
@@ -501,6 +602,515 @@ func main() {
 			"appliedFilters":   effectiveProfile,
 			"items":            items,
 		})
+	})
+
+	mux.HandleFunc("/scan/assignment", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+
+		clientID := strings.TrimSpace(r.URL.Query().Get("clientId"))
+		if clientID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "clientId is required"})
+			return
+		}
+
+		categoryIDs := parseCSVQuery(r.URL.Query().Get("categories"))
+		assignment, err := svc.ScanAssignment(clientID, categoryIDs, parseScanTelemetryFromQuery(r))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":         true,
+			"assignment": assignment,
+		})
+	})
+
+	mux.HandleFunc("/scan/permit", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+
+		var req struct {
+			ClientID  string `json:"clientId"`
+			AccountID string `json:"accountId"`
+			Kind      string `json:"kind"`
+			Cost      int    `json:"cost"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		if strings.TrimSpace(req.ClientID) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "clientId is required"})
+			return
+		}
+		result, err := svc.ScanPermit(pool.ScanPermitOptions{
+			ClientID:  req.ClientID,
+			AccountID: req.AccountID,
+			Kind:      req.Kind,
+			Cost:      req.Cost,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "permit": result})
+	})
+
+	mux.HandleFunc("/scan/all/claim", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+
+		var req struct {
+			ClientID   string `json:"clientId"`
+			AccountID  string `json:"accountId"`
+			LeaseTTLMS int64  `json:"leaseTtlMs"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		if strings.TrimSpace(req.ClientID) == "" || strings.TrimSpace(req.AccountID) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "clientId and accountId are required"})
+			return
+		}
+		result, err := svc.ClaimAllScanCursor(pool.AllScanClaimOptions{
+			ClientID:   req.ClientID,
+			AccountID:  req.AccountID,
+			LeaseTTLMS: req.LeaseTTLMS,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cursor": result})
+	})
+
+	mux.HandleFunc("/scan/all/report", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+
+		var req struct {
+			ClientID          string `json:"clientId"`
+			AccountID         string `json:"accountId"`
+			SlotID            string `json:"slotId"`
+			UsedCursorMaxTime int64  `json:"usedCursorMaxTime"`
+			NextCursorMaxTime int64  `json:"nextCursorMaxTime"`
+			HasMore           bool   `json:"hasMore"`
+			RawRooms          int    `json:"rawRooms"`
+			HintedRooms       int    `json:"hintedRooms"`
+			QualifiedRooms    int    `json:"qualifiedRooms"`
+			Error             string `json:"error"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		if strings.TrimSpace(req.ClientID) == "" || strings.TrimSpace(req.AccountID) == "" || strings.TrimSpace(req.SlotID) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "clientId, accountId and slotId are required"})
+			return
+		}
+		result, err := svc.ReportAllScanCursor(pool.AllScanReportOptions{
+			ClientID:          req.ClientID,
+			AccountID:         req.AccountID,
+			SlotID:            req.SlotID,
+			UsedCursorMaxTime: req.UsedCursorMaxTime,
+			NextCursorMaxTime: req.NextCursorMaxTime,
+			HasMore:           req.HasMore,
+			RawRooms:          req.RawRooms,
+			HintedRooms:       req.HintedRooms,
+			QualifiedRooms:    req.QualifiedRooms,
+			Error:             req.Error,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": result})
+	})
+
+	mux.HandleFunc("/task/claim", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+
+		var req struct {
+			ClientID    string         `json:"clientId"`
+			AccountID   string         `json:"accountId"`
+			LeaseSec    int64          `json:"leaseSec"`
+			Filters     map[string]any `json:"filters"`
+			PreferKeys  []string       `json:"preferKeys"`
+			ExcludeKeys []string       `json:"excludeKeys"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		if strings.TrimSpace(req.ClientID) == "" || strings.TrimSpace(req.AccountID) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "clientId and accountId are required"})
+			return
+		}
+
+		baseProfile, _ := svc.Profile()
+		effectiveProfile := pool.ApplyProfilePatch(baseProfile, req.Filters)
+		result, err := svc.ClaimTask(pool.ClaimOptions{
+			Owner: pool.ClaimOwner{
+				ClientID:  req.ClientID,
+				AccountID: req.AccountID,
+			},
+			LeaseSec:    req.LeaseSec,
+			Profile:     effectiveProfile,
+			PreferKeys:  req.PreferKeys,
+			ExcludeKeys: req.ExcludeKeys,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":             true,
+			"claimed":        result.Claimed,
+			"reason":         result.Reason,
+			"item":           result.Item,
+			"lease":          result.Lease,
+			"profileVersion": result.ProfileVersion,
+			"generatedAt":    result.GeneratedAtMS,
+			"appliedFilters": effectiveProfile,
+		})
+	})
+
+	mux.HandleFunc("/task/review", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+
+		var req struct {
+			ClientID            string         `json:"clientId"`
+			AccountID           string         `json:"accountId"`
+			CurrentCandidateKey string         `json:"currentCandidateKey"`
+			CurrentRoomID       string         `json:"currentRoomId"`
+			Filters             map[string]any `json:"filters"`
+			ExcludeKeys         []string       `json:"excludeKeys"`
+			Stage               string         `json:"stage"`
+			Limit               int            `json:"limit"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		if strings.TrimSpace(req.ClientID) == "" || strings.TrimSpace(req.AccountID) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "clientId and accountId are required"})
+			return
+		}
+
+		baseProfile, _ := svc.Profile()
+		effectiveProfile := pool.ApplyProfilePatch(baseProfile, req.Filters)
+		result, err := svc.ReviewTask(pool.ReviewOptions{
+			Owner: pool.ClaimOwner{
+				ClientID:  req.ClientID,
+				AccountID: req.AccountID,
+			},
+			Profile:             effectiveProfile,
+			CurrentCandidateKey: req.CurrentCandidateKey,
+			CurrentRoomID:       req.CurrentRoomID,
+			ExcludeKeys:         req.ExcludeKeys,
+			Stage:               req.Stage,
+			Limit:               req.Limit,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":             true,
+			"reviewed":       result.Reviewed,
+			"stage":          result.Stage,
+			"decision":       result.Decision,
+			"reason":         result.Reason,
+			"item":           result.Item,
+			"current":        result.Current,
+			"alternatives":   result.Alternatives,
+			"profileVersion": result.ProfileVersion,
+			"generatedAt":    result.GeneratedAtMS,
+			"appliedFilters": effectiveProfile,
+		})
+	})
+
+	mux.HandleFunc("/task/renew", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+
+		var req struct {
+			ClientID  string `json:"clientId"`
+			AccountID string `json:"accountId"`
+			LeaseID   string `json:"leaseId"`
+			LeaseSec  int64  `json:"leaseSec"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		lease, renewed, err := svc.RenewTaskLease(pool.ClaimOwner{
+			ClientID:  req.ClientID,
+			AccountID: req.AccountID,
+		}, req.LeaseID, req.LeaseSec)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "renewed": renewed, "lease": lease})
+	})
+
+	mux.HandleFunc("/task/release", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+
+		var req struct {
+			ClientID  string `json:"clientId"`
+			AccountID string `json:"accountId"`
+			LeaseID   string `json:"leaseId"`
+			Reason    string `json:"reason"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		released, err := svc.ReleaseTaskLease(pool.ClaimOwner{
+			ClientID:  req.ClientID,
+			AccountID: req.AccountID,
+		}, req.LeaseID, req.Reason)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "released": released})
+	})
+
+	mux.HandleFunc("/task/finish", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+
+		var req struct {
+			ClientID        string `json:"clientId"`
+			AccountID       string `json:"accountId"`
+			LeaseID         string `json:"leaseId"`
+			Result          string `json:"result"`
+			RemoveCandidate bool   `json:"removeCandidate"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		finished, err := svc.FinishTaskLease(pool.ClaimOwner{
+			ClientID:  req.ClientID,
+			AccountID: req.AccountID,
+		}, req.LeaseID, req.Result, req.RemoveCandidate)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "finished": finished})
+	})
+
+	mux.HandleFunc("/task/feedback", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+
+		var req struct {
+			ClientID             string            `json:"clientId"`
+			AccountID            string            `json:"accountId"`
+			Event                string            `json:"event"`
+			CandidateKey         string            `json:"candidateKey"`
+			RoomID               string            `json:"roomId"`
+			LotteryID            string            `json:"lotteryId"`
+			LotteryName          string            `json:"lotteryName"`
+			AuthorNickname       string            `json:"authorNickname"`
+			Conditions           []pool.Condition  `json:"conditions"`
+			JoinTotal            float64           `json:"joinTotal"`
+			LuckyCount           float64           `json:"luckyCount"`
+			OnlineTotal          float64           `json:"onlineTotal"`
+			TotalAmount          float64           `json:"totalAmount"`
+			PrizeType            any               `json:"prizeType"`
+			PrizeInfo            map[string]any    `json:"prizeInfo"`
+			PredictedProbability float64           `json:"predictedProbability"`
+			PredictedJoinTotal   float64           `json:"predictedJoinTotal"`
+			RemainingSec         int64             `json:"remainingSec"`
+			EndTime              int64             `json:"endTime"`
+			StartTime            int64             `json:"startTime"`
+			JoinedAt             int64             `json:"joinedAt"`
+			RewardAmount         float64           `json:"rewardAmount"`
+			JoinMode             string            `json:"joinMode"`
+			Reason               string            `json:"reason"`
+			Extra                map[string]string `json:"extra"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		if strings.TrimSpace(req.Event) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "event is required"})
+			return
+		}
+
+		err := svc.RecordTaskFeedback(pool.TaskFeedback{
+			Owner: pool.ClaimOwner{
+				ClientID:  req.ClientID,
+				AccountID: req.AccountID,
+			},
+			Event:                req.Event,
+			CandidateKey:         req.CandidateKey,
+			RoomID:               req.RoomID,
+			LotteryID:            req.LotteryID,
+			LotteryName:          req.LotteryName,
+			AuthorNickname:       req.AuthorNickname,
+			Conditions:           req.Conditions,
+			JoinTotal:            req.JoinTotal,
+			LuckyCount:           req.LuckyCount,
+			OnlineTotal:          req.OnlineTotal,
+			TotalAmount:          req.TotalAmount,
+			PrizeType:            req.PrizeType,
+			PrizeInfo:            req.PrizeInfo,
+			PredictedProbability: req.PredictedProbability,
+			PredictedJoinTotal:   req.PredictedJoinTotal,
+			RemainingSec:         req.RemainingSec,
+			EndTimeMS:            req.EndTime,
+			StartTimeMS:          req.StartTime,
+			JoinedAtMS:           req.JoinedAt,
+			RewardAmount:         req.RewardAmount,
+			JoinMode:             req.JoinMode,
+			Reason:               req.Reason,
+			Extra:                req.Extra,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "recorded": true})
+	})
+
+	mux.HandleFunc("/task/debug", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+
+		baseProfile, _ := svc.Profile()
+		effectiveProfile := pool.ApplyProfilePatch(baseProfile, parseTopFilterPatch(r))
+		owner := parseClaimOwnerFromQuery(r)
+		leaseLimit := parsePositiveIntQuery(r.URL.Query().Get("limit"), 50)
+		snapshot, pv := svc.TaskDebug(effectiveProfile, owner, leaseLimit)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":             true,
+			"profileVersion": pv,
+			"appliedFilters": effectiveProfile,
+			"summary":        snapshot.Summary,
+			"leases":         snapshot.Leases,
+		})
+	})
+
+	mux.HandleFunc("/task/leases", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+
+		baseProfile, _ := svc.Profile()
+		effectiveProfile := pool.ApplyProfilePatch(baseProfile, parseTopFilterPatch(r))
+		owner := parseClaimOwnerFromQuery(r)
+		leaseLimit := parsePositiveIntQuery(r.URL.Query().Get("limit"), 200)
+		snapshot, pv := svc.TaskDebug(effectiveProfile, owner, leaseLimit)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":             true,
+			"profileVersion": pv,
+			"appliedFilters": effectiveProfile,
+			"summary":        snapshot.Summary,
+			"items":          snapshot.Leases,
+		})
+	})
+
+	mux.HandleFunc("/learning/debug", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+
+		limit := parsePositiveIntQuery(r.URL.Query().Get("limit"), 120)
+		snapshot, err := svc.LearningDebug(limit)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "summary": snapshot.Summary, "items": snapshot.Items})
 	})
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

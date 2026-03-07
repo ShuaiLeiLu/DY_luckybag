@@ -157,15 +157,30 @@ function pickDetailRooms(roomInfoList, scanProfile = null, options = {}) {
   const forceLotteryHintOnly = options?.forceLotteryHintOnly === true
   const hintRooms = source.filter(item => item?.hasLotteryHint === true)
   const nonHintRooms = source.filter(item => item?.hasLotteryHint !== true)
-  const defaultCap = supermanFirstRound ? 6 : 8
+  const defaultCap = supermanFirstRound ? 8 : 10
   const detailRoomCap = Math.max(1, toPositiveInt(scanProfile?.detailRoomCap, defaultCap))
   const nonHintCap = forceLotteryHintOnly
     ? 0
-    : Math.max(0, toPositiveInt(scanProfile?.nonHintDetailCap, 2))
+    : Math.max(0, toPositiveInt(scanProfile?.nonHintDetailCap, 3))
   const prioritized = forceLotteryHintOnly
     ? hintRooms
     : [...hintRooms, ...nonHintRooms.slice(0, nonHintCap)]
   return prioritized.slice(0, detailRoomCap)
+}
+
+/**
+ * claimLocalDetailRooms 方法：在同一客户端内对详情请求做短期去重，避免多个账号重复抓同一房间。
+ */
+function claimLocalDetailRooms(manager, accountId, roomInfoList, scanProfile = null) {
+  const source = Array.isArray(roomInfoList) ? roomInfoList : []
+  if (source.length === 0 || typeof manager?.claimLocalScanRooms !== 'function') {
+    return { list: source, skipped: 0 }
+  }
+  const ttlMs = Math.max(
+    15000,
+    Number(scanProfile?.localRoomLeaseTTLms || (scanProfile?.deepScan === true ? 35000 : 55000))
+  )
+  return manager.claimLocalScanRooms(accountId, source, { ttlMs })
 }
 
 /**
@@ -183,6 +198,43 @@ function logRequestDetail(manager, accountId, stage, requestIndex, scannedList, 
     type: 'request-summary',
     summary
   })
+}
+
+/**
+ * requestScanPermit 方法：在真正发请求前先向共享池服务端申请扫描许可证。
+ */
+async function requestScanPermit(manager, accountId, kind, cost = 1) {
+  if (!manager?.isPoolServerEnabled?.()) {
+    return { allowed: true, retryAfterMs: 0, reason: 'disabled' }
+  }
+  if (typeof manager.requestPoolScanPermit !== 'function') {
+    return { allowed: true, retryAfterMs: 0, reason: 'missing_manager_method' }
+  }
+  try {
+    const res = await manager.requestPoolScanPermit(accountId, kind, { cost })
+    if (!res?.ok) {
+      return { allowed: true, retryAfterMs: 0, reason: 'permit_api_error' }
+    }
+    const permit = res?.data?.permit || {}
+    return {
+      allowed: permit.allowed !== false,
+      retryAfterMs: Math.max(0, Number(permit.retryAfterMs || 0)),
+      reason: String(permit.reason || ''),
+      detail: permit
+    }
+  } catch (_) {
+    return { allowed: true, retryAfterMs: 0, reason: 'permit_exception' }
+  }
+}
+
+/**
+ * calcDetailPermitCost 方法：将详情批次请求折算成较平滑的 permit 成本，避免整批详情被一次性卡死。
+ */
+function calcDetailPermitCost(candidateCount, scanProfile = null) {
+  const count = Math.max(0, toPositiveInt(candidateCount, 0))
+  if (count <= 0) return 1
+  const divisor = Math.max(2, toPositiveInt(scanProfile?.detailPermitDivisor, 3))
+  return Math.max(1, Math.ceil(count / divisor))
 }
 
 /**
@@ -210,11 +262,14 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
     ? Number.MAX_SAFE_INTEGER
     : Math.max(4, toPositiveInt(scanProfile?.noGrowthBreakRounds, Math.max(8, Math.ceil(allTimes / 2))))
   const allCount = supermanFirstRound
-    ? 8
+    ? Math.max(8, toPositiveInt(scanProfile?.allCount, 12))
     : Math.max(8, toPositiveInt(scanProfile?.allCount, toPositiveInt(scanProfile?.countPerPage, 24)))
   const seenRoomIds = new Set()
   let cursorMaxTime = null
   let noGrowthRounds = 0
+  const sharedAllCursorEnabled = !supermanFirstRound &&
+    manager?.isPoolServerEnabled?.() === true &&
+    String(scanProfile?.localScanPlan?.kind || '') === 'all'
 
   try {
     for (let i = 0; i < maxAllRounds; i++) {
@@ -259,13 +314,42 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
         })
       }
 
+      let sharedCursorLease = null
       try {
+        const allPermit = await requestScanPermit(manager, accountId, 'all', 1)
+        if (allPermit.allowed !== true) {
+          roundSummary.error = `scan_permit_denied:${allPermit.reason || 'rate_limited'}`
+          emitRoundSummary()
+          await manager.sleep(Math.min(12000, Math.max(600, Number(allPermit.retryAfterMs || 1200))))
+          continue
+        }
+
+        let sharedCursorMaxTime = null
+        if (sharedAllCursorEnabled && typeof manager.claimPoolAllScanCursor === 'function') {
+          const claimRes = await manager.claimPoolAllScanCursor(accountId, {
+            leaseTtlMs: Number(scanProfile?.allCursorLeaseTtlMs || 18000)
+          })
+          const cursor = claimRes?.data?.cursor || {}
+          if (!claimRes?.ok || cursor?.claimed !== true) {
+            roundSummary.error = `all_cursor_unavailable:${cursor?.reason || claimRes?.error || 'unknown'}`
+            emitRoundSummary()
+            await manager.sleep(Math.min(15000, Math.max(800, Number(cursor?.retryAfterMs || 1800))))
+            continue
+          }
+          sharedCursorLease = cursor
+          if (Number(cursor.cursorMaxTime || 0) > 0) {
+            sharedCursorMaxTime = Number(cursor.cursorMaxTime)
+          }
+        }
+
         const requestPayload = {
           accountId,
           customCount: allCount,
           maxTime: supermanFirstRound
             ? undefined
-            : (Number(cursorMaxTime || 0) > 0 ? Number(cursorMaxTime) : undefined)
+            : (Number(sharedCursorMaxTime || cursorMaxTime || 0) > 0
+                ? Number(sharedCursorMaxTime || cursorMaxTime)
+                : undefined)
         }
 
         const result = await manager.ipc.invoke('search-live-by-all', {
@@ -277,6 +361,18 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
         roundSummary.rawRooms = Array.isArray(result?.roomInfoList) ? result.roomInfoList.length : 0
 
         if (!result.success) {
+          if (sharedAllCursorEnabled && sharedCursorLease?.slotId && typeof manager.reportPoolAllScanCursor === 'function') {
+            await manager.reportPoolAllScanCursor(accountId, {
+              slotId: sharedCursorLease.slotId,
+              usedCursorMaxTime: Number(sharedCursorLease.cursorMaxTime || 0),
+              nextCursorMaxTime: 0,
+              hasMore: false,
+              rawRooms: roundSummary.rawRooms,
+              hintedRooms: 0,
+              qualifiedRooms: 0,
+              error: String(result?.error || 'request_failed')
+            })
+          }
           if (shouldLogScanProgress(i, noGrowthRounds)) {
             accountData.callbacks.onLog(`扫描重试(${i + 1}/${maxAllRounds})：${result.error || '未知错误'}`, 'warning')
           }
@@ -334,8 +430,10 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
             supermanFirstRound,
             forceLotteryHintOnly
           })
-          roundSummary.detailRequested = detailRooms.length
-          const detailResult = await getLotteryInfo(manager, detailRooms, accountId, scanProfile)
+          const localClaim = claimLocalDetailRooms(manager, accountId, detailRooms, scanProfile)
+          roundSummary.detailRequested = localClaim.list.length
+          roundSummary.localDedupSkipped = Number(localClaim.skipped || 0)
+          const detailResult = await getLotteryInfo(manager, localClaim.list, accountId, scanProfile)
           const resList = detailResult.settled
           roundSummary.detailRiskCount = Number(detailResult?.stats?.hardRiskCount || 0)
           manager.applyScanRiskFeedback(accountId, detailResult.stats, accountData.callbacks.onLog)
@@ -389,11 +487,22 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
         roundSummary.hasMore = hasMore
         roundSummary.nextCursor = hasMore ? nextMaxTime : null
         if (!supermanFirstRound) {
-          if (hasMore && nextMaxTime !== Number(cursorMaxTime || 0)) {
+          if (!sharedAllCursorEnabled && hasMore && nextMaxTime !== Number(cursorMaxTime || 0)) {
             cursorMaxTime = nextMaxTime
-          } else if (!hasMore) {
+          } else if (!sharedAllCursorEnabled && !hasMore) {
             cursorMaxTime = null
           }
+        }
+        if (sharedAllCursorEnabled && sharedCursorLease?.slotId && typeof manager.reportPoolAllScanCursor === 'function') {
+          await manager.reportPoolAllScanCursor(accountId, {
+            slotId: sharedCursorLease.slotId,
+            usedCursorMaxTime: Number(sharedCursorLease.cursorMaxTime || 0),
+            nextCursorMaxTime: hasMore ? nextMaxTime : 0,
+            hasMore,
+            rawRooms: roundSummary.rawRooms,
+            hintedRooms: roundSummary.hintedRooms,
+            qualifiedRooms: roundSummary.kept
+          })
         }
 
         if (!supermanFirstRound && noGrowthRounds >= noGrowthBreakRounds) {
@@ -415,6 +524,18 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
         const randomDelay = Math.floor(Math.random() * Math.max(0, maxDelay - minDelay + 1)) + minDelay
         await manager.sleep(randomDelay)
       } catch (error) {
+        if (sharedAllCursorEnabled && sharedCursorLease?.slotId && typeof manager.reportPoolAllScanCursor === 'function') {
+          await manager.reportPoolAllScanCursor(accountId, {
+            slotId: sharedCursorLease.slotId,
+            usedCursorMaxTime: Number(sharedCursorLease.cursorMaxTime || 0),
+            nextCursorMaxTime: 0,
+            hasMore: false,
+            rawRooms: roundSummary.rawRooms,
+            hintedRooms: roundSummary.hintedRooms,
+            qualifiedRooms: roundSummary.kept,
+            error: String(error?.message || 'all_scan_exception')
+          }).catch(() => {})
+        }
         roundSummary.error = error?.message || 'unknown'
         emitRoundSummary()
         if (shouldLogScanProgress(i, noGrowthRounds)) {
@@ -441,7 +562,9 @@ export async function startCollectLive(manager, accountId, scanProfile = null) {
   const config = accountData.config || {}
   const supermanFirstRound = scanProfile?.supermanFirstRound === true
 
-  const categories = manager.categoryList
+  const categories = Array.isArray(scanProfile?.assignedCategoryPlans) && scanProfile.assignedCategoryPlans.length > 0
+    ? scanProfile.assignedCategoryPlans
+    : (Array.isArray(scanProfile?.assignedCategories) ? scanProfile.assignedCategories : manager.categoryList)
   if (!Array.isArray(categories) || categories.length === 0) return
 
   try {
@@ -454,11 +577,13 @@ export async function startCollectLive(manager, accountId, scanProfile = null) {
       const managerPages = toNumber(manager.scanConfig?.pagesPerCategory, 10)
       const pageCount = supermanFirstRound
         ? 10
-        : (Number.isFinite(profilePages) ? profilePages : managerPages)
+        : Math.max(1, Math.floor(Number(category?.maxPages || (Number.isFinite(profilePages) ? profilePages : managerPages))))
       const categoryRound = {
         mode: supermanFirstRound ? 'superman-first-round' : 'normal',
-        categoryId: category.id,
-        categoryName: category.name,
+        categoryId: category.id || category.categoryId,
+        categoryName: category.name || category.categoryName || category.categoryId,
+        startOffset: Math.max(0, Number(category?.startOffset || 0)),
+        offsetStride: Math.max(0, Number(category?.offsetStride || 0)),
         total: 0,
         kept: 0,
         dropType: 0,
@@ -469,9 +594,12 @@ export async function startCollectLive(manager, accountId, scanProfile = null) {
       }
       try {
         await searchLiveRoomCategory(manager, accountId, {
-          category_id: category.id,
-          category_name: category.name,
-          page: pageCount
+          category_id: category.id || category.categoryId,
+          category_name: category.name || category.categoryName || category.categoryId,
+          page: pageCount,
+          startOffset: Number(category?.startOffset || 0),
+          offsetStride: Number(category?.offsetStride || 0),
+          count: Number(category?.count || scanProfile?.countPerPage || manager.scanConfig?.countPerPage || 15)
         }, (batchList) => {
           const { list: filteredList, stats: filterStats } = manager.filterLotteryByConditionsWithStats(batchList, config)
           categoryRound.batches += 1
@@ -543,7 +671,7 @@ export async function startCollectLive(manager, accountId, scanProfile = null) {
 export async function searchLiveRoomCategory(
   manager,
   accountId,
-  { category_id, category_name, page = null },
+  { category_id, category_name, page = null, startOffset = 0, offsetStride = 0, count = null },
   onBatch = null,
   scanProfile = null
 ) {
@@ -560,13 +688,16 @@ export async function searchLiveRoomCategory(
     : (autoPaging ? Math.max(1, toPositiveInt(scanProfile?.maxCategoryPages, 240)) : Math.max(1, Math.floor(pageNum)))
   const countPerPage = supermanFirstRound
     ? 15
-    : Math.max(10, toPositiveInt(scanProfile?.countPerPage, toPositiveInt(manager.scanConfig.countPerPage, 15)))
+    : Math.max(10, toPositiveInt(count, toPositiveInt(scanProfile?.countPerPage, toPositiveInt(manager.scanConfig.countPerPage, 15))))
   const noGrowthBreakPages = supermanFirstRound
     ? Number.MAX_SAFE_INTEGER
     : Math.max(4, toPositiveInt(scanProfile?.categoryNoGrowthBreakPages, 10))
   const lotteryInfoList = []
   const seenRoomIds = new Set()
-  let offset = supermanFirstRound ? countPerPage : 0
+  const deterministicPaging = !supermanFirstRound && (Number(startOffset || 0) > 0 || Number(offsetStride || 0) > countPerPage)
+  const baseOffset = Math.max(0, toPositiveInt(startOffset, 0))
+  const pageStride = Math.max(countPerPage, toPositiveInt(offsetStride, countPerPage))
+  let offset = supermanFirstRound ? countPerPage : baseOffset
   let noGrowthPages = 0
 
   try {
@@ -575,7 +706,26 @@ export async function searchLiveRoomCategory(
       if (toPositiveInt(scanProfile?.deadlineMs, 0) > 0 && Date.now() >= Number(scanProfile.deadlineMs)) break
 
       try {
-        const requestOffset = supermanFirstRound ? ((i + 1) * countPerPage) : offset
+        const categoryPermit = await requestScanPermit(manager, accountId, 'category', 1)
+        if (categoryPermit.allowed !== true) {
+          emitScanDebug(manager, {
+            accountId,
+            stage: `category:${category_name || category_id}`,
+            requestIndex: i + 1,
+            type: 'permit-denied',
+            summary: {
+              kind: 'category',
+              retryAfterMs: Number(categoryPermit.retryAfterMs || 0),
+              reason: categoryPermit.reason || 'rate_limited'
+            }
+          })
+          await manager.sleep(Math.min(12000, Math.max(600, Number(categoryPermit.retryAfterMs || 1200))))
+          continue
+        }
+
+        const requestOffset = supermanFirstRound
+          ? ((i + 1) * countPerPage)
+          : (deterministicPaging ? (baseOffset + i * pageStride) : offset)
         const result = await manager.ipc.invoke('search-live-by-category', {
           accountId,
           categoryId: category_id,
@@ -614,7 +764,8 @@ export async function searchLiveRoomCategory(
           supermanFirstRound,
           forceLotteryHintOnly
         })
-        const detailResult = await getLotteryInfo(manager, detailRooms, accountId, scanProfile)
+        const localClaim = claimLocalDetailRooms(manager, accountId, detailRooms, scanProfile)
+        const detailResult = await getLotteryInfo(manager, localClaim.list, accountId, scanProfile)
         const resList = detailResult.settled
         manager.applyScanRiskFeedback(accountId, detailResult.stats, accountData.callbacks.onLog)
         const shouldBreakByDetailRisk = detailResult.stats.hardRiskCount > 0 &&
@@ -636,7 +787,8 @@ export async function searchLiveRoomCategory(
           validLotteryInfoList,
           {
             mode: supermanFirstRound ? 'superman-first-round' : 'normal',
-            stage: 'before-filter'
+            stage: 'before-filter',
+            localDedupSkipped: Number(localClaim.skipped || 0)
           }
         )
 
@@ -645,7 +797,9 @@ export async function searchLiveRoomCategory(
           onBatch(validLotteryInfoList)
         }
 
-        if (!supermanFirstRound) {
+        if (!supermanFirstRound && deterministicPaging) {
+          offset = requestOffset + pageStride
+        } else if (!supermanFirstRound) {
           const nextOffset = toPositiveInt(result?.nextOffset, 0)
           if (nextOffset > offset) {
             offset = nextOffset
@@ -703,6 +857,29 @@ export async function getLotteryInfo(manager, roomInfoList, accountId, scanProfi
   })
   if (candidateList.length === 0) {
     return { settled: [], stats: { successCount: 0, hardRiskCount: 0, errorCount: 0 } }
+  }
+
+  const detailPermitCost = calcDetailPermitCost(candidateList.length, scanProfile)
+  let detailPermit = await requestScanPermit(manager, accountId, 'detail', detailPermitCost)
+  if (detailPermit.allowed !== true) {
+    await manager.sleep(Math.min(9000, Math.max(600, Number(detailPermit.retryAfterMs || 1200))))
+    detailPermit = await requestScanPermit(manager, accountId, 'detail', detailPermitCost)
+  }
+  if (detailPermit.allowed !== true) {
+    emitScanDebug(manager, {
+      accountId,
+      stage: 'detail-batch',
+      type: 'permit-denied',
+      summary: {
+        kind: 'detail',
+        requested: candidateList.length,
+        cost: detailPermitCost,
+        retryAfterMs: Number(detailPermit.retryAfterMs || 0),
+        reason: detailPermit.reason || 'rate_limited'
+      }
+    })
+    await manager.sleep(Math.min(12000, Math.max(800, Number(detailPermit.retryAfterMs || 1500))))
+    return { settled: [], stats: { successCount: 0, hardRiskCount: 0, errorCount: 0, permitDenied: 1 } }
   }
 
   /**

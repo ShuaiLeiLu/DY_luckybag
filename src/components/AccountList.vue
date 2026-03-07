@@ -24,7 +24,7 @@
             :pagination="false"
             :bordered="false"
             size="small"
-            :scroll-x="scrollX"
+            :scroll-x="Number(scrollX || 0) > 0 ? scrollX : undefined"
             class="custom-table"
           />
         </div>
@@ -33,6 +33,10 @@
           <span>福袋总中奖次数: <b>{{ summary.totalLotteryWinCount }}</b></span>
           <span>福袋总中奖钻石: <b>{{ summary.totalLotteryWonDiamonds }}</b></span>
           <span>红包总中奖: <b>{{ summary.totalRedPacketWinning }}</b></span>
+          <span v-if="dispatch.enabled">服务端池: <b>{{ dispatch.validCandidates }}</b></span>
+          <span v-if="dispatch.enabled">可分配: <b>{{ dispatch.availableCandidates }}</b></span>
+          <span v-if="dispatch.enabled">已租约: <b>{{ dispatch.leaseCount }}</b></span>
+          <span v-if="dispatch.enabled">本端任务: <b>{{ dispatch.clientLeaseCount }}</b></span>
         </div>
       </template>
     </div>
@@ -58,7 +62,7 @@ const props = defineProps({
   },
   scrollX: {
     type: Number,
-    default: 1000
+    default: undefined
   },
   summary: {
     type: Object,
@@ -67,6 +71,16 @@ const props = defineProps({
       totalLotteryWinCount: 0,
       totalLotteryWonDiamonds: 0,
       totalRedPacketWinning: 0
+    })
+  },
+  dispatch: {
+    type: Object,
+    default: () => ({
+      enabled: false,
+      validCandidates: 0,
+      availableCandidates: 0,
+      leaseCount: 0,
+      clientLeaseCount: 0
     })
   }
 })

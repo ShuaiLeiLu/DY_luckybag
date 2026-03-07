@@ -17,6 +17,7 @@
               :total-participation="totalParticipation"
               :total-winning="totalWinning"
               :success-rate="headerSuccessRate"
+              :dispatch-summary="poolDispatchSummary"
             />
 
             <div class="content-body">
@@ -27,6 +28,7 @@
                   :columns="responsiveColumns"
                   :scroll-x="accountTableScrollX"
                   :summary="accountSummary"
+                  :dispatch="poolDispatchSummary"
                   @add="addAccount"
                 />
                 <LotteryDetail
@@ -37,7 +39,12 @@
               </div>
 
               <div class="column-right">
-                <LogPanel :logs="logs" @clear="logs = []" />
+                <LogPanel
+                  :logs="logs"
+                  :learning="poolLearningDebug"
+                  :learning-loading="poolLearningLoading"
+                  @clear="logs = []"
+                />
               </div>
             </div>
           </main>
@@ -62,6 +69,7 @@ import LotteryDetail from './components/LotteryDetail.vue'
 import LogPanel from './components/LogPanel.vue'
 
 import LotteryManager from './services/LotteryManager-lite'
+import { normalizePoolServerUrl, reportPoolTaskFeedback, resolvePoolClientId } from './services/poolClient'
 
 const themeOverrides = {
   common: {
@@ -177,6 +185,37 @@ const logs = ref([])
 const lotteriesByAccount = ref({})
 const lotteryHistory = ref([])
 const pendingCreateAccountIds = new Set()
+let poolDispatchTimer = null
+const poolLearningLoading = ref(false)
+const poolLearningDebug = ref({
+  connected: false,
+  summary: null,
+  items: [],
+  error: ''
+})
+
+/**
+ * createEmptyPoolDispatchSummary 方法：创建服务端调度摘要默认值。
+ */
+function createEmptyPoolDispatchSummary(overrides = {}) {
+  return {
+    enabled: false,
+    connected: false,
+    activeCandidates: 0,
+    validCandidates: 0,
+    availableCandidates: 0,
+    leaseCount: 0,
+    clientLeaseCount: 0,
+    accountLeaseCount: 0,
+    updatedAt: 0,
+    error: '',
+    ...overrides
+  }
+}
+
+const poolDispatchSummary = ref(createEmptyPoolDispatchSummary({
+  enabled: config.value.poolServer?.enabled !== false
+}))
 
 /**
  * getTodayKey 方法：获取今日键。
@@ -213,8 +252,35 @@ function createAccountModel(base = {}) {
     todayConsumedDiamonds: Number(base.todayConsumedDiamonds || 0),
     totalDiamonds: Number(base.totalDiamonds || 0),
     lastWalletDiamond: base.lastWalletDiamond ?? null,
-    statsDateKey: base.statsDateKey || getTodayKey()
+    statsDateKey: base.statsDateKey || getTodayKey(),
+    scanRole: base.scanRole || 'worker',
+    currentTaskStage: base.currentTaskStage || '',
+    currentTaskKey: base.currentTaskKey || '',
+    currentTaskLabel: base.currentTaskLabel || '',
+    currentTaskAnchor: base.currentTaskAnchor || '',
+    currentTaskLotteryName: base.currentTaskLotteryName || '',
+    currentTaskLeaseId: base.currentTaskLeaseId || '',
+    currentTaskLeaseExpiresAt: Number(base.currentTaskLeaseExpiresAt || 0),
+    currentTaskLeaseRemainingSec: Number(base.currentTaskLeaseRemainingSec || 0),
+    currentTaskScore: Number(base.currentTaskScore || 0)
   }
+}
+
+/**
+ * clearAccountDispatchState 方法：清理账号界面上的共享任务状态，避免暂停后残留旧租约信息。
+ */
+function clearAccountDispatchState(account) {
+  if (!account || typeof account !== 'object') return
+  account.scanRole = 'worker'
+  account.currentTaskStage = ''
+  account.currentTaskKey = ''
+  account.currentTaskLabel = ''
+  account.currentTaskAnchor = ''
+  account.currentTaskLotteryName = ''
+  account.currentTaskLeaseId = ''
+  account.currentTaskLeaseExpiresAt = 0
+  account.currentTaskLeaseRemainingSec = 0
+  account.currentTaskScore = 0
 }
 
 /**
@@ -268,6 +334,7 @@ onMounted(async () => {
   lotteryManager.setScanConfig({ countPerPage: 15, pagesPerCategory: 12, allCount: 24 })
   lotteryManager.setPoolServerConfig(config.value.poolServer, { silent: true })
   await loadAllAccounts()
+  restartPoolDispatchPolling()
   if (ipcRenderer) {
     // 监听浏览器窗口关闭事件
     const offBrowserClosed = ipcRenderer.on('browser-closed', ({ accountId }) => {
@@ -275,6 +342,7 @@ onMounted(async () => {
       if (account) {
         lotteryManager.stopAccount(accountId)
         account.state = 'paused'
+        clearAccountDispatchState(account)
         addLog(`⚠️ [${account.nickname}] 浏览器窗口已手动关闭，活动已停止`, 'warning')
       }
     })
@@ -289,15 +357,24 @@ onMounted(async () => {
         if (outcome) {
           const outcomeKey = makeLotteryOutcomeKey(accountId, outcome.lotteryId)
           let historyUpdated = false
+          let updatedHistoryRecord = null
           if (outcome.drawFinished) {
             if (outcomeKey) {
               if (!resolvedLotteryResultKeys.has(outcomeKey)) {
                 resolvedLotteryResultKeys.add(outcomeKey)
-                historyUpdated = updateLotteryHistoryOutcome(accountId, outcome)
+                const updateResult = updateLotteryHistoryOutcome(accountId, outcome)
+                historyUpdated = updateResult.updated
+                updatedHistoryRecord = updateResult.record
               }
             } else {
-              historyUpdated = updateLotteryHistoryOutcome(accountId, outcome)
+              const updateResult = updateLotteryHistoryOutcome(accountId, outcome)
+              historyUpdated = updateResult.updated
+              updatedHistoryRecord = updateResult.record
             }
+          }
+
+          if (historyUpdated && updatedHistoryRecord) {
+            reportLotteryOutcomeFeedback(accountId, updatedHistoryRecord, outcome).catch(() => {})
           }
 
           if (outcome.isWin) {
@@ -349,6 +426,7 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
   window.removeEventListener('beforeunload', handleBeforeUnload)
+  stopPoolDispatchPolling()
   handleBeforeUnload()
   ipcUnsubscribers.forEach(off => {
     try { off && off() } catch (_) {}
@@ -363,8 +441,123 @@ watch(
       enabled: enabled !== false,
       url: url || ''
     }, { silent: true })
+    restartPoolDispatchPolling()
   }
 )
+
+watch(
+  () => [
+    config.value.filterFanClub?.enabled,
+    config.value.onlyPhysicalPrize?.enabled,
+    config.value.preferBigRedPacket?.enabled,
+    config.value.preferBigRedPacket?.threshold,
+    config.value.filterOnline?.enabled,
+    config.value.filterOnline?.value,
+    config.value.hitRate?.enabled,
+    config.value.hitRate?.value
+  ],
+  () => {
+    refreshPoolDispatchSummary()
+  }
+)
+
+/**
+ * stopPoolDispatchPolling 方法：停止服务端调度摘要轮询。
+ */
+function stopPoolDispatchPolling() {
+  if (poolDispatchTimer) {
+    clearInterval(poolDispatchTimer)
+    poolDispatchTimer = null
+  }
+}
+
+/**
+ * refreshPoolDispatchSummary 方法：刷新服务端调度摘要。
+ */
+async function refreshPoolDispatchSummary() {
+  const enabled = config.value.poolServer?.enabled !== false && Boolean(config.value.poolServer?.url)
+  if (!enabled) {
+    poolDispatchSummary.value = createEmptyPoolDispatchSummary({ enabled: false })
+    return
+  }
+
+  const res = await lotteryManager.fetchPoolTaskDebugSnapshot(config.value, { limit: 50 })
+  if (!res?.ok) {
+    poolDispatchSummary.value = createEmptyPoolDispatchSummary({
+      enabled: true,
+      connected: false,
+      error: res?.error || 'task_debug_failed'
+    })
+    return
+  }
+
+  const summary = res.data?.summary || {}
+  poolDispatchSummary.value = createEmptyPoolDispatchSummary({
+    enabled: true,
+    connected: true,
+    activeCandidates: Number(summary.activeCandidates || 0),
+    validCandidates: Number(summary.validCandidates || 0),
+    availableCandidates: Number(summary.availableCandidates || 0),
+    leaseCount: Number(summary.leaseCount || 0),
+    clientLeaseCount: Number(summary.clientLeaseCount || 0),
+    accountLeaseCount: Number(summary.accountLeaseCount || 0),
+    updatedAt: Number(summary.generatedAt || Date.now())
+  })
+}
+
+/**
+ * refreshPoolLearningDebug 方法：刷新服务端学习桶调试快照。
+ */
+async function refreshPoolLearningDebug() {
+  const enabled = config.value.poolServer?.enabled !== false && Boolean(config.value.poolServer?.url)
+  if (!enabled) {
+    poolLearningDebug.value = {
+      connected: false,
+      summary: null,
+      items: [],
+      error: ''
+    }
+    return
+  }
+
+  poolLearningLoading.value = true
+  try {
+    const res = await lotteryManager.fetchPoolLearningDebugSnapshot({ limit: 60 })
+    if (!res?.ok) {
+      poolLearningDebug.value = {
+        connected: false,
+        summary: null,
+        items: [],
+        error: String(res?.error || 'learning_debug_failed')
+      }
+      return
+    }
+    poolLearningDebug.value = {
+      connected: true,
+      summary: res.data?.summary || null,
+      items: Array.isArray(res.data?.items) ? res.data.items : [],
+      error: ''
+    }
+  } finally {
+    poolLearningLoading.value = false
+  }
+}
+
+/**
+ * restartPoolDispatchPolling 方法：按当前服务端配置重启调度摘要轮询。
+ */
+function restartPoolDispatchPolling() {
+  stopPoolDispatchPolling()
+  refreshPoolDispatchSummary()
+  refreshPoolLearningDebug()
+  if (config.value.poolServer?.enabled === false || !config.value.poolServer?.url) {
+    return
+  }
+  poolDispatchTimer = setInterval(() => {
+    refreshPoolDispatchSummary()
+    refreshPoolLearningDebug()
+  }, 6000)
+}
 
 /**
  * loadAllAccounts 方法：加载账号列表。
@@ -467,7 +660,7 @@ function parseLotteryOutcome(raw) {
  * updateLotteryHistoryOutcome 方法：更新福袋历史记录开奖结果。
  */
 function updateLotteryHistoryOutcome(accountId, outcome) {
-  if (!outcome?.drawFinished) return false
+  if (!outcome?.drawFinished) return { updated: false, record: null }
   const targetStatus = outcome.isWin ? 'won' : 'lost'
   const targetReason = outcome.isWin ? '中奖' : '未中奖'
   const targetLotteryId = String(outcome.lotteryId || '').trim()
@@ -485,18 +678,73 @@ function updateLotteryHistoryOutcome(accountId, outcome) {
       String(item.resultStatus || 'pending') === 'pending'
     )
   }
-  if (index < 0) return false
+  if (index < 0) return { updated: false, record: null }
 
   const current = lotteryHistory.value[index]
-  if (current.resultStatus === 'won' || current.resultStatus === 'lost') return false
+  if (current.resultStatus === 'won' || current.resultStatus === 'lost') {
+    return { updated: false, record: current }
+  }
 
-  lotteryHistory.value[index] = {
+  const nextRecord = {
     ...current,
     lotteryId: current.lotteryId || targetLotteryId,
     resultStatus: targetStatus,
-    resultReason: targetReason
+    resultReason: targetReason,
+    rewardAmount: Number(outcome.winDiamonds || current.rewardAmount || 0)
   }
-  return true
+  lotteryHistory.value[index] = nextRecord
+  return { updated: true, record: nextRecord }
+}
+
+/**
+ * getPoolFeedbackServerUrl 方法：获取当前可用的服务端反馈地址。
+ */
+function getPoolFeedbackServerUrl() {
+  if (config.value.poolServer?.enabled === false) return ''
+  return normalizePoolServerUrl(config.value.poolServer?.url || '')
+}
+
+/**
+ * reportLotteryOutcomeFeedback 方法：将开奖结果回流到服务端学习桶。
+ */
+async function reportLotteryOutcomeFeedback(accountId, record, outcome) {
+  const baseUrl = getPoolFeedbackServerUrl()
+  if (!baseUrl || !record || !outcome?.drawFinished) return false
+
+  const roomId = String(record.roomId || '').trim()
+  const lotteryId = String(record.lotteryId || '').trim()
+  if (!roomId || !lotteryId) return false
+
+  let predictedProbability = Number(record.predictedProbability || 0)
+  if (predictedProbability > 1) predictedProbability /= 100
+
+  const result = await reportPoolTaskFeedback(baseUrl, {
+    clientId: resolvePoolClientId(),
+    accountId,
+    event: outcome.isWin ? 'draw_won' : 'draw_lost',
+    candidateKey: `${roomId}:${lotteryId}`,
+    roomId,
+    lotteryId,
+    lotteryName: record.lotteryName || '',
+    authorNickname: record.authorNickname || '',
+    conditions: Array.isArray(record.conditions) ? record.conditions : [],
+    joinTotal: Number(record.joinTotal || 0),
+    luckyCount: Number(record.luckyCount || 0),
+    onlineTotal: Number(record.onlineTotal || 0),
+    totalAmount: Number(record.totalAmount || 0),
+    prizeType: record.prizeType ?? null,
+    prizeInfo: (record.prizeInfo && typeof record.prizeInfo === 'object') ? record.prizeInfo : {},
+    predictedProbability,
+    predictedJoinTotal: Number(record.predictedJoinTotal || 0),
+    remainingSec: Math.max(0, Number(record.remainingSec || 0)),
+    endTime: Number(record.endTime || 0),
+    startTime: Number(record.startTime || 0),
+    joinedAt: Number(record.joinedAt || 0),
+    rewardAmount: Number(outcome.winDiamonds || 0),
+    joinMode: record.joinMode || '',
+    reason: outcome.isWin ? 'won' : 'lost'
+  })
+  return result.ok
 }
 
 /**
@@ -517,36 +765,60 @@ async function resolveUserInfoWithRetry(accountId, fromLoginToken = null) {
 }
 
 const responsiveColumns = computed(() => {
-  const actionFixed = isMobile.value ? undefined : 'right'
+  const actionFixed = undefined
   const compact = windowWidth.value < 1480
   /**
    * formatMetric 方法：将数值格式化为中文千分位字符串，用于界面展示。
    */
   const formatMetric = (value) => Number(value || 0).toLocaleString('zh-CN')
+  /**
+   * getTaskStageText 方法：格式化当前任务阶段文案。
+   */
+  const getTaskStageText = (stage) => ({
+    claimed: '待参与',
+    preheating: '预热中',
+    joining: '参与中',
+    waiting_draw: '等开奖',
+    post_draw_stay: '停留中'
+  }[String(stage || '')] || '')
 
   const base = [
     {
       title: '昵称',
       key: 'nickname',
-      width: isMobile.value ? 82 : 98,
+      width: isMobile.value ? 92 : 110,
       ellipsis: { tooltip: true },
       render: (row) => {
         const displayName = normalizeNickname(row.nickname || '')
-        return h('span', { class: 'account-name-text', title: displayName || '' }, displayName || '未命名账号')
+        return h('div', { class: 'account-name-cell' }, [
+          h('span', { class: 'account-name-text', title: displayName || '' }, displayName || '未命名账号')
+        ])
       }
     },
     {
-      title: '状态', key: 'state', width: isMobile.value ? 74 : 90,
+      title: '状态', key: 'state', width: isMobile.value ? 108 : 138,
       render: (row) => {
-        const map = { waiting: 'default', opened: 'info', running: 'success', paused: 'warning', error: 'error' }
         const text = { waiting: '等待', opened: '已打开', running: '运行', paused: '暂停', error: '错误' }
-        return h(NTag, { type: map[row.state] || 'default', size: 'small' }, { default: () => text[row.state] || '等待' })
+        const stageText = getTaskStageText(row.currentTaskStage)
+        const leaseText = Number(row.currentTaskLeaseRemainingSec || 0) > 0 ? `${Number(row.currentTaskLeaseRemainingSec || 0)}s` : ''
+        const chips = [
+          h('span', { class: `status-chip status-chip--${row.state || 'waiting'}` }, text[row.state] || '等待')
+        ]
+        if (stageText) {
+          chips.push(h('span', { class: 'status-chip status-chip--stage' }, stageText))
+        } else if (row.scanRole === 'scanner' && row.state === 'running') {
+          chips.push(h('span', { class: 'status-chip status-chip--scan' }, '采集'))
+        }
+        if (stageText && leaseText) {
+          chips.push(h('span', { class: 'status-chip status-chip--time' }, leaseText))
+        }
+        return h('div', { class: 'account-state-cell' }, chips)
       }
     },
     {
       title: '实时总数',
       key: 'totalDiamonds',
-      width: compact ? 92 : 108,
+      width: compact ? 82 : 94,
       align: 'right',
       render: (row) => {
         return h('span', { class: 'metric-cell' }, formatMetric(row.totalDiamonds))
@@ -555,7 +827,7 @@ const responsiveColumns = computed(() => {
     {
       title: '中奖钻石',
       key: 'winDiamonds',
-      width: compact ? 92 : 108,
+      width: compact ? 82 : 94,
       align: 'right',
       render: (row) => {
         const totalWin = Number(row.todayLotteryWonDiamonds || 0) + Number(row.todayRedPacketWonDiamonds || 0)
@@ -565,14 +837,14 @@ const responsiveColumns = computed(() => {
     {
       title: '消耗钻石',
       key: 'costDiamonds',
-      width: compact ? 92 : 108,
+      width: compact ? 82 : 94,
       align: 'right',
       render: (row) => h('span', { class: 'metric-cell metric-cost' }, formatMetric(row.todayConsumedDiamonds))
     },
     {
       title: '参与次数',
       key: 'participationCount',
-      width: compact ? 84 : 98,
+      width: compact ? 76 : 88,
       align: 'right',
       render: (row) => h('span', { class: 'metric-cell' }, formatMetric(row.participationCount))
     }
@@ -581,7 +853,7 @@ const responsiveColumns = computed(() => {
   base.push({
     title: '操作',
     key: 'actions',
-    width: compact ? 120 : 150,
+    width: compact ? 100 : 116,
     fixed: actionFixed,
     render: (row) => h('div', { class: 'account-actions-cell' }, [
       h(NButton, {
@@ -604,7 +876,8 @@ const responsiveColumns = computed(() => {
 })
 
 const accountTableScrollX = computed(() => {
-  return responsiveColumns.value.reduce((sum, col) => sum + Number(col.width || 120), 0) + 40
+  if (!isMobile.value) return undefined
+  return responsiveColumns.value.reduce((sum, col) => sum + Number(col.width || 120), 0) + 24
 })
 
 /**
@@ -624,12 +897,24 @@ function appendLotteryHistory(record) {
     authorNickname: record.authorNickname || '',
     lotteryName: record.lotteryName || '',
     predictedProbability: Number(record.predictedProbability || 0),
+    predictedJoinTotal: Number(record.predictedJoinTotal || 0),
+    joinTotal: Number(record.joinTotal || 0),
+    luckyCount: Number(record.luckyCount || 0),
+    onlineTotal: Number(record.onlineTotal || 0),
+    totalAmount: Number(record.totalAmount || 0),
+    prizeType: record.prizeType ?? null,
+    prizeInfo: (record.prizeInfo && typeof record.prizeInfo === 'object') ? record.prizeInfo : {},
+    conditions: Array.isArray(record.conditions) ? record.conditions : [],
+    remainingSec: Math.max(0, Number(record.remainingSec || 0)),
+    serverScore: Number(record.serverScore || 0),
     joinMode: record.joinMode || 'API',
     joinStatus: 'success',
     resultStatus: normalizedStatus,
     resultReason: record.resultReason || (normalizedStatus === 'won' ? '中奖' : (normalizedStatus === 'lost' ? '未中奖' : '待开奖')),
     joinedAt: Number(record.joinedAt || Date.now()),
-    endTime: Number(record.endTime || 0)
+    endTime: Number(record.endTime || 0),
+    rewardAmount: Number(record.rewardAmount || 0),
+    startTime: Number(record.startTime || 0)
   }
   lotteryHistory.value = [normalized, ...lotteryHistory.value].slice(0, 300)
 }
@@ -772,6 +1057,7 @@ function toggleAccount(account) {
   if (account.state === 'running') {
     lotteryManager.stopAccount(account.id)
     account.state = 'paused'
+    clearAccountDispatchState(account)
     addLog(`账号 ${account.nickname} 已暂停`)
   } else {
     startAccountScanning(account)
@@ -1039,11 +1325,92 @@ body {
 }
 
 .account-name-text {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
   color: #2b3a4c;
+}
+
+.account-name-cell {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 28px;
+}
+
+.account-state-cell {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  min-height: 28px;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 700;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  box-sizing: border-box;
+}
+
+.status-chip--waiting {
+  color: #6a7788;
+  background: #f4f7fb;
+  border-color: #dde6f0;
+}
+
+.status-chip--opened {
+  color: #2d6cdf;
+  background: #edf4ff;
+  border-color: #d7e5ff;
+}
+
+.status-chip--running {
+  color: #0f9d63;
+  background: #e9f8f0;
+  border-color: #caebda;
+}
+
+.status-chip--paused {
+  color: #d98824;
+  background: #fff5e7;
+  border-color: #f5ddba;
+}
+
+.status-chip--error {
+  color: #d84c4c;
+  background: #fff0f0;
+  border-color: #f4caca;
+}
+
+.status-chip--stage {
+  color: #40546d;
+  background: #f4f7fb;
+  border-color: #dfe6ef;
+}
+
+.status-chip--scan {
+  color: #0f7a86;
+  background: #eaf8fb;
+  border-color: #c9e9ef;
+}
+
+.status-chip--time {
+  color: #64748b;
+  background: #eef2f7;
+  border-color: #d7dee8;
+  font-family: 'JetBrains Mono', 'SF Pro Display', monospace;
 }
 
 .metric-cell {

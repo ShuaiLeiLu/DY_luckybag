@@ -181,6 +181,20 @@ const props = defineProps({
 .sidebar-scroll {
   flex: 1;
 }
+
+:deep(.sidebar-scroll .n-scrollbar-rail) {
+  display: none !important;
+}
+
+:deep(.sidebar-scroll .n-scrollbar-container) {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+:deep(.sidebar-scroll .n-scrollbar-container::-webkit-scrollbar) {
+  display: none;
+}
+
 .sidebar-content {
   padding: 14px 10px 20px;
 }

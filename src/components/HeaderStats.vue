@@ -26,8 +26,17 @@
           <span class="stat-sub">累计中奖 {{ totalWinning }}</span>
         </div>
       </div>
+      <div v-if="dispatchSummary.enabled" class="dispatch-strip">
+        <span class="dispatch-pill" :class="{ offline: !dispatchSummary.connected }">
+          {{ dispatchSummary.connected ? '服务端在线' : '服务端离线' }}
+        </span>
+        <span class="dispatch-pill">池 {{ dispatchSummary.validCandidates }}</span>
+        <span class="dispatch-pill">可分配 {{ dispatchSummary.availableCandidates }}</span>
+        <span class="dispatch-pill">已租约 {{ dispatchSummary.leaseCount }}</span>
+        <span class="dispatch-pill">本端 {{ dispatchSummary.clientLeaseCount }}</span>
+      </div>
       <div class="tool-group">
-        <n-tag :bordered="false" round size="small" type="success" class="version-tag">v1.1.0</n-tag>
+        <n-tag :bordered="false" round size="small" type="success" class="version-tag">v2.0</n-tag>
       </div>
     </div>
   </header>
@@ -54,6 +63,17 @@ const props = defineProps({
   successRate: {
     type: Number,
     default: null
+  },
+  dispatchSummary: {
+    type: Object,
+    default: () => ({
+      enabled: false,
+      connected: false,
+      validCandidates: 0,
+      availableCandidates: 0,
+      leaseCount: 0,
+      clientLeaseCount: 0
+    })
   }
 })
 
@@ -140,6 +160,8 @@ const successRate = computed(() => {
   gap: 12px;
   margin-left: auto;
   min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .stat-grid {
@@ -190,6 +212,34 @@ const successRate = computed(() => {
   padding: 0 8px 0 14px;
 }
 
+.dispatch-strip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.dispatch-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: #eef4fb;
+  border: 1px solid #d9e5f2;
+  color: #56708b;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.dispatch-pill.offline {
+  background: #fff3f0;
+  border-color: #ffd6cf;
+  color: #d85b46;
+}
+
 .version-tag {
   font-family: 'JetBrains Mono', monospace;
   font-weight: 700;
@@ -231,7 +281,6 @@ const successRate = computed(() => {
 
   .tool-group {
     padding: 0;
-    width: 100%;
     justify-content: flex-end;
   }
 }
