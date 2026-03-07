@@ -1,7 +1,8 @@
 import { calcAdaptiveScanProfile, createScanRiskState, updateScanRiskState } from './scanRiskPolicy'
 import {
   getRedPacketAveragePerWinner,
-  hasRestrictedJoinRequirement,
+  hasFanClubJoinRequirement,
+  hasMemberJoinRequirement,
   isPhysicalPrizeLottery,
   isSupermanJoinableLottery,
 } from '../utils/lotteryRules'
@@ -1537,9 +1538,23 @@ class LotteryManager {
   filterLotteryByConditions(lotteryList, config = {}) {
     return lotteryList.filter((item) => {
       if (!isSupermanJoinableLottery(item)) return false
-      if (config.filterFanClub?.enabled !== false && hasRestrictedJoinRequirement(item)) return false
+      if (this.shouldFilterByJoinRequirement(item, config)) return false
       return true
     })
+  }
+
+  /**
+   * shouldFilterByJoinRequirement 方法：统一处理会员强制过滤与粉丝团可配置过滤。
+   */
+  shouldFilterByJoinRequirement(lottery, config = {}) {
+    if (hasMemberJoinRequirement(lottery)) {
+      return true
+    }
+    const shouldFilterFanClub = config?.filterFanClub?.enabled !== false
+    if (shouldFilterFanClub && hasFanClubJoinRequirement(lottery)) {
+      return true
+    }
+    return false
   }
 
   /**
@@ -1598,7 +1613,7 @@ class LotteryManager {
     let addedCount = 0
     
     for (const lottery of newLotteryList) {
-      if (config.filterFanClub?.enabled !== false && hasRestrictedJoinRequirement(lottery)) {
+      if (this.shouldFilterByJoinRequirement(lottery, config)) {
         continue
       }
       if (config.onlyPhysicalPrize?.enabled && !isPhysicalPrizeLottery(lottery)) {
@@ -1641,7 +1656,7 @@ class LotteryManager {
       const remaining = item.end_time - now
       if (remaining <= MIN_JOIN_WINDOW_SEC || remaining >= MAX_JOIN_WINDOW_SEC) continue
 
-      if (config.filterFanClub?.enabled !== false && hasRestrictedJoinRequirement(item)) continue
+      if (this.shouldFilterByJoinRequirement(item, config)) continue
       if (config.onlyPhysicalPrize?.enabled && !isPhysicalPrizeLottery(item)) continue
 
       if (config.filterOnline?.enabled && Number(item.onlineTotal || 0) > Number(config.filterOnline.value || 0)) continue

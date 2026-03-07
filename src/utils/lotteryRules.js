@@ -1,50 +1,89 @@
-export const RESTRICTED_JOIN_RE = /(粉丝团|粉丝专属|仅粉丝|仅限粉丝|铁粉|团员|加团|加入粉丝团|主播会员|会员可参与|仅会员|会员专属|vip|VIP|订阅后可参与|需订阅)/
+export const FANCLUB_JOIN_RE = /(粉丝团|粉丝专属|仅粉丝|仅限粉丝|铁粉|铁粉专属|团员|加团|加入粉丝团|加入团|粉丝牌|粉团)/
+export const MEMBER_JOIN_RE = /(主播会员|会员可参与|仅会员|会员专属|vip|VIP|订阅后可参与|需订阅|订阅可参与|开通会员)/
+export const RESTRICTED_JOIN_RE = /(粉丝团|粉丝专属|仅粉丝|仅限粉丝|铁粉|铁粉专属|团员|加团|加入粉丝团|加入团|粉丝牌|粉团|主播会员|会员可参与|仅会员|会员专属|vip|VIP|订阅后可参与|需订阅|订阅可参与|开通会员)/
 const PHYSICAL_NAME_RE = /(实物|包邮|礼盒|手机|平板|电脑|耳机|手表|鼠标|键盘|洗衣液|纸巾|零食|玩偶|公仔|盲盒|礼品|奖品|抱枕|杯子)/
 const VIRTUAL_NAME_RE = /(抖币|钻石|红包|优惠券|代金券|金币|福豆|会员|体验卡|流量|点券)/
 const REDPACK_NAME_RE = /(红包|抖币|钻石|现金|元)/
 
 /**
- * 判断福袋是否带有粉丝团/会员等受限参与条件。
+ * 提取参与条件中的可读文本，供规则判断复用。
+ * @param {object} condition 单条参与条件
+ * @returns {{raw:string, lower:string}}
+ */
+function extractConditionText(condition) {
+  const raw = [
+    condition?.content,
+    condition?.desc,
+    condition?.description,
+    condition?.name,
+    condition?.title,
+    condition?.text,
+    condition?.condition_desc,
+    condition?.condition_text,
+    JSON.stringify(condition || {})
+  ].filter(Boolean).join(' ')
+  return {
+    raw: String(raw || ''),
+    lower: String(raw || '').toLowerCase()
+  }
+}
+
+/**
+ * 判断福袋是否包含粉丝团参与要求（可由前端开关控制是否过滤）。
  * @param {object} lottery 福袋对象
  * @returns {boolean}
  */
-export function hasRestrictedJoinRequirement(lottery) {
+export function hasFanClubJoinRequirement(lottery) {
   const conditions = Array.isArray(lottery?.conditions) ? lottery.conditions : []
   return conditions.some((c) => {
     const typeNum = Number(c?.type)
-    const text = [
-      c?.content,
-      c?.desc,
-      c?.description,
-      c?.name,
-      c?.title,
-      c?.text,
-      c?.condition_desc,
-      c?.condition_text,
-      JSON.stringify(c || {})
-    ].filter(Boolean).join(' ')
-    const loweredText = String(text || '').toLowerCase()
+    if (typeNum === 2) return true
+    const { raw, lower } = extractConditionText(c)
     return (
-      typeNum === 2 ||
-      RESTRICTED_JOIN_RE.test(String(text)) ||
-      loweredText.includes('fans') ||
-      loweredText.includes('fanclub') ||
-      loweredText.includes('member_only')
+      FANCLUB_JOIN_RE.test(raw) ||
+      lower.includes('fans') ||
+      lower.includes('fanclub')
     )
   })
 }
 
 /**
- * 判断福袋是否满足“超人模式”的可参与条件（仅 type=3+6 且无受限条件）。
+ * 判断福袋是否包含会员参与要求（始终过滤）。
+ * @param {object} lottery 福袋对象
+ * @returns {boolean}
+ */
+export function hasMemberJoinRequirement(lottery) {
+  const conditions = Array.isArray(lottery?.conditions) ? lottery.conditions : []
+  return conditions.some((c) => {
+    const { raw, lower } = extractConditionText(c)
+    return (
+      MEMBER_JOIN_RE.test(raw) ||
+      lower.includes('member_only') ||
+      lower.includes('subscriber') ||
+      lower.includes('subscription')
+    )
+  })
+}
+
+/**
+ * 判断福袋是否带有受限参与条件（兼容：会员或粉丝团任一命中）。
+ * @param {object} lottery 福袋对象
+ * @returns {boolean}
+ */
+export function hasRestrictedJoinRequirement(lottery) {
+  return hasMemberJoinRequirement(lottery) || hasFanClubJoinRequirement(lottery)
+}
+
+/**
+ * 判断福袋是否满足“超人模式”的可参与条件（必须同时包含 type=3 和 type=6）。
  * @param {object} item 福袋对象
  * @returns {boolean}
  */
 export function isSupermanJoinableLottery(item) {
   if (!item || !Array.isArray(item.conditions) || item.conditions.length === 0) return false
-  if (item.conditions.length !== 2) return false
-  if (hasRestrictedJoinRequirement(item)) return false
-  const sortedTypes = item.conditions.map(c => Number(c?.type)).sort((a, b) => a - b)
-  return sortedTypes[0] === 3 && sortedTypes[1] === 6
+  const hasType3 = item.conditions.some(c => Number(c?.type) === 3)
+  const hasType6 = item.conditions.some(c => Number(c?.type) === 6)
+  return hasType3 && hasType6
 }
 
 /**

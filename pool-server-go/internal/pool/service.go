@@ -17,10 +17,11 @@ import (
 )
 
 var (
-	restrictedJoinRE = regexp.MustCompile(`粉丝团|粉丝专属|仅粉丝|仅限粉丝|团员|加团|主播会员|会员可参与|仅会员|会员专属`)
-	physicalNameRE   = regexp.MustCompile(`实物|包邮|礼盒|手机|平板|电脑|耳机|手表|鼠标|键盘|洗衣液|纸巾|零食|玩偶|公仔|盲盒|礼品|奖品|抱枕|杯子`)
-	virtualNameRE    = regexp.MustCompile(`抖币|钻石|红包|优惠券|代金券|金币|福豆|会员|体验卡|流量|点券`)
-	redpackNameRE    = regexp.MustCompile(`红包|抖币|钻石|现金|元`)
+	fanClubJoinRE  = regexp.MustCompile(`粉丝团|粉丝专属|仅粉丝|仅限粉丝|铁粉|铁粉专属|团员|加团|加入粉丝团|加入团|粉丝牌|粉团`)
+	memberJoinRE   = regexp.MustCompile(`主播会员|会员可参与|仅会员|会员专属|vip|VIP|订阅后可参与|需订阅|订阅可参与|开通会员`)
+	physicalNameRE = regexp.MustCompile(`实物|包邮|礼盒|手机|平板|电脑|耳机|手表|鼠标|键盘|洗衣液|纸巾|零食|玩偶|公仔|盲盒|礼品|奖品|抱枕|杯子`)
+	virtualNameRE  = regexp.MustCompile(`抖币|钻石|红包|优惠券|代金券|金币|福豆|会员|体验卡|流量|点券`)
+	redpackNameRE  = regexp.MustCompile(`红包|抖币|钻石|现金|元`)
 )
 
 type Config struct {
@@ -789,8 +790,12 @@ func passFilter(c Candidate, p FilterProfile, nowMS int64) (bool, string) {
 		}
 	}
 
-	if p.FilterFanClub && hasRestrictedJoinRequirement(c.Conditions) {
-		return false, "fanclub_or_member_required"
+	if hasMemberJoinRequirement(c.Conditions) {
+		return false, "member_required"
+	}
+
+	if p.FilterFanClub && hasFanClubJoinRequirement(c.Conditions) {
+		return false, "fanclub_required"
 	}
 
 	if p.OnlyPhysicalPrize && !isPhysicalPrize(c) {
@@ -811,14 +816,33 @@ func passFilter(c Candidate, p FilterProfile, nowMS int64) (bool, string) {
 	return true, ""
 }
 
-// hasRestrictedJoinRequirement 方法：判断参与条件中是否包含粉丝团/会员等受限项。
-func hasRestrictedJoinRequirement(conditions []Condition) bool {
+// hasFanClubJoinRequirement 方法：判断参与条件中是否包含粉丝团要求。
+func hasFanClubJoinRequirement(conditions []Condition) bool {
 	for _, c := range conditions {
 		if c.Type == 2 {
 			return true
 		}
-		text := strings.Join([]string{c.Content, c.Desc}, " ")
-		if restrictedJoinRE.MatchString(text) {
+		textRaw := strings.Join([]string{c.Content, c.Desc}, " ")
+		textLower := strings.ToLower(textRaw)
+		if fanClubJoinRE.MatchString(textRaw) {
+			return true
+		}
+		if strings.Contains(textLower, "fans") || strings.Contains(textLower, "fanclub") {
+			return true
+		}
+	}
+	return false
+}
+
+// hasMemberJoinRequirement 方法：判断参与条件中是否包含会员要求。
+func hasMemberJoinRequirement(conditions []Condition) bool {
+	for _, c := range conditions {
+		textRaw := strings.Join([]string{c.Content, c.Desc}, " ")
+		textLower := strings.ToLower(textRaw)
+		if memberJoinRE.MatchString(textRaw) {
+			return true
+		}
+		if strings.Contains(textLower, "member_only") || strings.Contains(textLower, "subscriber") || strings.Contains(textLower, "subscription") {
 			return true
 		}
 	}
