@@ -45,13 +45,6 @@
 | `src/App.vue` | 前端主页面 | 负责配置、账号列表、统计、日志、面板展示 |
 | `src/services/LotteryManager-lite.js` | 当前实际调度核心 | 当前生效的扫描、预热、参与、服务端交互核心控制器 |
 
-### 2.2 当前不是主入口的文件
-
-| 文件 | 状态 |
-| --- | --- |
-| `src/services/LotteryManager.js` | 历史/旧版逻辑，当前 `App.vue` 没有引用 |
-| `超人福袋助手/` | 参考资料目录，不参与当前运行 |
-
 `App.vue` 当前引用的是：
 
 ```js
@@ -181,7 +174,6 @@ dy_fudai/
 │   │   └── LogPanel.vue           # 运行日志/学习面板
 │   ├── services/
 │   │   ├── LotteryManager-lite.js # 当前主调度器
-│   │   ├── LotteryManager.js      # 旧版逻辑（当前未使用）
 │   │   ├── scanCollector.js       # 扫描与候选整理
 │   │   ├── joinExecutor.js        # 预热/参与/红包执行
 │   │   ├── poolClient.js          # 与 Go 服务端通信
