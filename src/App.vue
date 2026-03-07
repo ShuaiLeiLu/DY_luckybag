@@ -16,6 +16,7 @@
               :total-diamonds="totalDiamonds"
               :total-participation="totalParticipation"
               :total-winning="totalWinning"
+              :success-rate="headerSuccessRate"
             />
 
             <div class="content-body">
@@ -25,6 +26,7 @@
                   :running-count="runningCount"
                   :columns="responsiveColumns"
                   :scroll-x="accountTableScrollX"
+                  :summary="accountSummary"
                   @add="addAccount"
                 />
                 <LotteryDetail
@@ -90,6 +92,30 @@ const runningCount = computed(() => accounts.value.filter(a => a.state === 'runn
 const totalParticipation = computed(() => accounts.value.reduce((sum, a) => sum + a.participationCount, 0))
 const totalWinning = computed(() => accounts.value.reduce((sum, a) => sum + a.lotteryWinCount, 0))
 const totalDiamonds = computed(() => accounts.value.reduce((sum, a) => sum + a.todayEarnedDiamonds, 0))
+const resolvedLotteryCount = computed(() => (lotteryHistory.value || []).reduce((sum, item) => {
+  const status = String(item?.resultStatus || '')
+  return sum + (status === 'won' || status === 'lost' ? 1 : 0)
+}, 0))
+const wonLotteryCountFromHistory = computed(() => (lotteryHistory.value || []).reduce((sum, item) => {
+  return sum + (String(item?.resultStatus || '') === 'won' ? 1 : 0)
+}, 0))
+const headerSuccessRate = computed(() => {
+  const resolved = Number(resolvedLotteryCount.value || 0)
+  if (resolved > 0) {
+    return Number(((wonLotteryCountFromHistory.value / resolved) * 100).toFixed(1))
+  }
+  const joined = Number(totalParticipation.value || 0)
+  if (joined <= 0) return 0
+  return Number(((totalWinning.value / joined) * 100).toFixed(1))
+})
+const totalLotteryWonDiamonds = computed(() => accounts.value.reduce((sum, a) => sum + Number(a.todayLotteryWonDiamonds || 0), 0))
+const totalRedPacketWinning = computed(() => accounts.value.reduce((sum, a) => sum + Number(a.todayRedPacketWinCount || 0), 0))
+const accountSummary = computed(() => ({
+  totalParticipation: Number(totalParticipation.value || 0),
+  totalLotteryWinCount: Number(totalWinning.value || 0),
+  totalLotteryWonDiamonds: Number(totalLotteryWonDiamonds.value || 0),
+  totalRedPacketWinning: Number(totalRedPacketWinning.value || 0)
+}))
 
 const mergedLotteries = computed(() => {
   const map = new Map()
@@ -135,8 +161,8 @@ const config = ref({
   filterFanClub: { enabled: true },
   onlyPhysicalPrize: { enabled: false },
   preferBigRedPacket: { enabled: true, threshold: 40 },
-  participationCount: { enabled: true, value: 80 },
-  singleAccountDuration: { enabled: true, value: 3 },
+  participationCount: { enabled: false, value: 80 },
+  singleAccountDuration: { enabled: false, value: 3 },
   filterOnline: { enabled: false, value: 1000 },
   randomInteraction: { enabled: true },
   closeLiveStream: { enabled: true },
@@ -152,6 +178,9 @@ const lotteriesByAccount = ref({})
 const lotteryHistory = ref([])
 const pendingCreateAccountIds = new Set()
 
+/**
+ * getTodayKey 方法：获取今日键。
+ */
 function getTodayKey() {
   const now = new Date()
   const y = now.getFullYear()
@@ -160,6 +189,9 @@ function getTodayKey() {
   return `${y}-${m}-${d}`
 }
 
+/**
+ * createAccountModel 方法：创建账号模型。
+ */
 function createAccountModel(base = {}) {
   return {
     id: base.id || '',
@@ -171,21 +203,32 @@ function createAccountModel(base = {}) {
     participationCount: Number(base.participationCount || 0),
     lotteryWinCount: Number(base.lotteryWinCount || 0),
     redPacketWinCount: Number(base.redPacketWinCount || 0),
+    lotteryWonDiamonds: Number(base.lotteryWonDiamonds || 0),
+    redPacketWonDiamonds: Number(base.redPacketWonDiamonds || 0),
     todayLotteryWinCount: Number(base.todayLotteryWinCount || 0),
     todayRedPacketWinCount: Number(base.todayRedPacketWinCount || 0),
+    todayLotteryWonDiamonds: Number(base.todayLotteryWonDiamonds || 0),
+    todayRedPacketWonDiamonds: Number(base.todayRedPacketWonDiamonds || 0),
     todayEarnedDiamonds: Number(base.todayEarnedDiamonds || 0),
+    todayConsumedDiamonds: Number(base.todayConsumedDiamonds || 0),
     totalDiamonds: Number(base.totalDiamonds || 0),
     lastWalletDiamond: base.lastWalletDiamond ?? null,
     statsDateKey: base.statsDateKey || getTodayKey()
   }
 }
 
+/**
+ * ensureDailyStats 方法：确保每日统计满足预期。
+ */
 function ensureDailyStats(account) {
   const todayKey = getTodayKey()
   if (account.statsDateKey !== todayKey) {
     account.todayLotteryWinCount = 0
     account.todayRedPacketWinCount = 0
+    account.todayLotteryWonDiamonds = 0
+    account.todayRedPacketWonDiamonds = 0
     account.todayEarnedDiamonds = 0
+    account.todayConsumedDiamonds = 0
     account.statsDateKey = todayKey
   }
 }
@@ -200,6 +243,8 @@ try {
 }
 
 const ipcUnsubscribers = []
+const resolvedLotteryResultKeys = new Set()
+const countedLotteryWinKeys = new Set()
 
 // 监听串口大小
 const handleResize = () => {
@@ -227,18 +272,59 @@ onMounted(async () => {
       const account = accounts.value.find(a => a.id === accountId)
       if (!account) return
       ensureDailyStats(account)
-      if (type === 'lottery' && data?.lottery_info?.win_status === 1) {
-        account.lotteryWinCount++
-        account.todayLotteryWinCount++
-        addLog(`🎉 [${account.nickname}] 恭喜！福袋中奖了！`, 'success')
+      if (type === 'lottery') {
+        const outcome = parseLotteryOutcome(data)
+        if (outcome) {
+          const outcomeKey = makeLotteryOutcomeKey(accountId, outcome.lotteryId)
+          let historyUpdated = false
+          if (outcome.drawFinished) {
+            if (outcomeKey) {
+              if (!resolvedLotteryResultKeys.has(outcomeKey)) {
+                resolvedLotteryResultKeys.add(outcomeKey)
+                historyUpdated = updateLotteryHistoryOutcome(accountId, outcome)
+              }
+            } else {
+              historyUpdated = updateLotteryHistoryOutcome(accountId, outcome)
+            }
+          }
+
+          if (outcome.isWin) {
+            let shouldCount = false
+            if (outcomeKey) {
+              if (!countedLotteryWinKeys.has(outcomeKey)) {
+                countedLotteryWinKeys.add(outcomeKey)
+                shouldCount = true
+              }
+            } else if (historyUpdated) {
+              shouldCount = true
+            }
+            if (shouldCount) {
+              account.lotteryWinCount++
+              account.todayLotteryWinCount++
+              account.lotteryWonDiamonds += Number(outcome.winDiamonds || 0)
+              account.todayLotteryWonDiamonds += Number(outcome.winDiamonds || 0)
+              addLog(`🎉 [${account.nickname}] 恭喜！福袋中奖了！`, 'success')
+            }
+          }
+        }
       } else if (type === 'redpacket' && data?.receive_info?.is_win) {
+        const reward = Number(
+          data?.receive_info?.amount ??
+          data?.receive_info?.diamond_count ??
+          data?.receive_info?.diamond ??
+          0
+        ) || 0
         account.redPacketWinCount++
         account.todayRedPacketWinCount++
-        addLog(`🧧 [${account.nickname}] 领取红包成功：${data.receive_info.amount || 0} 钻石`, 'success')
+        account.redPacketWonDiamonds += reward
+        account.todayRedPacketWonDiamonds += reward
+        addLog(`🧧 [${account.nickname}] 领取红包成功：${reward} 钻石`, 'success')
       } else if (type === 'wallet' && data?.diamond !== undefined) {
         const currentWallet = Number(data.diamond || 0)
         if (account.lastWalletDiamond !== null && currentWallet > account.lastWalletDiamond) {
           account.todayEarnedDiamonds += (currentWallet - account.lastWalletDiamond)
+        } else if (account.lastWalletDiamond !== null && currentWallet < account.lastWalletDiamond) {
+          account.todayConsumedDiamonds += (account.lastWalletDiamond - currentWallet)
         }
         account.lastWalletDiamond = currentWallet
         account.totalDiamonds = currentWallet
@@ -266,6 +352,9 @@ watch(
   }
 )
 
+/**
+ * loadAllAccounts 方法：加载账号列表。
+ */
 async function loadAllAccounts() {
   if (!ipcRenderer) return
   try {
@@ -286,8 +375,14 @@ async function loadAllAccounts() {
   } catch (error) { addLog(`❌ 加载账号失败: ${error.message}`, 'error') }
 }
 
+/**
+ * sleep 方法：处理延时。
+ */
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
 
+/**
+ * normalizeNickname 方法：归一化昵称。
+ */
 function normalizeNickname(name) {
   const text = String(name || '').trim()
   if (!text) return ''
@@ -295,6 +390,104 @@ function normalizeNickname(name) {
   return text
 }
 
+/**
+ * makeLotteryOutcomeKey 方法：生成福袋开奖结果键。
+ */
+function makeLotteryOutcomeKey(accountId, lotteryId) {
+  const id = String(lotteryId || '').trim()
+  if (!id) return ''
+  return `${accountId}:${id}`
+}
+
+/**
+ * clearLotteryOutcomeCacheByAccount 方法：清理福袋开奖结果缓存账号。
+ */
+function clearLotteryOutcomeCacheByAccount(accountId) {
+  const prefix = `${accountId}:`
+  for (const key of Array.from(resolvedLotteryResultKeys)) {
+    if (key.startsWith(prefix)) resolvedLotteryResultKeys.delete(key)
+  }
+  for (const key of Array.from(countedLotteryWinKeys)) {
+    if (key.startsWith(prefix)) countedLotteryWinKeys.delete(key)
+  }
+}
+
+/**
+ * parseLotteryOutcome 方法：解析福袋开奖结果。
+ */
+function parseLotteryOutcome(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const lotteryInfo = raw.lottery_info || raw.lotteryInfo || null
+  if (!lotteryInfo || typeof lotteryInfo !== 'object') return null
+
+  const lotteryId = String(
+    lotteryInfo.lottery_id_str ||
+    lotteryInfo.lottery_id ||
+    lotteryInfo.lotteryId ||
+    raw.lottery_id_str ||
+    raw.lottery_id ||
+    ''
+  ).trim()
+
+  const status = Number(lotteryInfo.status)
+  const winStatus = Number(lotteryInfo.win_status)
+  const luckyInfo = raw.user_lucky_info || raw.userLuckyInfo || null
+  const isWin = winStatus === 1 || Boolean(luckyInfo)
+  const drawFinished = status === 2 || winStatus === 1 || winStatus === 2
+  const winDiamonds = Number(
+    luckyInfo?.grant_count ??
+    luckyInfo?.diamond_count ??
+    luckyInfo?.amount ??
+    0
+  ) || 0
+
+  return {
+    lotteryId,
+    isWin,
+    drawFinished,
+    winDiamonds
+  }
+}
+
+/**
+ * updateLotteryHistoryOutcome 方法：更新福袋历史记录开奖结果。
+ */
+function updateLotteryHistoryOutcome(accountId, outcome) {
+  if (!outcome?.drawFinished) return false
+  const targetStatus = outcome.isWin ? 'won' : 'lost'
+  const targetReason = outcome.isWin ? '中奖' : '未中奖'
+  const targetLotteryId = String(outcome.lotteryId || '').trim()
+
+  let index = -1
+  if (targetLotteryId) {
+    index = lotteryHistory.value.findIndex(item =>
+      item.accountId === accountId &&
+      String(item.lotteryId || '').trim() === targetLotteryId
+    )
+  }
+  if (index < 0) {
+    index = lotteryHistory.value.findIndex(item =>
+      item.accountId === accountId &&
+      String(item.resultStatus || 'pending') === 'pending'
+    )
+  }
+  if (index < 0) return false
+
+  const current = lotteryHistory.value[index]
+  if (current.resultStatus === 'won' || current.resultStatus === 'lost') return false
+
+  lotteryHistory.value[index] = {
+    ...current,
+    lotteryId: current.lotteryId || targetLotteryId,
+    resultStatus: targetStatus,
+    resultReason: targetReason
+  }
+  return true
+}
+
+/**
+ * resolveUserInfoWithRetry 方法：解析并返回用户信息重试。
+ */
 async function resolveUserInfoWithRetry(accountId, fromLoginToken = null) {
   if (!ipcRenderer) return fromLoginToken || null
   if (fromLoginToken?.nickname) return fromLoginToken
@@ -312,6 +505,10 @@ async function resolveUserInfoWithRetry(accountId, fromLoginToken = null) {
 const responsiveColumns = computed(() => {
   const actionFixed = isMobile.value ? undefined : 'right'
   const compact = windowWidth.value < 1480
+  /**
+   * formatMetric 方法：将数值格式化为中文千分位字符串，用于界面展示。
+   */
+  const formatMetric = (value) => Number(value || 0).toLocaleString('zh-CN')
 
   const base = [
     {
@@ -333,22 +530,37 @@ const responsiveColumns = computed(() => {
       }
     },
     {
-      title: '统计',
-      key: 'stats',
-      width: compact ? 166 : 228,
+      title: '实时总数',
+      key: 'totalDiamonds',
+      width: compact ? 92 : 108,
+      align: 'right',
       render: (row) => {
-        const rate = row.participationCount > 0
-          ? ((row.lotteryWinCount / row.participationCount) * 100).toFixed(1)
-          : '0.0'
-        const todayDiamonds = Number(row.todayEarnedDiamonds || 0)
-        const partText = compact
-          ? `参 ${row.participationCount} · 中 ${row.lotteryWinCount}`
-          : `参与 ${row.participationCount} · 福袋中 ${row.lotteryWinCount} · 红包中 ${row.redPacketWinCount}`
-        return h('div', { class: 'account-stats-cell' }, [
-          h('div', { class: 'account-stats-main' }, partText),
-          h('div', { class: 'account-stats-sub' }, `成功率 ${rate}% · 今日 ${todayDiamonds} 抖币`)
-        ])
+        return h('span', { class: 'metric-cell' }, formatMetric(row.totalDiamonds))
       }
+    },
+    {
+      title: '中奖钻石',
+      key: 'winDiamonds',
+      width: compact ? 92 : 108,
+      align: 'right',
+      render: (row) => {
+        const totalWin = Number(row.todayLotteryWonDiamonds || 0) + Number(row.todayRedPacketWonDiamonds || 0)
+        return h('span', { class: 'metric-cell metric-win' }, formatMetric(totalWin))
+      }
+    },
+    {
+      title: '消耗钻石',
+      key: 'costDiamonds',
+      width: compact ? 92 : 108,
+      align: 'right',
+      render: (row) => h('span', { class: 'metric-cell metric-cost' }, formatMetric(row.todayConsumedDiamonds))
+    },
+    {
+      title: '参与次数',
+      key: 'participationCount',
+      width: compact ? 84 : 98,
+      align: 'right',
+      render: (row) => h('span', { class: 'metric-cell' }, formatMetric(row.participationCount))
     }
   ]
 
@@ -381,30 +593,44 @@ const accountTableScrollX = computed(() => {
   return responsiveColumns.value.reduce((sum, col) => sum + Number(col.width || 120), 0) + 40
 })
 
+/**
+ * appendLotteryHistory 方法：追加福袋历史记录。
+ */
 function appendLotteryHistory(record) {
   if (!record || typeof record !== 'object') return
+  if (String(record.joinStatus || 'success') === 'failed') return
+  const status = String(record.resultStatus || 'pending')
+  const normalizedStatus = (status === 'won' || status === 'lost') ? status : 'pending'
   const normalized = {
     accountId: record.accountId || '',
     accountNickname: record.accountNickname || record.accountId || '未知账号',
     roomId: record.roomId || '',
     webRid: record.webRid || '',
+    lotteryId: record.lotteryId || record.lottery_id || '',
     authorNickname: record.authorNickname || '',
     lotteryName: record.lotteryName || '',
     predictedProbability: Number(record.predictedProbability || 0),
     joinMode: record.joinMode || 'API',
-    joinStatus: record.joinStatus || 'success',
-    resultReason: record.resultReason || '',
+    joinStatus: 'success',
+    resultStatus: normalizedStatus,
+    resultReason: record.resultReason || (normalizedStatus === 'won' ? '中奖' : (normalizedStatus === 'lost' ? '未中奖' : '待开奖')),
     joinedAt: Number(record.joinedAt || Date.now()),
     endTime: Number(record.endTime || 0)
   }
   lotteryHistory.value = [normalized, ...lotteryHistory.value].slice(0, 300)
 }
 
+/**
+ * parseAccountSeq 方法：解析账号序号。
+ */
 function parseAccountSeq(accountId) {
   const m = String(accountId || '').match(/account_(\d+)/)
   return m ? Number(m[1]) : 0
 }
 
+/**
+ * getNextAccountSeq 方法：获取下一项账号序号。
+ */
 function getNextAccountSeq() {
   let max = 0
   accounts.value.forEach((a) => {
@@ -416,6 +642,9 @@ function getNextAccountSeq() {
   return max + 1
 }
 
+/**
+ * addAccount 方法：添加账号。
+ */
 function addAccount() {
   const next = getNextAccountSeq()
   const accountId = `account_${next}`
@@ -432,6 +661,9 @@ function addAccount() {
   startAccountWithLogin(acc)
 }
 
+/**
+ * startAccountWithLogin 方法：启动账号登录。
+ */
 async function startAccountWithLogin(account) {
   if (!ipcRenderer) {
     pendingCreateAccountIds.delete(account.id)
@@ -440,6 +672,9 @@ async function startAccountWithLogin(account) {
 
   let timer = null
   let timeoutTimer = null
+  /**
+   * clearLoginWatchers 方法：清理登录轮询与超时定时器，避免重复触发。
+   */
   const clearLoginWatchers = () => {
     if (timer) {
       clearInterval(timer)
@@ -516,6 +751,9 @@ async function startAccountWithLogin(account) {
   }
 }
 
+/**
+ * toggleAccount 方法：处理切换账号。
+ */
 function toggleAccount(account) {
   if (account.state === 'running') {
     lotteryManager.stopAccount(account.id)
@@ -526,6 +764,9 @@ function toggleAccount(account) {
   }
 }
 
+/**
+ * startAccountScanning 方法：启动账号扫描。
+ */
 async function startAccountScanning(account) {
   if (!account.token || !ipcRenderer) return
   if (account._starting) return
@@ -558,10 +799,14 @@ async function startAccountScanning(account) {
   finally { account._starting = false }
 }
 
+/**
+ * removeAccount 方法：移除账号。
+ */
 async function removeAccount(id) {
   if (!ipcRenderer) return
   lotteryManager.stopAccount(id)
   await ipcRenderer.invoke('delete-token', id)
+  clearLotteryOutcomeCacheByAccount(id)
   accounts.value = accounts.value.filter(a => a.id !== id)
   if (lotteriesByAccount.value?.[id]) {
     const next = { ...lotteriesByAccount.value }
@@ -570,6 +815,9 @@ async function removeAccount(id) {
   }
 }
 
+/**
+ * handleBlockRoom 方法：处理屏蔽直播间。
+ */
 function handleBlockRoom(roomId) {
   lotteryManager.addBlockList(roomId)
   // 同时也需要从当前 App 的 lotteriesByAccount 缓存中移除该直播间的福袋，保证 UI 立即更新
@@ -579,6 +827,9 @@ function handleBlockRoom(roomId) {
   addLog(`🚫 已屏蔽直播间: ${roomId}`)
 }
 
+/**
+ * addLog 方法：追加一条运行日志并驱动日志区域滚动更新。
+ */
 function addLog(message, type = 'info') {
   logs.value.push({ time: new Date().toLocaleTimeString(), message, type })
   if (logs.value.length > 300) logs.value.shift()
@@ -695,7 +946,7 @@ body {
   flex: 1;
   padding: 14px 16px 16px;
   display: grid;
-  grid-template-columns: minmax(0, 1.63fr) minmax(308px, 0.86fr);
+  grid-template-columns: minmax(0, 1fr) clamp(250px, 22vw, 300px);
   gap: 14px;
   overflow: hidden;
   box-sizing: border-box;
@@ -711,6 +962,8 @@ body {
 }
 .column-right {
   display: flex;
+  width: 100%;
+  max-width: 300px;
   min-width: 0;
   height: 100%;
   min-height: 0;
@@ -774,28 +1027,22 @@ body {
   color: #2b3a4c;
 }
 
-.account-stats-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.account-stats-main {
+.metric-cell {
+  display: inline-block;
+  min-width: 100%;
+  text-align: right;
   font-size: 12px;
-  color: #314155;
-  font-family: 'JetBrains Mono', monospace;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-weight: 700;
+  color: #2f3d52;
+  font-family: 'JetBrains Mono', 'SF Pro Display', monospace;
 }
 
-.account-stats-sub {
-  font-size: 11px;
-  color: #7d8ba0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.metric-win {
+  color: #0f9d63;
+}
+
+.metric-cost {
+  color: #e56f33;
 }
 
 .account-actions-cell {

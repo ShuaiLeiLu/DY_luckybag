@@ -95,10 +95,12 @@ const activeRows = computed(() => {
 })
 
 const historyRows = computed(() => {
-  return (props.historyRecords || []).map((item, idx) => ({
-    _idx: idx + 1,
-    ...item
-  }))
+  return (props.historyRecords || [])
+    .filter(item => String(item?.joinStatus || 'success') !== 'failed')
+    .map((item, idx) => ({
+      _idx: idx + 1,
+      ...item
+    }))
 })
 
 const recentHistory = computed(() => historyRows.value.slice(0, 4))
@@ -175,18 +177,21 @@ const historyColumns = computed(() => [
   },
   {
     title: '结果',
-    key: 'joinStatus',
+    key: 'resultStatus',
     width: 76,
     render: (row) => {
-      const ok = String(row.joinStatus || 'success') !== 'failed'
-      const text = ok ? '成功' : '失败'
+      const status = String(row.resultStatus || 'pending')
+      const isWon = status === 'won'
+      const isLost = status === 'lost'
+      const text = isWon ? '成功' : (isLost ? '失败' : '待开奖')
+      const reason = row.resultReason || (isWon ? '中奖' : (isLost ? '未中奖' : '待开奖'))
       return h(
         'span',
-        { title: ok ? '' : (row.resultReason || '参与失败') },
+        { title: reason },
         [
           h(
             NTag,
-            { size: 'small', type: ok ? 'success' : 'error' },
+            { size: 'small', type: isWon ? 'success' : (isLost ? 'error' : 'default') },
             { default: () => text }
           )
         ]

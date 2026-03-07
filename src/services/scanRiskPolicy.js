@@ -1,3 +1,7 @@
+/**
+ * 创建扫描风控状态对象。
+ * @returns {{level:number,riskScore:number,stableScore:number,cooldownUntil:number}}
+ */
 export function createScanRiskState() {
   return {
     level: 0,
@@ -7,10 +11,23 @@ export function createScanRiskState() {
   }
 }
 
+/**
+ * 将数字约束在指定区间内。
+ * @param {number} num 原始值
+ * @param {number} min 最小值
+ * @param {number} max 最大值
+ * @returns {number}
+ */
 function clamp(num, min, max) {
   return Math.min(max, Math.max(min, Number(num || 0)))
 }
 
+/**
+ * 根据当前风控等级计算本轮扫描参数。
+ * @param {object} state 风控状态
+ * @param {object} scanConfig 基础扫描配置
+ * @returns {object} 自适应扫描配置
+ */
 export function calcAdaptiveScanProfile(state, scanConfig) {
   const safeState = state || createScanRiskState()
   const level = Math.max(0, Number(safeState.level || 0))
@@ -97,6 +114,12 @@ export function calcAdaptiveScanProfile(state, scanConfig) {
   }
 }
 
+/**
+ * 根据本轮扫描结果更新风控状态，并给出是否升降级。
+ * @param {object} state 当前风控状态
+ * @param {object} stats 本轮统计（successCount / hardRiskCount）
+ * @returns {{state: object, raised: boolean, lowered: boolean, cooldownMs: number}}
+ */
 export function updateScanRiskState(state, stats) {
   const next = { ...(state || createScanRiskState()) }
   const hardRiskCount = Number(stats?.hardRiskCount || 0)

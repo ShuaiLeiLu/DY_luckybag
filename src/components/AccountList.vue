@@ -12,20 +12,29 @@
         </div>
       </div>
     </template>
-    <div class="card-inner scroll-box hide-scrollbar">
+    <div class="card-inner">
       <n-empty v-if="accounts.length === 0" description="暂无连接账号" style="margin: auto">
         <template #extra>请点击右上角“添加账号”开始使用</template>
       </n-empty>
-      <n-data-table
-        v-else
-        :columns="columns"
-        :data="accounts"
-        :pagination="false"
-        :bordered="false"
-        size="small"
-        :scroll-x="scrollX"
-        class="custom-table"
-      />
+      <template v-else>
+        <div class="table-wrap">
+          <n-data-table
+            :columns="columns"
+            :data="accounts"
+            :pagination="false"
+            :bordered="false"
+            size="small"
+            :scroll-x="scrollX"
+            class="custom-table"
+          />
+        </div>
+        <div class="summary-strip">
+          <span>总参与次数: <b>{{ summary.totalParticipation }}</b></span>
+          <span>福袋总中奖次数: <b>{{ summary.totalLotteryWinCount }}</b></span>
+          <span>福袋总中奖钻石: <b>{{ summary.totalLotteryWonDiamonds }}</b></span>
+          <span>红包总中奖: <b>{{ summary.totalRedPacketWinning }}</b></span>
+        </div>
+      </template>
     </div>
   </n-card>
 </template>
@@ -50,6 +59,15 @@ const props = defineProps({
   scrollX: {
     type: Number,
     default: 1000
+  },
+  summary: {
+    type: Object,
+    default: () => ({
+      totalParticipation: 0,
+      totalLotteryWinCount: 0,
+      totalLotteryWonDiamonds: 0,
+      totalRedPacketWinning: 0
+    })
   }
 })
 
@@ -75,6 +93,9 @@ defineEmits(['add'])
 }
 
 .card-container :deep(.n-card__content) {
+  display: flex;
+  flex: 1;
+  min-height: 0;
   padding: 0 !important;
 }
 
@@ -108,11 +129,37 @@ defineEmits(['add'])
   flex: 1;
   overflow: hidden;
   display: flex;
+  flex-direction: column;
+  gap: 8px;
   padding: 0 8px 8px;
 }
-.scroll-box { overflow-y: auto; display: block; }
-.hide-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
-.hide-scrollbar::-webkit-scrollbar { display: none; }
+.table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.table-wrap::-webkit-scrollbar { display: none; }
+
+.summary-strip {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid #e6edf6;
+  border-radius: 10px;
+  background: #f7fafc;
+  color: #4c6077;
+  font-size: 12px;
+}
+.summary-strip b {
+  color: #213248;
+  font-weight: 700;
+}
 
 :deep(.custom-table .n-data-table-wrapper) {
   border: 1px solid #e6edf6;

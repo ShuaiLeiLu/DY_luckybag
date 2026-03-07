@@ -7,6 +7,9 @@ const { douyinLiveRemote } = require('./douyinLiveRemote')
 let mainWindow
 let browsers = new Map() // 存储多个浏览器实例
 
+/**
+ * getCookieStringByAccountId 方法：获取Cookie字符串账号标识。
+ */
 async function getCookieStringByAccountId(accountId) {
   if (!accountId) return ''
   const browserData = browsers.get(accountId)
@@ -20,6 +23,9 @@ async function getCookieStringByAccountId(accountId) {
   }
 }
 
+/**
+ * createWindow 方法：创建窗口配置。
+ */
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,

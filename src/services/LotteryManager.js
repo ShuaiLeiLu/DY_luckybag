@@ -17,7 +17,13 @@ const prizeType = {
   4: "优惠券"
 }
 
+/**
+ * LotteryManager 类：负责账号扫描、福袋池管理、参与调度与统计更新的核心控制器。
+ */
 class LotteryManager {
+  /**
+   * constructor 方法：初始化实例状态、缓存映射和默认配置。
+   */
   constructor() {
     this.accounts = new Map()
     this.lotteryInfoList = [] // 全局福袋列表
@@ -31,6 +37,9 @@ class LotteryManager {
     }
   }
 
+  /**
+   * startAccount 方法：启动账号。
+   */
   async startAccount(account, config, callbacks) {
     if (!ipcRenderer) {
       callbacks.onLog('Electron IPC 不可用', 'error')
@@ -163,6 +172,9 @@ class LotteryManager {
     }, 60000)
   }
 
+  /**
+   * startMonitoring 方法：启动监控。
+   */
   async startMonitoring(accountId) {
     const accountData = this.accounts.get(accountId)
     if (!accountData) return
@@ -783,6 +795,9 @@ class LotteryManager {
     })
   }
 
+  /**
+   * pauseAccount 方法：暂停账号。
+   */
   pauseAccount(accountId) {
     const accountData = this.accounts.get(accountId)
     if (!accountData) return
@@ -797,6 +812,9 @@ class LotteryManager {
     accountData.callbacks.onStatusUpdate({ id: accountId, state: 'paused' })
   }
 
+  /**
+   * resumeAccount 方法：恢复账号。
+   */
   resumeAccount(accountId) {
     const accountData = this.accounts.get(accountId)
     if (!accountData) return
@@ -806,6 +824,9 @@ class LotteryManager {
     this.start(accountId)
   }
 
+  /**
+   * stopAccount 方法：停止账号。
+   */
   async stopAccount(accountId) {
     const accountData = this.accounts.get(accountId)
     if (!accountData) return
@@ -821,6 +842,9 @@ class LotteryManager {
     this.accounts.delete(accountId)
   }
 
+  /**
+   * sleep 方法：处理延时。
+   */
   sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms))
   }

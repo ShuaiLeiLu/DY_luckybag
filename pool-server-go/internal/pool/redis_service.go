@@ -1,11 +1,9 @@
 package pool
 
 import (
-	"container/heap"
 	"context"
 	"encoding/json"
 	"errors"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +25,7 @@ type RedisConfig struct {
 	WriteTimeoutMS int64
 }
 
+// DefaultRedisConfig 方法：返回默认Redis配置。
 func DefaultRedisConfig() RedisConfig {
 	return RedisConfig{
 		Addr:           "127.0.0.1:6379",
@@ -69,6 +68,7 @@ type RedisService struct {
 	upsertScript *redis.Script
 }
 
+// NewRedisService 方法：创建Redis服务。
 func NewRedisService(cfg Config, rcfg RedisConfig) (*RedisService, error) {
 	if stringsTrim(rcfg.Addr) == "" {
 		return nil, errors.New("redis addr is empty")
@@ -109,10 +109,10 @@ func NewRedisService(cfg Config, rcfg RedisConfig) (*RedisService, error) {
 	}
 
 	s := &RedisService{
-		cfg:  cfg,
-		rcfg: rcfg,
-		rdb:  client,
-		profile: DefaultFilterProfile(),
+		cfg:            cfg,
+		rcfg:           rcfg,
+		rdb:            client,
+		profile:        DefaultFilterProfile(),
 		profileVersion: 1,
 		upsertScript: redis.NewScript(`
 local hkey = KEYS[1]
@@ -142,47 +142,17 @@ return 1
 	return s, nil
 }
 
+// Profile 方法：处理策略。
 func (s *RedisService) Profile() (FilterProfile, int64) {
 	s.profileMu.RLock()
 	defer s.profileMu.RUnlock()
 	return s.profile, s.profileVersion
 }
 
+// UpdateProfile 方法：更新策略。
 func (s *RedisService) UpdateProfile(patch map[string]any) (FilterProfile, int64) {
 	s.profileMu.Lock()
-	p := s.profile
-
-	if v, ok := patch["requireType3And6"]; ok {
-		p.RequireType3And6 = asBool(v, p.RequireType3And6)
-	}
-	if v, ok := patch["filterFanClub"]; ok {
-		p.FilterFanClub = asBool(v, p.FilterFanClub)
-	}
-	if v, ok := patch["onlyPhysicalPrize"]; ok {
-		p.OnlyPhysicalPrize = asBool(v, p.OnlyPhysicalPrize)
-	}
-	if v, ok := patch["preferBigRedPacket"]; ok {
-		p.PreferBigRedPacket = asBool(v, p.PreferBigRedPacket)
-	}
-	if v, ok := patch["bigRedPacketThreshold"]; ok {
-		p.BigRedPacketThreshold = maxFloat(1, asFloat(v, p.BigRedPacketThreshold))
-	}
-	if v, ok := patch["minRemainingSec"]; ok {
-		p.MinRemainingSec = int64(maxFloat(0, asFloat(v, float64(p.MinRemainingSec))))
-	}
-	if v, ok := patch["maxRemainingSec"]; ok {
-		p.MaxRemainingSec = int64(maxFloat(float64(p.MinRemainingSec), asFloat(v, float64(p.MaxRemainingSec))))
-	}
-	if v, ok := patch["minProbability"]; ok {
-		x := asFloat(v, p.MinProbability)
-		if x < 0 {
-			x = 0
-		}
-		if x > 1 {
-			x = 1
-		}
-		p.MinProbability = x
-	}
+	p := applyProfilePatch(s.profile, patch)
 
 	s.profile = p
 	s.profileVersion++
@@ -196,6 +166,7 @@ func (s *RedisService) UpdateProfile(patch map[string]any) (FilterProfile, int64
 	return p, version
 }
 
+// UpsertBatch 方法：批量写入候选福袋数据，并返回新增/更新统计。
 func (s *RedisService) UpsertBatch(sourceID string, raws []map[string]any) BatchResult {
 	received := len(raws)
 	if received > s.cfg.MaxBatchSize {
@@ -252,6 +223,7 @@ func (s *RedisService) UpsertBatch(sourceID string, raws []map[string]any) Batch
 	return result
 }
 
+// upsertOne 方法：写入单条候选福袋并维护过期与索引状态。
 func (s *RedisService) upsertOne(ctx context.Context, c Candidate, nowMS int64) string {
 	expireAt := c.EndTimeMS + s.cfg.TTLGraceSec*1000
 	if expireAt <= nowMS {
@@ -277,16 +249,17 @@ func (s *RedisService) upsertOne(ctx context.Context, c Candidate, nowMS int64) 
 	return "inserted"
 }
 
+// SweepExpired 方法：清理已过期候选福袋并同步索引。
 func (s *RedisService) SweepExpired(nowMS int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	max := strconv.FormatInt(nowMS, 10)
 	for {
 		keys, err := s.rdb.ZRangeByScore(ctx, s.keyExpire(), &redis.ZRangeBy{
-			Min: "-inf",
-			Max: max,
+			Min:    "-inf",
+			Max:    max,
 			Offset: 0,
-			Count: 1024,
+			Count:  1024,
 		}).Result()
 		if err != nil || len(keys) == 0 {
 			return
@@ -305,6 +278,7 @@ func (s *RedisService) SweepExpired(nowMS int64) {
 	}
 }
 
+// RefreshTop 方法：刷新优选结果。
 func (s *RedisService) RefreshTop(force bool) {
 	now := time.Now().UnixMilli()
 	if !force && !s.dirty.Load() && now-s.topMeta.BuiltAtMS < s.cfg.TopRefreshMS {
@@ -320,63 +294,26 @@ func (s *RedisService) RefreshTop(force bool) {
 		return
 	}
 	profile, _ := s.Profile()
-
-	h := &scoreMinHeap{}
-	heap.Init(h)
-	validCount := 0
-	for i := range all {
-		c := all[i]
-		if c.ExpireAtMS > 0 && c.ExpireAtMS <= now {
-			continue
-		}
-		ok, _ := passFilter(c, profile, now)
-		if !ok {
-			continue
-		}
-		validCount++
-		sc := scoreCandidate(c, profile, now)
-		if h.Len() < s.cfg.TopCacheMax {
-			heap.Push(h, sc)
-			continue
-		}
-		if (*h)[0].Score < sc.Score {
-			heap.Pop(h)
-			heap.Push(h, sc)
-		}
+	capSize := s.cfg.TopCacheMax
+	if capSize <= 0 {
+		capSize = 2500
 	}
-	out := make([]ScoredCandidate, 0, h.Len())
-	for h.Len() > 0 {
-		out = append(out, heap.Pop(h).(ScoredCandidate))
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Score == out[j].Score {
-			return out[i].EndTime < out[j].EndTime
-		}
-		return out[i].Score > out[j].Score
-	})
+	out, validCount := selectTopCandidates(all, profile, now, capSize)
 
 	s.topMu.Lock()
 	s.topCache = out
 	s.topMeta = TopMeta{
-		BuiltAtMS: now,
+		BuiltAtMS:   now,
 		ActiveCount: len(all),
-		ValidCount: validCount,
+		ValidCount:  validCount,
 	}
 	s.topMu.Unlock()
 	s.dirty.Store(false)
 }
 
+// Top 方法：处理优选结果。
 func (s *RedisService) Top(limit int) (items []ScoredCandidate, meta TopMeta, profileVersion int64) {
-	if limit <= 0 {
-		limit = 50
-	}
-	maxLimit := s.cfg.TopCacheMax
-	if maxLimit <= 0 {
-		maxLimit = 2500
-	}
-	if limit > maxLimit {
-		limit = maxLimit
-	}
+	limit = normalizeTopLimit(limit, s.cfg.TopCacheMax)
 	s.RefreshTop(true)
 	s.topMu.RLock()
 	defer s.topMu.RUnlock()
@@ -389,6 +326,30 @@ func (s *RedisService) Top(limit int) (items []ScoredCandidate, meta TopMeta, pr
 	return out, s.topMeta, pv
 }
 
+// TopWithProfile 方法：处理优选结果策略。
+func (s *RedisService) TopWithProfile(limit int, profile FilterProfile) (items []ScoredCandidate, meta TopMeta, profileVersion int64) {
+	limit = normalizeTopLimit(limit, s.cfg.TopCacheMax)
+	now := time.Now().UnixMilli()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = s.syncProfileFromRedis(ctx)
+	s.SweepExpired(now)
+
+	all, err := s.fetchAllCandidates(ctx)
+	if err != nil {
+		_, pv := s.Profile()
+		return []ScoredCandidate{}, TopMeta{BuiltAtMS: now}, pv
+	}
+	out, validCount := selectTopCandidates(all, profile, now, limit)
+	_, pv := s.Profile()
+	return out, TopMeta{
+		BuiltAtMS:   now,
+		ActiveCount: len(all),
+		ValidCount:  validCount,
+	}, pv
+}
+
+// Stats 方法：处理统计。
 func (s *RedisService) Stats() (Stats, TopMeta, int64) {
 	s.statsMu.Lock()
 	st := s.stats
@@ -400,6 +361,7 @@ func (s *RedisService) Stats() (Stats, TopMeta, int64) {
 	return st, meta, pv
 }
 
+// Close 方法：关闭服务资源并停止后台任务。
 func (s *RedisService) Close() error {
 	if s.rdb != nil {
 		return s.rdb.Close()
@@ -407,6 +369,7 @@ func (s *RedisService) Close() error {
 	return nil
 }
 
+// fetchAllCandidates 方法：请求并获取候选项列表。
 func (s *RedisService) fetchAllCandidates(ctx context.Context) ([]Candidate, error) {
 	values, err := s.rdb.HGetAll(ctx, s.keyCandidates()).Result()
 	if err != nil {
@@ -423,6 +386,7 @@ func (s *RedisService) fetchAllCandidates(ctx context.Context) ([]Candidate, err
 	return out, nil
 }
 
+// syncProfileFromRedis 方法：同步策略Redis。
 func (s *RedisService) syncProfileFromRedis(ctx context.Context) error {
 	val, err := s.rdb.Get(ctx, s.keyProfile()).Result()
 	if err == redis.Nil {
@@ -446,10 +410,11 @@ func (s *RedisService) syncProfileFromRedis(ctx context.Context) error {
 	return nil
 }
 
+// saveProfileToRedis 方法：保存策略Redis。
 func (s *RedisService) saveProfileToRedis(ctx context.Context, p FilterProfile, version int64) error {
 	payload := redisProfilePayload{
-		Profile: p,
-		Version: version,
+		Profile:   p,
+		Version:   version,
 		UpdatedAt: time.Now().UnixMilli(),
 	}
 	b, err := json.Marshal(payload)
@@ -459,16 +424,22 @@ func (s *RedisService) saveProfileToRedis(ctx context.Context, p FilterProfile, 
 	return s.rdb.Set(ctx, s.keyProfile(), string(b), 0).Err()
 }
 
+// keyCandidates 方法：处理键候选项列表。
 func (s *RedisService) keyCandidates() string {
 	return s.rcfg.Prefix + ":candidates"
 }
+
+// keyExpire 方法：处理键。
 func (s *RedisService) keyExpire() string {
 	return s.rcfg.Prefix + ":expire"
 }
+
+// keyProfile 方法：处理键策略。
 func (s *RedisService) keyProfile() string {
 	return s.rcfg.Prefix + ":profile"
 }
 
+// stringsTrim 方法：处理字符串集合首尾空白。
 func stringsTrim(v string) string {
 	return strings.TrimSpace(v)
 }

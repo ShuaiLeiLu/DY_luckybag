@@ -1,4 +1,4 @@
-const { app, BrowserWindow, BrowserView, ipcMain, session, safeStorage } = require('electron')
+const { app, BrowserWindow, BrowserView, ipcMain, session, safeStorage, powerSaveBlocker } = require('electron')
 const path = require('path')
 const https = require('https')
 const fs = require('fs')
@@ -8,26 +8,43 @@ const { createLogger } = require('./logger')
 
 let mainWindow
 let browserViews = new Map() // 存储多个BrowserView实例
+let keepAwakeBlockerId = null
 
 // 修改token存储路径到项目根目录
 // 开发环境：项目根目录
 // 生产环境：可执行文件所在目录
 const isDev = !app.isPackaged
-const logger = createLogger('main-browserview', { defaultLevel: isDev ? 'info' : 'warn' })
+const logger = createLogger('main-browserview', { defaultLevel: 'warn' })
 const tokenStorePath = isDev 
   ? path.join(__dirname, '..', 'tokens.json')  // 开发环境：项目根目录
   : path.join(path.dirname(app.getPath('exe')), 'tokens.json')  // 生产环境：exe所在目录
 const protocolGuardPartitions = new Set()
 
+/**
+ * isBlockedExternalProtocol 方法：判断 URL 是否为需要拦截的外部协议。
+ */
 function isBlockedExternalProtocol(url = '') {
   return /^(bytedance|snssdk|douyinopensdk):\/\//i.test(String(url || '').trim())
 }
 
+/**
+ * isHttpLikeUrl 方法：判断 URL 是否为可导航的 HTTP/HTTPS 地址。
+ */
 function isHttpLikeUrl(url = '') {
   return /^https?:\/\//i.test(String(url || '').trim())
 }
 
-logger.info(`Token存储路径: ${tokenStorePath}`)
+logger.debug(`Token存储路径: ${tokenStorePath}`)
+
+// 关闭后台节流，避免窗口最小化/被全屏窗口遮挡时脚本冻结
+try {
+  app.commandLine.appendSwitch('disable-renderer-backgrounding')
+  app.commandLine.appendSwitch('disable-background-timer-throttling')
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
+  app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
+} catch (e) {
+  logger.debug('追加后台节流禁用参数失败', e)
+}
 
 // ==================== 工具函数 ====================
 
@@ -40,6 +57,9 @@ function canUseSafeStorage() {
   }
 }
 
+/**
+ * readTokenStore 方法：读取Token存储。
+ */
 function readTokenStore() {
   if (!fs.existsSync(tokenStorePath)) return {}
 
@@ -63,6 +83,9 @@ function readTokenStore() {
   return parsed
 }
 
+/**
+ * writeTokenStore 方法：写入Token存储。
+ */
 function writeTokenStore(tokens) {
   const payloadObj = tokens && typeof tokens === 'object' ? tokens : {}
   const jsonText = JSON.stringify(payloadObj)
@@ -192,6 +215,9 @@ function requestJson(url, headers = {}, timeout = 10000) {
   })
 }
 
+/**
+ * normalizeUserInfo 方法：归一化用户信息。
+ */
 function normalizeUserInfo(raw, method) {
   if (!raw) return null
   const nickname = raw.nickname || raw.nickName || raw.nick_name || ''
@@ -204,6 +230,9 @@ function normalizeUserInfo(raw, method) {
   }
 }
 
+/**
+ * fetchUserInfoFromApis 方法：请求并获取用户信息接口结果。
+ */
 async function fetchUserInfoFromApis(cookieString) {
   if (!cookieString) return null
   const commonHeaders = {
@@ -241,6 +270,9 @@ async function fetchUserInfoFromApis(cookieString) {
   return null
 }
 
+/**
+ * fetchUserInfoFromPage 方法：请求并获取用户信息分页。
+ */
 async function fetchUserInfoFromPage(webContents) {
   try {
     const result = await webContents.executeJavaScript(`
@@ -283,6 +315,9 @@ async function fetchUserInfoFromPage(webContents) {
   return null
 }
 
+/**
+ * resolveUserInfo 方法：解析并返回用户信息。
+ */
 async function resolveUserInfo(accountId, options = {}) {
   const waitMs = options.waitMs ?? 0
   const browserData = browserViews.get(accountId)
@@ -301,6 +336,9 @@ async function resolveUserInfo(accountId, options = {}) {
   return null
 }
 
+/**
+ * createWindow 方法：创建窗口配置。
+ */
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -308,7 +346,8 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js')
+      preload: path.join(__dirname, 'preload.js'),
+      backgroundThrottling: false
     }
   })
 
@@ -323,6 +362,21 @@ function createWindow() {
 }
 
 app.whenReady().then(createWindow)
+
+/**
+ * ensureKeepAwake 方法：确保常亮状态满足预期。
+ */
+function ensureKeepAwake() {
+  try {
+    if (keepAwakeBlockerId !== null && powerSaveBlocker.isStarted(keepAwakeBlockerId)) return
+    keepAwakeBlockerId = powerSaveBlocker.start('prevent-app-suspension')
+    logger.info(`已启用防休眠: blocker=${keepAwakeBlockerId}`)
+  } catch (e) {
+    logger.debug('启用防休眠失败', e)
+  }
+}
+
+app.whenReady().then(ensureKeepAwake)
 // 全局静音兜底（多账号场景避免偶发出声）
 try {
   app.commandLine.appendSwitch('mute-audio')
@@ -330,32 +384,43 @@ try {
   logger.debug('追加 mute-audio 启动参数失败', e)
 }
 
+app.on('will-quit', () => {
+  try {
+    if (keepAwakeBlockerId !== null && powerSaveBlocker.isStarted(keepAwakeBlockerId)) {
+      powerSaveBlocker.stop(keepAwakeBlockerId)
+    }
+  } catch (_) {
+    // ignore
+  }
+})
+
 // 打印所有已注册的 IPC handlers（用于调试）
 app.whenReady().then(() => {
-  logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-  logger.info('✅ Electron 应用已启动')
-  logger.info('📋 已注册的 IPC Handlers:')
-  logger.info('  - load-all-tokens')
-  logger.info('  - check-browser-exists')
-  logger.info('  - launch-browser')
-  logger.info('  - navigate-to')
-  logger.info('  - execute-script')
-  logger.info('  - close-browser')
-  logger.info('  - delete-token')
-  logger.info('  - get-user-info')
-  logger.info('  - clear-account-cache')
-  logger.info('  - get-login-token')
-  logger.info('  - save-token')
-  logger.info('  - load-token')
-  logger.info('  - set-cookies')
-  logger.info('  - search-live-by-all')
-  logger.info('  - search-live-by-category')
-  logger.info('  - get-lottery-detail')
-  logger.info('  - collect-lotteries-by-category')
-  logger.info('  - attend-lottery')
-  logger.info('  - room-like')
-  logger.info('  - room-chat')
-  logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+  if (logger.getLevel() !== 'debug') return
+  logger.debug('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+  logger.debug('✅ Electron 应用已启动')
+  logger.debug('📋 已注册的 IPC Handlers:')
+  logger.debug('  - load-all-tokens')
+  logger.debug('  - check-browser-exists')
+  logger.debug('  - launch-browser')
+  logger.debug('  - navigate-to')
+  logger.debug('  - execute-script')
+  logger.debug('  - close-browser')
+  logger.debug('  - delete-token')
+  logger.debug('  - get-user-info')
+  logger.debug('  - clear-account-cache')
+  logger.debug('  - get-login-token')
+  logger.debug('  - save-token')
+  logger.debug('  - load-token')
+  logger.debug('  - set-cookies')
+  logger.debug('  - search-live-by-all')
+  logger.debug('  - search-live-by-category')
+  logger.debug('  - get-lottery-detail')
+  logger.debug('  - collect-lotteries-by-category')
+  logger.debug('  - attend-lottery')
+  logger.debug('  - room-like')
+  logger.debug('  - room-chat')
+  logger.debug('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
 })
 
 // ... 前面的代码保持不变 ...
@@ -379,6 +444,9 @@ ipcMain.handle('attend-lottery', async (event, { roomId, lotteryId, webRid = nul
       referer: `https://live.douyin.com/${webRid || roomId}`
     }
 
+    /**
+     * attemptAttend 方法：调用参与接口并归一化成功状态与错误信息。
+     */
     const attemptAttend = async (payload) => {
       const json = await douyinLiveRemote('/webcast/lottery/melon/attend/', payload, commonHeaders, 'POST')
       const status = json?.data?.status
@@ -525,7 +593,8 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
-        partition: partition // 独立的session，每个账号互不干扰
+        partition: partition, // 独立的session，每个账号互不干扰
+        backgroundThrottling: false
       }
     })
     
@@ -615,7 +684,7 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
     
     // 监听页面加载完成
     browserWindow.webContents.on('did-finish-load', () => {
-      logger.info(`[${accountId}] 页面加载完成`)
+    logger.debug(`[${accountId}] 页面加载完成`)
       try {
         browserWindow.webContents.setAudioMuted(true)
       } catch (e) {
@@ -1023,9 +1092,9 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCou
     })
     
     // 详细日志
-    logger.info(`[search-live-by-all] 响应状态:`, json ? 'OK' : 'NULL')
+    logger.debug(`[search-live-by-all] 响应状态:`, json ? 'OK' : 'NULL')
     if (json) {
-      logger.info(`[search-live-by-all] 响应结构:`, {
+      logger.debug(`[search-live-by-all] 响应结构:`, {
         hasData: !!json.data,
         dataType: Array.isArray(json.data) ? 'array' : typeof json.data,
         dataLength: Array.isArray(json.data) ? json.data.length : 'N/A',
@@ -1065,7 +1134,7 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCou
     const hasMore = Boolean(json?.extra?.has_more)
     const nextMaxTime = Number(json?.extra?.max_time || 0)
 
-    logger.info(`[search-live-by-all] 找到 ${roomInfoList.length} 个有福袋的直播间`)
+    logger.debug(`[search-live-by-all] 找到 ${roomInfoList.length} 个有福袋的直播间`)
     return {
       success: true,
       roomInfoList,
@@ -1112,9 +1181,9 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
     })
     
     // 详细日志
-    logger.info(`[search-live-by-category] 分类:${categoryId}, offset:${offset}`)
+    logger.debug(`[search-live-by-category] 分类:${categoryId}, offset:${offset}`)
     if (json) {
-      logger.info(`[search-live-by-category] 响应结构:`, {
+      logger.debug(`[search-live-by-category] 响应结构:`, {
         hasData: !!json.data,
         hasDataData: !!json.data?.data,
         dataType: Array.isArray(json.data?.data) ? 'array' : typeof json.data?.data,
@@ -1181,7 +1250,7 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
       (rawList.length >= Math.max(1, Number(count) || 15))
     )
 
-    logger.info(`[search-live-by-category] 原始${rawList.length}个, 筛出${roomInfoList.length}个有福袋直播间`)
+    logger.debug(`[search-live-by-category] 原始${rawList.length}个, 筛出${roomInfoList.length}个有福袋直播间`)
     return {
       success: true,
       roomInfoList,
@@ -1248,14 +1317,30 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, acco
 
     const lottery_info = json.data.lottery_info
 
-    // 条件检查：必须同时包含口令(type=3) + 手动参与(type=6)
-    const conditions = lottery_info.conditions || []
-    const hasType3 = conditions.some(c => c.type === 3) // 发口令
-    const hasType6 = conditions.some(c => c.type === 6) // 手动参与
-    const hasValidConditions = hasType3 && hasType6
+    // 对齐超人福袋：仅允许两条条件且必须是 type=3 + type=6，同时过滤会员/粉丝团限制
+    const conditions = Array.isArray(lottery_info.conditions) ? lottery_info.conditions : []
+    const conditionTypes = conditions.map(c => Number(c?.type)).filter(n => Number.isFinite(n))
+    const sortedTypes = [...conditionTypes].sort((a, b) => a - b)
+    const hasExactType36 = conditions.length === 2 && sortedTypes[0] === 3 && sortedTypes[1] === 6
+    const restrictedRe = /(粉丝团|粉丝专属|仅粉丝|仅限粉丝|铁粉|团员|加团|加入粉丝团|会员|会员专属|会员可参与|主播会员|vip|VIP|订阅后可参与|需订阅|fanclub|member_only|fans)/i
+    const hasRestrictedCondition = conditions.some((c) => {
+      const text = [
+        c?.content,
+        c?.desc,
+        c?.description,
+        c?.name,
+        c?.title,
+        c?.text,
+        c?.condition_desc,
+        c?.condition_text,
+        JSON.stringify(c || {})
+      ].filter(Boolean).join(' ')
+      return restrictedRe.test(String(text || ''))
+    })
+    const hasValidConditions = hasExactType36 && !hasRestrictedCondition
 
     if (!hasValidConditions) {
-      return { success: false, error: `福袋条件不符合(${conditions.map(c => c.type).join(',')})` }
+      return { success: false, error: `福袋条件不符合(${conditionTypes.join(',') || 'none'})` }
     }
 
     const lotteryDetail = {
@@ -1307,7 +1392,7 @@ ipcMain.handle('collect-lotteries-by-category', async (event, { categoryId = '0'
             const cookies = await browserData.session.cookies.get({ domain: '.douyin.com' })
             cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ')
             dynamicParams = extractParamsFromCookie(cookieString)
-            logger.info(`[分类扫描] 使用账号 ${accountId} 的Cookie`)
+            logger.debug(`[分类扫描] 使用账号 ${accountId} 的Cookie`)
           } catch (e) {
             logger.warn('⚠️ 获取Cookie失败:', e.message)
           }

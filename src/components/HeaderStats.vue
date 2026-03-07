@@ -50,10 +50,17 @@ const props = defineProps({
   totalWinning: {
     type: Number,
     default: 0
+  },
+  successRate: {
+    type: Number,
+    default: null
   }
 })
 
 const successRate = computed(() => {
+  if (props.successRate !== null && props.successRate !== undefined && Number.isFinite(Number(props.successRate))) {
+    return Number(props.successRate).toFixed(1)
+  }
   if (!props.totalParticipation) return '0.0'
   return ((props.totalWinning / props.totalParticipation) * 100).toFixed(1)
 })

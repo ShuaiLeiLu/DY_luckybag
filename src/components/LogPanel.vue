@@ -12,8 +12,9 @@
       </div>
     </template>
     <div ref="logContainer" class="card-inner log-scroll scroll-box">
-      <div v-for="(log, index) in logs" :key="index" class="log-item" :class="log.type">
+      <div v-for="(log, index) in logsWithMeta" :key="index" class="log-item" :class="log.type">
         <span class="log-time">{{ log.time }}</span>
+        <span class="log-badge" :class="log._badge.className">{{ log._badge.label }}</span>
         <span class="log-msg">{{ log.message }}</span>
       </div>
       <div v-if="logs.length === 0" class="log-empty">
@@ -25,7 +26,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, watch, nextTick, computed } from 'vue'
 import { NCard, NIcon, NButton } from 'naive-ui'
 import TerminalOutline from '@vicons/ionicons5/es/TerminalOutline'
 import TrashOutline from '@vicons/ionicons5/es/TrashOutline'
@@ -41,7 +42,33 @@ const emit = defineEmits(['clear'])
 const logContainer = ref(null)
 const isPinnedToBottom = ref(true)
 const BOTTOM_THRESHOLD = 24
+const WIN_RE = /(中奖|恭喜|🎉|🧧.*成功|领取红包成功|中得)/i
+const FAIL_RE = /(失败|错误|异常|超时|未中奖|放弃)/i
+const WARN_RE = /(风控|告警|警告|降速|冷却)/i
 
+/**
+ * resolveBadge 方法：解析并返回目标项。
+ */
+function resolveBadge(log) {
+  const message = String(log?.message || '')
+  const type = String(log?.type || 'info')
+
+  if (WIN_RE.test(message)) return { label: '中奖', className: 'badge-win' }
+  if (type === 'error' || FAIL_RE.test(message)) return { label: '失败', className: 'badge-fail' }
+  if (type === 'warning' || WARN_RE.test(message)) return { label: '告警', className: 'badge-warning' }
+  return { label: '运行', className: 'badge-info' }
+}
+
+const logsWithMeta = computed(() => {
+  return (props.logs || []).map((item) => ({
+    ...item,
+    _badge: resolveBadge(item)
+  }))
+})
+
+/**
+ * updatePinnedState 方法：根据滚动位置更新“是否贴底”状态。
+ */
 const updatePinnedState = () => {
   const el = logContainer.value
   if (!el) return
@@ -49,6 +76,9 @@ const updatePinnedState = () => {
   isPinnedToBottom.value = distanceToBottom <= BOTTOM_THRESHOLD
 }
 
+/**
+ * scrollToBottom 方法：将日志容器滚动到最底部。
+ */
 const scrollToBottom = (behavior = 'smooth') => {
   nextTick(() => {
     if (logContainer.value) {
@@ -152,6 +182,7 @@ onUnmounted(() => {
   font-size: 12px;
   font-family: 'JetBrains Mono', monospace;
   display: flex;
+  align-items: flex-start;
   gap: 8px;
   line-height: 1.35;
 }
@@ -159,6 +190,38 @@ onUnmounted(() => {
   margin-bottom: 0;
 }
 .log-time { color: #7f8ba7; flex-shrink: 0; }
+.log-badge {
+  flex-shrink: 0;
+  min-width: 34px;
+  height: 18px;
+  line-height: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 700;
+}
+.badge-win {
+  color: #11c27b;
+  background: rgba(17, 194, 123, 0.14);
+  border-color: rgba(17, 194, 123, 0.34);
+}
+.badge-fail {
+  color: #ff6f7f;
+  background: rgba(255, 111, 127, 0.14);
+  border-color: rgba(255, 111, 127, 0.36);
+}
+.badge-warning {
+  color: #f5c66b;
+  background: rgba(245, 198, 107, 0.14);
+  border-color: rgba(245, 198, 107, 0.36);
+}
+.badge-info {
+  color: #87a9e6;
+  background: rgba(135, 169, 230, 0.12);
+  border-color: rgba(135, 169, 230, 0.3);
+}
 .log-msg { color: #d8e4ff; word-break: break-all; }
 .log-item.error .log-msg { color: #ff7d87; }
 .log-item.success .log-msg { color: #2de2a6; }

@@ -47,18 +47,30 @@ function le(e, r) {
   return ((e << (r %= 32)) | (e >>> (32 - r))) >>> 0
 }
 
+/**
+ * de 方法：执行签名算法中的位运算辅助逻辑。
+ */
 function de(e) {
   return 0 <= e && e < 16 ? 2043430169 : 16 <= e && e < 64 ? 2055708042 : void 0
 }
 
+/**
+ * pe 方法：执行签名算法中的轮函数计算步骤。
+ */
 function pe(e, r, t, n) {
   return 0 <= e && e < 16 ? (r ^ t ^ n) >>> 0 : 16 <= e && e < 64 ? ((r & t) | (r & n) | (t & n)) >>> 0 : (void 0, 0)
 }
 
+/**
+ * he 方法：执行签名算法中的状态压缩步骤。
+ */
 function he(e, r, t, n) {
   return 0 <= e && e < 16 ? (r ^ t ^ n) >>> 0 : 16 <= e && e < 64 ? ((r & t) | (~r & n)) >>> 0 : (void 0, 0)
 }
 
+/**
+ * reset 方法：重置摘要计算上下文到初始状态。
+ */
 function reset() {
   this.reg[0] = 1937774191
   this.reg[1] = 1226093241
@@ -72,6 +84,9 @@ function reset() {
   this['size'] = 0
 }
 
+/**
+ * write 方法：向摘要计算器写入待处理字节数据。
+ */
 function write(e) {
   const a =
     'string' == typeof e
@@ -98,6 +113,9 @@ function write(e) {
         (f += 64)
 }
 
+/**
+ * sum 方法：输出当前摘要状态对应的结果字节。
+ */
 function sum(e, t) {
   e && (this['reset'](), this['write'](e)), this['_fill']()
   for (var f = 0; f < this.chunk['length']; f += 64) this._compress(this['chunk']['slice'](f, f + 64))
@@ -119,6 +137,9 @@ function sum(e, t) {
   return this['reset'](), i
 }
 
+/**
+ * _compress 方法：执行一轮摘要压缩计算。
+ */
 function _compress(t) {
   if (t < 64);
   else {
@@ -161,6 +182,9 @@ function _compress(t) {
   }
 }
 
+/**
+ * _fill 方法：补齐摘要块长度并准备最终计算。
+ */
 function _fill() {
   let a = 8 * this['size'],
     f = this['chunk']['push'](128) % 64
@@ -172,6 +196,9 @@ function _fill() {
   for (i = 0; i < 4; i++) this['chunk']['push']((a >>> (8 * (3 - i))) & 255)
 }
 
+/**
+ * SM3 方法：初始化 SM3 摘要实例并绑定初始内部状态。
+ */
 function SM3() {
   this.reg = []
   this.chunk = []
@@ -233,6 +260,9 @@ function result_encrypt(long_str, num = null) {
   return result
 }
 
+/**
+ * get_long_int 方法：获取整数。
+ */
 function get_long_int(round, long_str) {
   round = round * 3
   return (long_str.charCodeAt(round) << 16) | (long_str.charCodeAt(round + 1) << 8) | long_str.charCodeAt(round + 2)
@@ -249,6 +279,9 @@ function gener_random(random, option) {
   ]
 }
 
+/**
+ * generate_random_str 方法：处理随机值字符串。
+ */
 function generate_random_str() {
   let random_str_list = []
   random_str_list = random_str_list.concat(gener_random(Math.random() * 1e4, [3, 45]))
@@ -421,6 +454,9 @@ function generate_rc4_bb_str(url_search_params, user_agent, window_env_str, suff
   return rc4_encrypt(String.fromCharCode.apply(null, bb), String.fromCharCode.apply(null, [121]))
 }
 
+/**
+ * sign 方法：生成请求参数签名结果。
+ */
 function sign(url_search_params, user_agent, arg) {
   const result_str =
     generate_random_str() +
@@ -428,10 +464,16 @@ function sign(url_search_params, user_agent, arg) {
   return result_encrypt(result_str, 's4') + '='
 }
 
+/**
+ * sign_datail 方法：处理详情。
+ */
 function sign_datail(params, userAgent) {
   return sign(params, userAgent, [0, 1, 14])
 }
 
+/**
+ * sign_reply 方法：生成用于响应回传的签名结果。
+ */
 function sign_reply(params, userAgent) {
   return sign(params, userAgent, [0, 1, 8])
 }
@@ -488,6 +530,9 @@ const commonHeaders = {
 
 const DEBUG_DY_API = process.env.DEBUG_DY_API === '1'
 
+/**
+ * cookieToObj 方法：处理Cookie。
+ */
 function cookieToObj(cookie) {
   const obj = {}
   if (!cookie) return obj
@@ -499,6 +544,9 @@ function cookieToObj(cookie) {
   return obj
 }
 
+/**
+ * getMsToken 方法：获取Token。
+ */
 function getMsToken(randomLength = 120) {
   let randomStr = ''
   const baseStr = 'ABCDEFGHIGKLMNOPQRSTUVWXYZabcdefghigklmnopqrstuvwxyz0123456789='
@@ -509,10 +557,16 @@ function getMsToken(randomLength = 120) {
   return randomStr
 }
 
+/**
+ * sleep 方法：处理延时。
+ */
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+/**
+ * handleParams 方法：处理参数。
+ */
 async function handleParams(params, headers) {
   const cookie = headers.cookie
   if (!cookie) return params
@@ -528,6 +582,9 @@ async function handleParams(params, headers) {
   return params
 }
 
+/**
+ * requestJson 方法：处理JSON数据。
+ */
 function requestJson(url, headers, timeoutMs = 10000, method = 'GET') {
   return new Promise((resolve, reject) => {
     const u = new URL(url)
@@ -582,6 +639,9 @@ function requestJson(url, headers, timeoutMs = 10000, method = 'GET') {
   })
 }
 
+/**
+ * douyinLiveRemote 方法：处理抖音直播远程调用。
+ */
 async function douyinLiveRemote(uri, params, headers, method = 'GET') {
   const p = { ...params, ...commonParams }
   const h = { ...commonHeaders, ...headers }

@@ -1,18 +1,42 @@
+/**
+ * 判断错误文本是否属于风控/拒绝访问类错误。
+ * @param {string} message 错误文本
+ * @returns {boolean}
+ */
 function isRiskErrorMessage(message) {
   const text = String(message || '')
   return text.includes('444') || text.includes('NON_JSON') || text.includes('Access Denied')
 }
 
+/**
+ * 安全数字转换。
+ * @param {*} value 原始值
+ * @param {number} fallback 兜底值
+ * @returns {number}
+ */
 function toNumber(value, fallback = 0) {
   const n = Number(value)
   return Number.isFinite(n) ? n : fallback
 }
 
+/**
+ * 安全正整数转换。
+ * @param {*} value 原始值
+ * @param {number} fallback 兜底值
+ * @returns {number}
+ */
 function toPositiveInt(value, fallback = 0) {
   const n = Math.floor(toNumber(value, fallback))
   return n > 0 ? n : fallback
 }
 
+/**
+ * 判断是否应因风控进入冷却并中断当前扫描轮次。
+ * @param {object} manager LotteryManager 实例
+ * @param {string} accountId 账号ID
+ * @param {Function} onLog 日志回调
+ * @returns {boolean}
+ */
 function shouldBreakForRiskCooldown(manager, accountId, onLog) {
   const profile = manager.getAdaptiveScanProfile(accountId)
   const remainMs = Number(profile?.cooldownRemainMs || 0)
@@ -26,6 +50,25 @@ function shouldBreakForRiskCooldown(manager, accountId, onLog) {
   return true
 }
 
+/**
+ * 控制扫描过程日志输出频率，避免日志刷屏。
+ * @param {number} roundIndex 当前轮次索引
+ * @param {number} noGrowthRounds 连续无增长轮数
+ * @returns {boolean}
+ */
+function shouldLogScanProgress(roundIndex, noGrowthRounds = 0) {
+  if (roundIndex <= 0) return true
+  if ((roundIndex + 1) % 5 === 0) return true
+  return noGrowthRounds >= 3
+}
+
+/**
+ * 通过“全站接口”搜索直播间并补充福袋池。
+ * @param {object} manager LotteryManager 实例
+ * @param {string} accountId 账号ID
+ * @param {number} times 期望扫描轮次
+ * @param {object|null} scanProfile 扫描配置
+ */
 export async function searchLiveByAll(manager, accountId, times = 10, scanProfile = null) {
   const accountData = manager.accounts.get(accountId)
   if (!accountData) return
@@ -53,7 +96,9 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
         })
 
         if (!result.success) {
-          accountData.callbacks.onLog(`第${i + 1}次搜索失败: ${result.error || '未知错误'}`)
+          if (shouldLogScanProgress(i, noGrowthRounds)) {
+            accountData.callbacks.onLog(`扫描重试(${i + 1}/${maxAllRounds})：${result.error || '未知错误'}`, 'warning')
+          }
           noGrowthRounds += 1
           if (isRiskErrorMessage(result.error)) {
             manager.applyScanRiskFeedback(accountId, { hardRiskCount: 1 }, accountData.callbacks.onLog)
@@ -69,7 +114,6 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
         }
 
         if (!Array.isArray(result.roomInfoList)) {
-          accountData.callbacks.onLog(`第${i + 1}次搜索: 返回数据为空`)
           noGrowthRounds += 1
           if (noGrowthRounds >= noGrowthBreakRounds) break
           continue
@@ -132,7 +176,9 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
         const randomDelay = Math.floor(Math.random() * Math.max(0, maxDelay - minDelay + 1)) + minDelay
         await manager.sleep(randomDelay)
       } catch (error) {
-        accountData.callbacks.onLog(`第${i + 1}次搜索出错: ${error.message}`)
+        if (shouldLogScanProgress(i, noGrowthRounds)) {
+          accountData.callbacks.onLog(`扫描异常(${i + 1}/${maxAllRounds})：${error.message}`, 'warning')
+        }
         console.error('[搜索异常]', error)
       }
     }
@@ -142,6 +188,12 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
   }
 }
 
+/**
+ * 按分类批量扫描直播间并补充福袋池。
+ * @param {object} manager LotteryManager 实例
+ * @param {string} accountId 账号ID
+ * @param {object|null} scanProfile 扫描配置
+ */
 export async function startCollectLive(manager, accountId, scanProfile = null) {
   const accountData = manager.accounts.get(accountId)
   if (!accountData) return
@@ -186,6 +238,15 @@ export async function startCollectLive(manager, accountId, scanProfile = null) {
   }
 }
 
+/**
+ * 扫描单个分类并可通过 onBatch 回调逐批返回有效福袋。
+ * @param {object} manager LotteryManager 实例
+ * @param {string} accountId 账号ID
+ * @param {{category_id:string, category_name:string, page:number|null}} options 分类参数
+ * @param {Function|null} onBatch 批次回调
+ * @param {object|null} scanProfile 扫描配置
+ * @returns {Promise<Array>}
+ */
 export async function searchLiveRoomCategory(
   manager,
   accountId,
@@ -284,6 +345,14 @@ export async function searchLiveRoomCategory(
   return lotteryInfoList
 }
 
+/**
+ * 对直播间列表并发获取福袋详情。
+ * @param {object} manager LotteryManager 实例
+ * @param {Array} roomInfoList 直播间列表
+ * @param {string} accountId 账号ID
+ * @param {object|null} scanProfile 扫描配置
+ * @returns {Promise<{settled:Array, stats:{successCount:number, hardRiskCount:number, errorCount:number}}>}
+ */
 export async function getLotteryInfo(manager, roomInfoList, accountId, scanProfile = null) {
   if (!Array.isArray(roomInfoList) || roomInfoList.length === 0) {
     return { settled: [], stats: { successCount: 0, hardRiskCount: 0, errorCount: 0 } }
@@ -302,6 +371,9 @@ export async function getLotteryInfo(manager, roomInfoList, accountId, scanProfi
     return { settled: [], stats: { successCount: 0, hardRiskCount: 0, errorCount: 0 } }
   }
 
+  /**
+   * fetchOne 方法：抓取单个直播间的福袋详情并返回标准化结果。
+   */
   const fetchOne = async (roomInfo) => {
     const result = await manager.ipc.invoke('get-lottery-detail', {
       roomId: roomInfo.roomId,
@@ -342,6 +414,9 @@ export async function getLotteryInfo(manager, roomInfoList, accountId, scanProfi
   const stats = { successCount: 0, hardRiskCount: 0, errorCount: 0 }
   let cursor = 0
 
+  /**
+   * worker 方法：并发消费候选列表并汇总抓取成功/失败统计。
+   */
   const worker = async () => {
     while (true) {
       const index = cursor

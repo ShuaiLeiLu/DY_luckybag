@@ -7,7 +7,7 @@ type Engine interface {
 	SweepExpired(nowMS int64)
 	RefreshTop(force bool)
 	Top(limit int) (items []ScoredCandidate, meta TopMeta, profileVersion int64)
+	TopWithProfile(limit int, profile FilterProfile) (items []ScoredCandidate, meta TopMeta, profileVersion int64)
 	Stats() (Stats, TopMeta, int64)
 	Close() error
 }
-

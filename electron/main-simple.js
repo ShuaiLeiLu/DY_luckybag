@@ -3,6 +3,9 @@ const path = require('path')
 
 let mainWindow
 
+/**
+ * createWindow 方法：创建窗口配置。
+ */
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,

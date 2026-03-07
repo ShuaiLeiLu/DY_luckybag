@@ -16,8 +16,8 @@ import (
 )
 
 type serverConfig struct {
-	Host        string
-	Port        int
+	Host         string
+	Port         int
 	MaxBodyBytes int64
 }
 
@@ -36,19 +36,20 @@ type fileConfig struct {
 		Shards        int   `json:"shards"`
 	} `json:"pool"`
 	Redis struct {
-		Enabled       bool   `json:"enabled"`
-		Addr          string `json:"addr"`
-		Password      string `json:"password"`
-		DB            int    `json:"db"`
-		Prefix        string `json:"prefix"`
-		PoolSize      int    `json:"poolSize"`
-		MinIdleConns  int    `json:"minIdleConns"`
-		DialTimeoutMS int64  `json:"dialTimeoutMS"`
-		ReadTimeoutMS int64  `json:"readTimeoutMS"`
-		WriteTimeoutMS int64 `json:"writeTimeoutMS"`
+		Enabled        bool   `json:"enabled"`
+		Addr           string `json:"addr"`
+		Password       string `json:"password"`
+		DB             int    `json:"db"`
+		Prefix         string `json:"prefix"`
+		PoolSize       int    `json:"poolSize"`
+		MinIdleConns   int    `json:"minIdleConns"`
+		DialTimeoutMS  int64  `json:"dialTimeoutMS"`
+		ReadTimeoutMS  int64  `json:"readTimeoutMS"`
+		WriteTimeoutMS int64  `json:"writeTimeoutMS"`
 	} `json:"redis"`
 }
 
+// getenvInt 方法：处理整数。
 func getenvInt(name string, fallback int) int {
 	v := os.Getenv(name)
 	if v == "" {
@@ -61,6 +62,7 @@ func getenvInt(name string, fallback int) int {
 	return n
 }
 
+// getenvInt64 方法：处理64位整数。
 func getenvInt64(name string, fallback int64) int64 {
 	v := os.Getenv(name)
 	if v == "" {
@@ -73,6 +75,7 @@ func getenvInt64(name string, fallback int64) int64 {
 	return n
 }
 
+// getenvStr 方法：处理字符串。
 func getenvStr(name, fallback string) string {
 	v := os.Getenv(name)
 	if v == "" {
@@ -81,6 +84,7 @@ func getenvStr(name, fallback string) string {
 	return v
 }
 
+// getenvBool 方法：处理布尔值。
 func getenvBool(name string, fallback bool) bool {
 	v := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
 	if v == "" {
@@ -89,6 +93,7 @@ func getenvBool(name string, fallback bool) bool {
 	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
+// loadConfigFile 方法：加载配置文件。
 func loadConfigFile(path string) (fileConfig, bool, error) {
 	var cfg fileConfig
 	data, err := os.ReadFile(path)
@@ -107,6 +112,7 @@ func loadConfigFile(path string) (fileConfig, bool, error) {
 	return cfg, true, nil
 }
 
+// resolveConfigPath 方法：解析并返回配置路径。
 func resolveConfigPath() string {
 	if p := strings.TrimSpace(os.Getenv("POOL_CONFIG_FILE")); p != "" {
 		return p
@@ -123,6 +129,7 @@ func resolveConfigPath() string {
 	return "config.json"
 }
 
+// writeJSON 方法：写入JSON数据。
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -133,6 +140,7 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
+// parseBody 方法：解析请求体。
 func parseBody(r *http.Request, limit int64, dst any) error {
 	defer r.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
@@ -147,6 +155,7 @@ func parseBody(r *http.Request, limit int64, dst any) error {
 	return dec.Decode(dst)
 }
 
+// writeBodyErr 方法：写入请求体。
 func writeBodyErr(w http.ResponseWriter, err error) {
 	if errors.Is(err, io.ErrShortBuffer) {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "error": "request body too large"})
@@ -155,6 +164,86 @@ func writeBodyErr(w http.ResponseWriter, err error) {
 	writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid json body"})
 }
 
+// parseBoolQuery 方法：解析布尔值查询参数。
+func parseBoolQuery(v string) (bool, bool) {
+	s := strings.TrimSpace(strings.ToLower(v))
+	switch s {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+// parseInt64Query 方法：解析64位整数查询参数。
+func parseInt64Query(v string) (int64, bool) {
+	n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	return n, err == nil
+}
+
+// parseFloatQuery 方法：解析浮点数查询参数。
+func parseFloatQuery(v string) (float64, bool) {
+	n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	return n, err == nil
+}
+
+// parseTopFilterPatch 方法：解析优选结果过滤条件。
+func parseTopFilterPatch(r *http.Request) map[string]any {
+	q := r.URL.Query()
+	patch := map[string]any{}
+
+	if v := strings.TrimSpace(q.Get("requireType3And6")); v != "" {
+		if b, ok := parseBoolQuery(v); ok {
+			patch["requireType3And6"] = b
+		}
+	}
+	if v := strings.TrimSpace(q.Get("filterFanClub")); v != "" {
+		if b, ok := parseBoolQuery(v); ok {
+			patch["filterFanClub"] = b
+		}
+	}
+	if v := strings.TrimSpace(q.Get("onlyPhysicalPrize")); v != "" {
+		if b, ok := parseBoolQuery(v); ok {
+			patch["onlyPhysicalPrize"] = b
+		}
+	}
+	if v := strings.TrimSpace(q.Get("preferBigRedPacket")); v != "" {
+		if b, ok := parseBoolQuery(v); ok {
+			patch["preferBigRedPacket"] = b
+		}
+	}
+	if v := strings.TrimSpace(q.Get("bigRedPacketThreshold")); v != "" {
+		if x, ok := parseFloatQuery(v); ok {
+			patch["bigRedPacketThreshold"] = x
+		}
+	}
+	if v := strings.TrimSpace(q.Get("minRemainingSec")); v != "" {
+		if n, ok := parseInt64Query(v); ok {
+			patch["minRemainingSec"] = n
+		}
+	}
+	if v := strings.TrimSpace(q.Get("maxRemainingSec")); v != "" {
+		if n, ok := parseInt64Query(v); ok {
+			patch["maxRemainingSec"] = n
+		}
+	}
+	if v := strings.TrimSpace(q.Get("minProbability")); v != "" {
+		if x, ok := parseFloatQuery(v); ok {
+			patch["minProbability"] = x
+		}
+	}
+	if v := strings.TrimSpace(q.Get("maxOnlineTotal")); v != "" {
+		if x, ok := parseFloatQuery(v); ok {
+			patch["maxOnlineTotal"] = x
+		}
+	}
+
+	return patch
+}
+
+// main 方法：初始化服务配置并启动 HTTP 接口与后台维护任务。
 func main() {
 	configFilePath := resolveConfigPath()
 	fileCfg, hasFileCfg, err := loadConfigFile(configFilePath)
@@ -285,11 +374,11 @@ func main() {
 		svc.SweepExpired(time.Now().UnixMilli())
 		_, profileVersion := svc.Profile()
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true,
-			"now": time.Now().UnixMilli(),
-			"pid": os.Getpid(),
-			"goVersion": runtime.Version(),
-			"cpuCount": runtime.NumCPU(),
+			"ok":             true,
+			"now":            time.Now().UnixMilli(),
+			"pid":            os.Getpid(),
+			"goVersion":      runtime.Version(),
+			"cpuCount":       runtime.NumCPU(),
 			"profileVersion": profileVersion,
 		})
 	})
@@ -305,9 +394,9 @@ func main() {
 		}
 		st, meta, pv := svc.Stats()
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true,
-			"stats": st,
-			"topMeta": meta,
+			"ok":             true,
+			"stats":          st,
+			"topMeta":        meta,
 			"profileVersion": pv,
 		})
 	})
@@ -346,7 +435,7 @@ func main() {
 		}
 
 		var req struct {
-			SourceID   string            `json:"sourceId"`
+			SourceID   string           `json:"sourceId"`
 			Candidates []map[string]any `json:"candidates"`
 		}
 		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
@@ -361,16 +450,16 @@ func main() {
 		res := svc.UpsertBatch(req.SourceID, req.Candidates)
 		svc.RefreshTop(false)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true,
-			"received": res.Received,
-			"accepted": res.Accepted,
-			"inserted": res.Inserted,
-			"updated": res.Updated,
-			"ignoredExpired": res.IgnoredExpired,
-			"ignoredOlder": res.IgnoredOlder,
-			"invalid": res.Invalid,
+			"ok":               true,
+			"received":         res.Received,
+			"accepted":         res.Accepted,
+			"inserted":         res.Inserted,
+			"updated":          res.Updated,
+			"ignoredExpired":   res.IgnoredExpired,
+			"ignoredOlder":     res.IgnoredOlder,
+			"invalid":          res.Invalid,
 			"activeCandidates": res.ActiveCandidates,
-			"profileVersion": res.ProfileVersion,
+			"profileVersion":   res.ProfileVersion,
 		})
 	})
 
@@ -389,14 +478,28 @@ func main() {
 				limit = n
 			}
 		}
-		items, meta, pv := svc.Top(limit)
+		baseProfile, _ := svc.Profile()
+		filterPatch := parseTopFilterPatch(r)
+		effectiveProfile := pool.ApplyProfilePatch(baseProfile, filterPatch)
+
+		var (
+			items []pool.ScoredCandidate
+			meta  pool.TopMeta
+			pv    int64
+		)
+		if len(filterPatch) > 0 {
+			items, meta, pv = svc.TopWithProfile(limit, effectiveProfile)
+		} else {
+			items, meta, pv = svc.Top(limit)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true,
-			"profileVersion": pv,
-			"generatedAt": meta.BuiltAtMS,
+			"ok":               true,
+			"profileVersion":   pv,
+			"generatedAt":      meta.BuiltAtMS,
 			"activeCandidates": meta.ActiveCount,
-			"validCandidates": meta.ValidCount,
-			"items": items,
+			"validCandidates":  meta.ValidCount,
+			"appliedFilters":   effectiveProfile,
+			"items":            items,
 		})
 	})
 

@@ -238,6 +238,9 @@ const columns = [
 
 let accountIdCounter = 1
 
+/**
+ * addAccount 方法：添加账号。
+ */
 function addAccount() {
   const account = {
     id: `account_${accountIdCounter++}`,
@@ -260,6 +263,9 @@ function addAccount() {
   }, 2000)
 }
 
+/**
+ * toggleAccount 方法：处理切换账号。
+ */
 function toggleAccount(account) {
   if (account.state === 'running') {
     account.state = 'paused'
@@ -270,12 +276,18 @@ function toggleAccount(account) {
   }
 }
 
+/**
+ * removeAccount 方法：移除账号。
+ */
 function removeAccount(accountId) {
   const account = accounts.value.find(a => a.id === accountId)
   accounts.value = accounts.value.filter(a => a.id !== accountId)
   addLog(`账号 ${account.nickname} 已删除`)
 }
 
+/**
+ * addLog 方法：追加一条运行日志并驱动日志区域滚动更新。
+ */
 function addLog(message, type = 'info') {
   const time = new Date().toLocaleTimeString()
   logs.value.push({ time, message, type })
