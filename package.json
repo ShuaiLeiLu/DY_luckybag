@@ -61,7 +61,10 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
+      "allowToChangeInstallationDirectory": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "guid": "6f3d6e8f-7c2a-4f34-9f6d-8f3f7a2a9b11",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "抖音福袋助手"
