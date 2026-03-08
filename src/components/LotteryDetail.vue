@@ -161,10 +161,19 @@ function getLotteryMeta(row) {
 function renderLotteryContentCell(row) {
   const title = row?.lotteryName || row?.prize_name || prizeNameFromInfo(row) || '福袋'
   const meta = getLotteryMeta(row)
-  return h('div', { class: 'lottery-content-cell' }, [
-    h('div', { class: 'lottery-content-title', title }, title),
-    h('div', { class: 'lottery-content-meta', title: meta }, meta)
-  ])
+  const fullText = meta && meta !== '内容待补充'
+    ? `${title} · ${meta}`
+    : title
+  return h(
+    'div',
+    { class: 'lottery-content-cell', title: fullText },
+    [
+      h('span', { class: 'lottery-content-title' }, title),
+      meta && meta !== '内容待补充'
+        ? h('span', { class: 'lottery-content-meta' }, `· ${meta}`)
+        : null
+    ].filter(Boolean)
+  )
 }
 
 function prizeNameFromInfo(row) {
@@ -215,12 +224,14 @@ const historyColumns = computed(() => [
     }
   },
   {
-    title: '方式',
-    key: 'joinMode',
-    width: 72,
+    title: '中奖数量',
+    key: 'rewardAmount',
+    width: 88,
     render: (row) => {
-      const text = row.joinMode || 'API'
-      return h(NTag, { size: 'small', type: text === 'UI' ? 'success' : 'info' }, { default: () => text })
+      const amount = Number(row.rewardAmount || 0)
+      const text = amount > 0 ? formatCompactNumber(amount) : '0'
+      const type = amount > 0 ? 'success' : 'default'
+      return h(NTag, { size: 'small', type }, { default: () => text })
     }
   },
   {
@@ -424,6 +435,36 @@ const historyColumns = computed(() => [
   color: #24405f;
   border-color: #c7d7e8;
   background: #eef4fb;
+}
+
+.lottery-content-cell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.lottery-content-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #24364b;
+  font-weight: 700;
+}
+
+.lottery-content-meta {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #72839a;
+  font-size: 12px;
 }
 
 .card-inner {

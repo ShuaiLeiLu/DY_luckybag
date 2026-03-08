@@ -177,21 +177,23 @@ function firstFinite(...vals) {
 }
 
 /**
- * 提取红包总价值（用于计算人均红包）。
+ * 提取福袋总价值（用于计算人均福袋价值）。
  * @param {object} lottery 福袋对象
  * @returns {number|null}
  */
-function extractTotalRedPacketValue(lottery) {
+function extractLotteryTotalValue(lottery) {
   const prizeInfo = lottery?.prizeInfo || lottery?.prize_info || {}
   const total = firstFinite(
     lottery?.prizeTotalAmount,
+    lottery?.rewardAmount,
     lottery?.total_amount,
     lottery?.totalAmount,
     prizeInfo?.total_amount,
     prizeInfo?.totalAmount,
     prizeInfo?.total_diamond_count,
     prizeInfo?.total_coin_count,
-    prizeInfo?.diamond_count_total
+    prizeInfo?.diamond_count_total,
+    prizeInfo?.reward_amount
   )
   if (total !== null) return total
 
@@ -218,7 +220,7 @@ function extractTotalRedPacketValue(lottery) {
 }
 
 /**
- * 计算红包福袋人均价值并判断是否为大红包。
+ * 计算福袋人均价值并判断是否达到“大红包”阈值。
  * @param {object} lottery 福袋对象
  * @param {number} threshold 大红包阈值
  * @returns {{isRedPacket:boolean, known:boolean, avgPerWinner:number, totalValue:number, isBig:boolean}}
@@ -228,7 +230,15 @@ export function getRedPacketAveragePerWinner(lottery, threshold = 40) {
     return { isRedPacket: false, known: false, avgPerWinner: 0, totalValue: 0, isBig: false }
   }
 
-  const winners = firstFinite(lottery?.winningTotal, lottery?.lucky_count)
+  const winners = firstFinite(
+    lottery?.winningTotal,
+    lottery?.luckyCount,
+    lottery?.lucky_count,
+    lottery?.winnerCount,
+    lottery?.winner_count,
+    lottery?.prizeInfo?.winner_count,
+    lottery?.prize_info?.winner_count
+  )
   const name = [
     lottery?.lotteryName,
     lottery?.prize_name,
@@ -241,7 +251,7 @@ export function getRedPacketAveragePerWinner(lottery, threshold = 40) {
     return { isRedPacket: isRedPacketLike, known: false, avgPerWinner: 0, totalValue: 0, isBig: false }
   }
 
-  const totalValue = extractTotalRedPacketValue(lottery)
+  const totalValue = extractLotteryTotalValue(lottery)
   if (totalValue === null) {
     return { isRedPacket: isRedPacketLike, known: false, avgPerWinner: 0, totalValue: 0, isBig: false }
   }

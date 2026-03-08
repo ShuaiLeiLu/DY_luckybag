@@ -98,20 +98,11 @@ const isMobile = computed(() => windowWidth.value < 768)
 // 统计数据
 const runningCount = computed(() => accounts.value.filter(a => a.state === 'running').length)
 const totalParticipation = computed(() => accounts.value.reduce((sum, a) => sum + a.participationCount, 0))
-const totalWinning = computed(() => accounts.value.reduce((sum, a) => sum + a.lotteryWinCount, 0))
-const totalDiamonds = computed(() => accounts.value.reduce((sum, a) => sum + a.todayEarnedDiamonds, 0))
-const resolvedLotteryCount = computed(() => (lotteryHistory.value || []).reduce((sum, item) => {
-  const status = String(item?.resultStatus || '')
-  return sum + (status === 'won' || status === 'lost' ? 1 : 0)
-}, 0))
-const wonLotteryCountFromHistory = computed(() => (lotteryHistory.value || []).reduce((sum, item) => {
-  return sum + (String(item?.resultStatus || '') === 'won' ? 1 : 0)
+const totalWinning = computed(() => accounts.value.reduce((sum, a) => sum + Number(a.todayLotteryWinCount || 0), 0))
+const totalDiamonds = computed(() => accounts.value.reduce((sum, a) => {
+  return sum + Number(a.todayLotteryWonDiamonds || 0) + Number(a.todayRedPacketWonDiamonds || 0)
 }, 0))
 const headerSuccessRate = computed(() => {
-  const resolved = Number(resolvedLotteryCount.value || 0)
-  if (resolved > 0) {
-    return Number(((wonLotteryCountFromHistory.value / resolved) * 100).toFixed(1))
-  }
   const joined = Number(totalParticipation.value || 0)
   if (joined <= 0) return 0
   return Number(((totalWinning.value / joined) * 100).toFixed(1))
@@ -162,10 +153,9 @@ const initialPoolServerConfig = lotteryManager.getPoolServerConfig()
 
 const config = ref({
   minProbability: 0.01,
-  stayDuration: 5,
+  stayDuration: 20,
   enableRedPacket: true,
   hitRate: { enabled: true, value: 0.1 },
-  secondInspect: { enabled: true, value: 0.05 },
   filterFanClub: { enabled: true },
   onlyPhysicalPrize: { enabled: false },
   preferBigRedPacket: { enabled: true, threshold: 40 },
@@ -186,6 +176,9 @@ const lotteriesByAccount = ref({})
 const lotteryHistory = ref([])
 const pendingCreateAccountIds = new Set()
 let poolDispatchTimer = null
+let poolLearningTimer = null
+let poolDispatchInflight = false
+let poolLearningInflight = false
 const poolLearningLoading = ref(false)
 const poolLearningDebug = ref({
   connected: false,
@@ -193,6 +186,30 @@ const poolLearningDebug = ref({
   items: [],
   error: ''
 })
+
+const UI_STATUS_FLUSH_MS = 120
+const UI_LOTTERY_FLUSH_MS = 160
+const UI_LOG_FLUSH_MS = 120
+const POOL_SUMMARY_POLL_MS = 6000
+const POOL_LEARNING_POLL_MS = 20000
+const LOG_MAX_COUNT = 300
+const LOG_MERGE_WINDOW_MS = 2000
+const LOG_WIN_RE = /(中奖|恭喜|🎉|🧧.*成功|领取红包成功|中得)/i
+const LOG_FAIL_RE = /(失败|错误|异常|超时|未中奖|放弃)/i
+const LOG_WARN_RE = /(风控|告警|警告|降速|冷却)/i
+const FRONTEND_LOG_SUPPRESS_PATTERNS = [
+  /^⏳ 已锁定当前直播间，约\d+秒后复核当前福袋，并持续补扫候选\.\.\.$/,
+  /^🧠 服务端T(?:30|20)复评分：当前目标继续保留$/,
+  /^🧠 服务端T(?:30|20)复评分：已锁定当前房间，忽略跨房切换建议$/
+]
+
+const pendingAccountUpdates = new Map()
+const pendingLotteryListUpdates = new Map()
+const pendingLogs = []
+let accountUpdateFlushTimer = null
+let lotteryListFlushTimer = null
+let logFlushTimer = null
+let logSeq = 0
 
 /**
  * createEmptyPoolDispatchSummary 方法：创建服务端调度摘要默认值。
@@ -283,6 +300,164 @@ function clearAccountDispatchState(account) {
   account.currentTaskScore = 0
 }
 
+function resolveLogBadgeMeta(message, type = 'info') {
+  const text = String(message || '')
+  const normalizedType = String(type || 'info')
+  if (LOG_WIN_RE.test(text)) return { label: '中奖', className: 'badge-win' }
+  if (normalizedType === 'error' || LOG_FAIL_RE.test(text)) return { label: '失败', className: 'badge-fail' }
+  if (normalizedType === 'warning' || LOG_WARN_RE.test(text)) return { label: '告警', className: 'badge-warning' }
+  return { label: '运行', className: 'badge-info' }
+}
+
+function buildLogEntry(message, type = 'info') {
+  const text = String(message || '')
+  const now = Date.now()
+  return {
+    id: ++logSeq,
+    time: new Date(now).toLocaleTimeString(),
+    message: text,
+    type,
+    _ts: now,
+    _sig: `${type}:${text}`,
+    _baseMessage: text,
+    _repeat: 1,
+    _badge: resolveLogBadgeMeta(text, type)
+  }
+}
+
+function tryMergeLogEntry(targetList, entry) {
+  if (!Array.isArray(targetList) || targetList.length === 0) return false
+  const last = targetList[targetList.length - 1]
+  if (!last || last._sig !== entry._sig) return false
+  if ((entry._ts - Number(last._ts || 0)) > LOG_MERGE_WINDOW_MS) return false
+  const repeat = Number(last._repeat || 1) + 1
+  last._repeat = repeat
+  last._ts = entry._ts
+  last.time = entry.time
+  last.message = `${last._baseMessage} ×${repeat}`
+  return true
+}
+
+function flushPendingAccountUpdates() {
+  if (pendingAccountUpdates.size === 0) return
+  pendingAccountUpdates.forEach((patch, accountId) => {
+    const account = accounts.value.find(item => item.id === accountId)
+    if (!account || !patch) return
+    Object.assign(account, patch)
+  })
+  pendingAccountUpdates.clear()
+}
+
+function scheduleAccountUpdateFlush() {
+  if (accountUpdateFlushTimer) return
+  accountUpdateFlushTimer = setTimeout(() => {
+    accountUpdateFlushTimer = null
+    flushPendingAccountUpdates()
+  }, UI_STATUS_FLUSH_MS)
+}
+
+function queueAccountUpdate(patch = {}) {
+  const accountId = String(patch?.id || '').trim()
+  if (!accountId) return
+  const prev = pendingAccountUpdates.get(accountId) || {}
+  pendingAccountUpdates.set(accountId, {
+    ...prev,
+    ...patch
+  })
+  scheduleAccountUpdateFlush()
+}
+
+function upsertLoggedInAccount(account, nextState = {}, options = {}) {
+  const accountId = String(account?.id || nextState?.id || '').trim()
+  if (!accountId) return null
+  const immediateState = options.autoStartAfterLogin === true ? 'running' : (nextState.state || 'waiting')
+  pendingAccountUpdates.delete(accountId)
+  const index = accounts.value.findIndex(a => a.id === accountId)
+  if (index >= 0) {
+    Object.assign(accounts.value[index], {
+      ...nextState,
+      state: immediateState
+    })
+    ensureDailyStats(accounts.value[index])
+    return accounts.value[index]
+  }
+  const created = createAccountModel({
+    ...account,
+    ...nextState,
+    state: immediateState
+  })
+  accounts.value.push(created)
+  return created
+}
+
+async function resolveStableLoginSnapshot(accountId, initialResult = null) {
+  let latest = initialResult && initialResult.success && initialResult.isLoggedIn ? initialResult : null
+  if (!ipcRenderer) return latest
+  for (let i = 0; i < 3; i++) {
+    try {
+      const result = await ipcRenderer.invoke('get-login-token', accountId)
+      if (result?.success && result?.isLoggedIn && (result?.tokenInfo?.sessionid || result?.tokenInfo?.sessionid_ss)) {
+        latest = result
+      }
+    } catch (_) {
+      // ignore
+    }
+    if (i < 2) {
+      await sleep(700)
+    }
+  }
+  return latest
+}
+
+function flushPendingLotteryListUpdates() {
+  if (pendingLotteryListUpdates.size === 0) return
+  pendingLotteryListUpdates.forEach((payload, accountId) => {
+    const account = accounts.value.find(acc => acc.id === accountId)
+    const nickname = normalizeNickname(account?.nickname || accountId)
+    lotteriesByAccount.value[accountId] = (payload.list || []).map(item => ({
+      ...item,
+      _scanAccountId: accountId,
+      _scanAccountNickname: nickname
+    }))
+  })
+  pendingLotteryListUpdates.clear()
+}
+
+function scheduleLotteryListFlush() {
+  if (lotteryListFlushTimer) return
+  lotteryListFlushTimer = setTimeout(() => {
+    lotteryListFlushTimer = null
+    flushPendingLotteryListUpdates()
+  }, UI_LOTTERY_FLUSH_MS)
+}
+
+function queueLotteryListUpdate(accountId, list = []) {
+  if (!accountId) return
+  pendingLotteryListUpdates.set(accountId, {
+    list: Array.isArray(list) ? list : []
+  })
+  scheduleLotteryListFlush()
+}
+
+function flushPendingLogs() {
+  if (pendingLogs.length === 0) return
+  const next = logs.value.slice()
+  while (pendingLogs.length > 0) {
+    const entry = pendingLogs.shift()
+    if (tryMergeLogEntry(next, entry)) continue
+    next.push(entry)
+  }
+  logs.value = next.slice(-LOG_MAX_COUNT)
+}
+
+function scheduleLogFlush() {
+  if (logFlushTimer) return
+  logFlushTimer = setTimeout(() => {
+    logFlushTimer = null
+    flushPendingLogs()
+  }, UI_LOG_FLUSH_MS)
+}
+
 /**
  * ensureDailyStats 方法：确保每日统计满足预期。
  */
@@ -311,6 +486,7 @@ try {
 const ipcUnsubscribers = []
 const resolvedLotteryResultKeys = new Set()
 const countedLotteryWinKeys = new Set()
+const countedWalletFallbackKeys = new Set()
 
 // 监听串口大小
 const handleResize = () => {
@@ -340,10 +516,23 @@ onMounted(async () => {
     const offBrowserClosed = ipcRenderer.on('browser-closed', ({ accountId }) => {
       const account = accounts.value.find(a => a.id === accountId)
       if (account) {
+        const wasPendingRelogin = pendingCreateAccountIds.has(accountId)
+        if (wasPendingRelogin) {
+          pendingCreateAccountIds.delete(accountId)
+        }
         lotteryManager.stopAccount(accountId)
         account.state = 'paused'
         clearAccountDispatchState(account)
-        addLog(`⚠️ [${account.nickname}] 浏览器窗口已手动关闭，活动已停止`, 'warning')
+        if (wasPendingRelogin) {
+          addLog(`⚠️ [${account.nickname}] 重新登录窗口已关闭，当前账号未更新`, 'warning')
+        } else {
+          addLog(`⚠️ [${account.nickname}] 浏览器窗口已手动关闭，活动已停止`, 'warning')
+        }
+        return
+      }
+      if (pendingCreateAccountIds.has(accountId)) {
+        pendingCreateAccountIds.delete(accountId)
+        addLog(`⚠️ [${accountId}] 登录窗口已关闭，未加入账号列表`, 'warning')
       }
     })
     ipcUnsubscribers.push(offBrowserClosed)
@@ -378,31 +567,20 @@ onMounted(async () => {
           }
 
           if (outcome.isWin) {
-            let shouldCount = false
-            if (outcomeKey) {
-              if (!countedLotteryWinKeys.has(outcomeKey)) {
-                countedLotteryWinKeys.add(outcomeKey)
-                shouldCount = true
-              }
-            } else if (historyUpdated) {
-              shouldCount = true
-            }
+            const shouldCount = outcomeKey
+              ? incrementLotteryWinStats(account, accountId, outcome.lotteryId, Number(outcome.winDiamonds || 0))
+              : (historyUpdated
+                ? incrementLotteryWinStats(account, accountId, updatedHistoryRecord?.lotteryId || '', Number(outcome.winDiamonds || 0))
+                : false)
             if (shouldCount) {
-              account.lotteryWinCount++
-              account.todayLotteryWinCount++
-              account.lotteryWonDiamonds += Number(outcome.winDiamonds || 0)
-              account.todayLotteryWonDiamonds += Number(outcome.winDiamonds || 0)
               addLog(`🎉 [${account.nickname}] 恭喜！福袋中奖了！`, 'success')
             }
           }
         }
-      } else if (type === 'redpacket' && data?.receive_info?.is_win) {
-        const reward = Number(
-          data?.receive_info?.amount ??
-          data?.receive_info?.diamond_count ??
-          data?.receive_info?.diamond ??
-          0
-        ) || 0
+      } else if (type === 'redpacket') {
+        const outcome = parseRedPacketOutcome(data)
+        if (!outcome?.isWin) return
+        const reward = Number(outcome.reward || 0)
         account.redPacketWinCount++
         account.todayRedPacketWinCount++
         account.redPacketWonDiamonds += reward
@@ -410,13 +588,18 @@ onMounted(async () => {
         addLog(`🧧 [${account.nickname}] 领取红包成功：${reward} 钻石`, 'success')
       } else if (type === 'wallet' && data?.diamond !== undefined) {
         const currentWallet = Number(data.diamond || 0)
+        let rewardDelta = 0
         if (account.lastWalletDiamond !== null && currentWallet > account.lastWalletDiamond) {
-          account.todayEarnedDiamonds += (currentWallet - account.lastWalletDiamond)
+          rewardDelta = currentWallet - account.lastWalletDiamond
+          account.todayEarnedDiamonds += rewardDelta
         } else if (account.lastWalletDiamond !== null && currentWallet < account.lastWalletDiamond) {
           account.todayConsumedDiamonds += (account.lastWalletDiamond - currentWallet)
         }
         account.lastWalletDiamond = currentWallet
         account.totalDiamonds = currentWallet
+        if (rewardDelta > 0) {
+          applyWalletWinFallback(accountId, account, rewardDelta)
+        }
       }
     })
     ipcUnsubscribers.push(offDouyinResponse)
@@ -427,6 +610,12 @@ onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
   window.removeEventListener('beforeunload', handleBeforeUnload)
   stopPoolDispatchPolling()
+  if (accountUpdateFlushTimer) clearTimeout(accountUpdateFlushTimer)
+  if (lotteryListFlushTimer) clearTimeout(lotteryListFlushTimer)
+  if (logFlushTimer) clearTimeout(logFlushTimer)
+  flushPendingAccountUpdates()
+  flushPendingLotteryListUpdates()
+  flushPendingLogs()
   handleBeforeUnload()
   ipcUnsubscribers.forEach(off => {
     try { off && off() } catch (_) {}
@@ -469,46 +658,57 @@ function stopPoolDispatchPolling() {
     clearInterval(poolDispatchTimer)
     poolDispatchTimer = null
   }
+  if (poolLearningTimer) {
+    clearInterval(poolLearningTimer)
+    poolLearningTimer = null
+  }
 }
 
 /**
  * refreshPoolDispatchSummary 方法：刷新服务端调度摘要。
  */
 async function refreshPoolDispatchSummary() {
+  if (poolDispatchInflight) return
   const enabled = config.value.poolServer?.enabled !== false && Boolean(config.value.poolServer?.url)
   if (!enabled) {
     poolDispatchSummary.value = createEmptyPoolDispatchSummary({ enabled: false })
     return
   }
 
-  const res = await lotteryManager.fetchPoolTaskDebugSnapshot(config.value, { limit: 50 })
-  if (!res?.ok) {
+  poolDispatchInflight = true
+  try {
+    const res = await lotteryManager.fetchPoolTaskDebugSnapshot(config.value, { limit: 50 })
+    if (!res?.ok) {
+      poolDispatchSummary.value = createEmptyPoolDispatchSummary({
+        enabled: true,
+        connected: false,
+        error: res?.error || 'task_debug_failed'
+      })
+      return
+    }
+
+    const summary = res.data?.summary || {}
     poolDispatchSummary.value = createEmptyPoolDispatchSummary({
       enabled: true,
-      connected: false,
-      error: res?.error || 'task_debug_failed'
+      connected: true,
+      activeCandidates: Number(summary.activeCandidates || 0),
+      validCandidates: Number(summary.validCandidates || 0),
+      availableCandidates: Number(summary.availableCandidates || 0),
+      leaseCount: Number(summary.leaseCount || 0),
+      clientLeaseCount: Number(summary.clientLeaseCount || 0),
+      accountLeaseCount: Number(summary.accountLeaseCount || 0),
+      updatedAt: Number(summary.generatedAt || Date.now())
     })
-    return
+  } finally {
+    poolDispatchInflight = false
   }
-
-  const summary = res.data?.summary || {}
-  poolDispatchSummary.value = createEmptyPoolDispatchSummary({
-    enabled: true,
-    connected: true,
-    activeCandidates: Number(summary.activeCandidates || 0),
-    validCandidates: Number(summary.validCandidates || 0),
-    availableCandidates: Number(summary.availableCandidates || 0),
-    leaseCount: Number(summary.leaseCount || 0),
-    clientLeaseCount: Number(summary.clientLeaseCount || 0),
-    accountLeaseCount: Number(summary.accountLeaseCount || 0),
-    updatedAt: Number(summary.generatedAt || Date.now())
-  })
 }
 
 /**
  * refreshPoolLearningDebug 方法：刷新服务端学习桶调试快照。
  */
 async function refreshPoolLearningDebug() {
+  if (poolLearningInflight) return
   const enabled = config.value.poolServer?.enabled !== false && Boolean(config.value.poolServer?.url)
   if (!enabled) {
     poolLearningDebug.value = {
@@ -520,6 +720,7 @@ async function refreshPoolLearningDebug() {
     return
   }
 
+  poolLearningInflight = true
   poolLearningLoading.value = true
   try {
     const res = await lotteryManager.fetchPoolLearningDebugSnapshot({ limit: 60 })
@@ -540,6 +741,7 @@ async function refreshPoolLearningDebug() {
     }
   } finally {
     poolLearningLoading.value = false
+    poolLearningInflight = false
   }
 }
 
@@ -555,8 +757,10 @@ function restartPoolDispatchPolling() {
   }
   poolDispatchTimer = setInterval(() => {
     refreshPoolDispatchSummary()
+  }, POOL_SUMMARY_POLL_MS)
+  poolLearningTimer = setInterval(() => {
     refreshPoolLearningDebug()
-  }, 6000)
+  }, POOL_LEARNING_POLL_MS)
 }
 
 /**
@@ -617,6 +821,18 @@ function clearLotteryOutcomeCacheByAccount(accountId) {
   for (const key of Array.from(countedLotteryWinKeys)) {
     if (key.startsWith(prefix)) countedLotteryWinKeys.delete(key)
   }
+  for (const key of Array.from(countedWalletFallbackKeys)) {
+    if (key.startsWith(prefix)) countedWalletFallbackKeys.delete(key)
+  }
+}
+
+/**
+ * isTruthyWinFlag 方法：兼容布尔值/数字/字符串形式的中奖标记。
+ */
+function isTruthyWinFlag(value) {
+  if (value === true) return true
+  const normalized = String(value ?? '').trim().toLowerCase()
+  return normalized === '1' || normalized === 'true' || normalized === 'yes'
 }
 
 /**
@@ -657,6 +873,27 @@ function parseLotteryOutcome(raw) {
 }
 
 /**
+ * parseRedPacketOutcome 方法：解析红包领取结果，兼容多种返回字段。
+ */
+function parseRedPacketOutcome(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const receiveInfo = raw.receive_info || raw.receiveInfo || raw.data?.receive_info || null
+  if (!receiveInfo || typeof receiveInfo !== 'object') return null
+  const isWin = isTruthyWinFlag(receiveInfo.is_win) ||
+    Number(receiveInfo.win_status || 0) === 1 ||
+    Number(receiveInfo.status || 0) === 2
+  if (!isWin) return null
+  const reward = Number(
+    receiveInfo.amount ??
+    receiveInfo.diamond_count ??
+    receiveInfo.diamond ??
+    receiveInfo.reward_amount ??
+    0
+  ) || 0
+  return { isWin: true, reward }
+}
+
+/**
  * updateLotteryHistoryOutcome 方法：更新福袋历史记录开奖结果。
  */
 function updateLotteryHistoryOutcome(accountId, outcome) {
@@ -694,6 +931,88 @@ function updateLotteryHistoryOutcome(accountId, outcome) {
   }
   lotteryHistory.value[index] = nextRecord
   return { updated: true, record: nextRecord }
+}
+
+/**
+ * incrementLotteryWinStats 方法：累计账号福袋中奖统计，并做去重保护。
+ */
+function incrementLotteryWinStats(account, accountId, lotteryId, rewardAmount = 0) {
+  if (!account) return false
+  const key = makeLotteryOutcomeKey(accountId, lotteryId) || `${accountId}:wallet-fallback:${String(lotteryId || '').trim() || Date.now()}`
+  if (countedLotteryWinKeys.has(key)) return false
+  countedLotteryWinKeys.add(key)
+  account.lotteryWinCount++
+  account.todayLotteryWinCount++
+  account.lotteryWonDiamonds += Number(rewardAmount || 0)
+  account.todayLotteryWonDiamonds += Number(rewardAmount || 0)
+  return true
+}
+
+/**
+ * findPendingLotteryHistoryRecord 方法：查找当前账号最可能对应本次到账的待开奖记录。
+ */
+function findPendingLotteryHistoryRecord(accountId) {
+  const now = Date.now()
+  let bestIndex = -1
+  let bestDistance = Number.POSITIVE_INFINITY
+
+  lotteryHistory.value.forEach((item, index) => {
+    if (item.accountId !== accountId) return
+    if (String(item.resultStatus || 'pending') !== 'pending') return
+    const endTime = Number(item.endTime || 0)
+    const joinedAt = Number(item.joinedAt || 0)
+    const anchorTime = endTime > 0 ? endTime : joinedAt
+    if (!anchorTime) return
+    const distance = Math.abs(now - anchorTime)
+    if (distance > 10 * 60 * 1000) return
+    if (distance < bestDistance) {
+      bestDistance = distance
+      bestIndex = index
+    }
+  })
+
+  if (bestIndex < 0) return null
+  return {
+    index: bestIndex,
+    record: lotteryHistory.value[bestIndex]
+  }
+}
+
+/**
+ * applyWalletWinFallback 方法：当钱包已到账但开奖结果事件未到时，用待开奖记录兜底回填中奖统计。
+ */
+function applyWalletWinFallback(accountId, account, rewardDelta) {
+  const reward = Number(rewardDelta || 0)
+  if (!account || reward <= 0) return false
+
+  const matched = findPendingLotteryHistoryRecord(accountId)
+  if (!matched?.record) return false
+
+  const record = matched.record
+  const lotteryId = String(record.lotteryId || '').trim()
+  const fallbackKey = lotteryId
+    ? makeLotteryOutcomeKey(accountId, lotteryId)
+    : `${accountId}:wallet-fallback:${matched.index}:${Number(record.joinedAt || 0)}`
+  if (!fallbackKey || countedWalletFallbackKeys.has(fallbackKey)) return false
+
+  countedWalletFallbackKeys.add(fallbackKey)
+
+  const nextRecord = {
+    ...record,
+    resultStatus: 'won',
+    resultReason: '中奖',
+    rewardAmount: reward
+  }
+  lotteryHistory.value[matched.index] = nextRecord
+  incrementLotteryWinStats(account, accountId, lotteryId || fallbackKey, reward)
+  addLog(`🎉 [${account.nickname}] 已按到账结果回填福袋中奖：${reward} 钻石`, 'success')
+  reportLotteryOutcomeFeedback(accountId, nextRecord, {
+    lotteryId,
+    isWin: true,
+    drawFinished: true,
+    winDiamonds: reward
+  }).catch(() => {})
+  return true
 }
 
 /**
@@ -957,31 +1276,50 @@ function addAccount() {
     token: null
   })
   addLog(`请为 ${acc.nickname} 扫码登录，登录成功后才会加入账号列表`)
-  startAccountWithLogin(acc)
+  startAccountWithLogin(acc, {
+    autoStartAfterLogin: true
+  })
+}
+
+/**
+ * restartAccountWithLogin 方法：当现有账号 token 失效时，复用原账号重新扫码登录并在成功后自动恢复启动。
+ */
+function restartAccountWithLogin(account, reason = '') {
+  if (!account?.id) return
+  lotteryManager.stopAccount(account.id)
+  clearAccountDispatchState(account)
+  pendingCreateAccountIds.add(account.id)
+  account.token = null
+  account.state = 'opened'
+  ipcRenderer?.invoke?.('delete-token', account.id).catch(() => {})
+  if (reason) {
+    addLog(`⚠️ 账号 ${account.nickname} ${reason}，请重新扫码登录，登录成功后将更新当前账号并自动继续`, 'warning')
+  } else {
+    addLog(`⚠️ 账号 ${account.nickname} 需要重新扫码登录，登录成功后将更新当前账号并自动继续`, 'warning')
+  }
+  startAccountWithLogin(account, {
+    autoStartAfterLogin: true,
+    keepExistingAccount: true
+  })
 }
 
 /**
  * startAccountWithLogin 方法：启动账号登录。
  */
-async function startAccountWithLogin(account) {
+async function startAccountWithLogin(account, options = {}) {
   if (!ipcRenderer) {
     pendingCreateAccountIds.delete(account.id)
     return
   }
 
   let timer = null
-  let timeoutTimer = null
   /**
-   * clearLoginWatchers 方法：清理登录轮询与超时定时器，避免重复触发。
+   * clearLoginWatchers 方法：清理登录轮询定时器，避免重复触发。
    */
   const clearLoginWatchers = () => {
     if (timer) {
       clearInterval(timer)
       timer = null
-    }
-    if (timeoutTimer) {
-      clearTimeout(timeoutTimer)
-      timeoutTimer = null
     }
   }
 
@@ -994,55 +1332,65 @@ async function startAccountWithLogin(account) {
     account.state = 'opened'
     await ipcRenderer.invoke('navigate-to', { accountId: account.id, url: 'https://www.douyin.com' })
     timer = setInterval(async () => {
+      if (!pendingCreateAccountIds.has(account.id)) {
+        clearLoginWatchers()
+        return
+      }
       const tr = await ipcRenderer.invoke('get-login-token', account.id)
       if (tr.success && tr.isLoggedIn) {
         clearLoginWatchers()
-        const info = await resolveUserInfoWithRetry(account.id, tr.userInfo)
+        const stableSnapshot = await resolveStableLoginSnapshot(account.id, tr)
+        const stableTokenInfo = stableSnapshot?.tokenInfo || tr.tokenInfo
+        const stableUserInfo = stableSnapshot?.userInfo || tr.userInfo
+        const info = await resolveUserInfoWithRetry(account.id, stableUserInfo)
         const fallbackInfo = {
           nickname: account.nickname,
           userId: account.userId || account.id
         }
-        let saveResult = await ipcRenderer.invoke('save-token', { accountId: account.id, tokenInfo: tr.tokenInfo, userInfo: info })
+        let saveResult = await ipcRenderer.invoke('save-token', { accountId: account.id, tokenInfo: stableTokenInfo, userInfo: info })
         if (!saveResult.success) {
-          saveResult = await ipcRenderer.invoke('save-token', { accountId: account.id, tokenInfo: tr.tokenInfo, userInfo: fallbackInfo })
+          saveResult = await ipcRenderer.invoke('save-token', { accountId: account.id, tokenInfo: stableTokenInfo, userInfo: fallbackInfo })
         }
+        const persistedTokenResult = await ipcRenderer.invoke('load-token', account.id).catch(() => ({ success: false }))
+        const persistedTokenInfo = persistedTokenResult?.success && persistedTokenResult?.tokenInfo
+          ? persistedTokenResult.tokenInfo
+          : stableTokenInfo
 
         const finalNickname = normalizeNickname(info?.nickname || saveResult.savedInfo?.nickname || account.nickname)
         const finalUserId = info?.userId || saveResult.savedInfo?.userId || account.userId || account.id
         const nextState = {
           nickname: finalNickname,
           userId: finalUserId,
-          token: tr.tokenInfo.sessionid || tr.tokenInfo.sessionid_ss,
+          token: persistedTokenInfo.sessionid || persistedTokenInfo.sessionid_ss,
           state: 'waiting'
         }
-        const index = accounts.value.findIndex(a => a.id === account.id)
-        if (index >= 0) {
-          accounts.value[index] = {
-            ...accounts.value[index],
-            ...nextState
-          }
-        } else {
-          accounts.value.push(createAccountModel({
-            ...account,
-            ...nextState
-          }))
-        }
+        const updatedAccount = upsertLoggedInAccount(account, nextState, options)
         pendingCreateAccountIds.delete(account.id)
 
         if (saveResult.success) {
-          addLog(`✅ [${finalNickname}] 登录成功`, 'success')
+          addLog(`✅ [${finalNickname}] 登录成功，账号列表已更新`, 'success')
         } else {
-          addLog(`⚠️ [${finalNickname}] 登录成功，但本地保存信息不完整`, 'warning')
+          addLog(`⚠️ [${finalNickname}] 登录成功，账号列表已更新，但本地保存信息不完整`, 'warning')
+        }
+
+        if (options.autoStartAfterLogin === true) {
+          const latestAccount = updatedAccount || accounts.value.find(a => a.id === account.id)
+          if (latestAccount) {
+            setTimeout(() => {
+              startAccountScanning(latestAccount, {
+                reuseLoggedInBrowser: true,
+                tokenInfo: persistedTokenInfo
+              })
+            }, 300)
+          }
         }
       }
     }, 3000)
-    timeoutTimer = setTimeout(() => {
-      if (!pendingCreateAccountIds.has(account.id)) return
-      clearLoginWatchers()
-      pendingCreateAccountIds.delete(account.id)
-      addLog(`⚠️ [${account.nickname}] 60秒内未检测到登录成功，未加入账号列表`, 'warning')
-    }, 60000)
-  } catch (e) { addLog(`错误: ${e.message}`, 'error') }
+  } catch (e) {
+    pendingCreateAccountIds.delete(account.id)
+    clearLoginWatchers()
+    addLog(`错误: ${e.message}`, 'error')
+  }
   finally {
     if (!pendingCreateAccountIds.has(account.id)) {
       clearLoginWatchers()
@@ -1067,38 +1415,45 @@ function toggleAccount(account) {
 /**
  * startAccountScanning 方法：启动账号扫描。
  */
-async function startAccountScanning(account) {
-  if (!account.token || !ipcRenderer) return
+async function startAccountScanning(account, options = {}) {
+  const providedTokenInfo = options?.tokenInfo || null
+  const reuseLoggedInBrowser = options?.reuseLoggedInBrowser === true
+  if ((!account.token && !providedTokenInfo) || !ipcRenderer) return
   if (account._starting) return
   account._starting = true
   try {
-    const lr = await ipcRenderer.invoke('launch-browser', account.id)
-    if (!lr.success) return
-    const tr = await ipcRenderer.invoke('load-token', account.id)
-    if (!tr.success) return
-    const setRes = await ipcRenderer.invoke('set-cookies', { accountId: account.id, tokenInfo: tr.tokenInfo })
-    if (!setRes?.success || setRes?.isLoginCookieReady === false) {
-      addLog(`账号 ${account.nickname} Token写入失败: ${setRes?.error || '关键登录cookie未写入成功'}`, 'error')
-      account.state = 'waiting'
-      return
+    if (!reuseLoggedInBrowser) {
+      const lr = await ipcRenderer.invoke('launch-browser', account.id)
+      if (!lr.success) return
+      const tr = await ipcRenderer.invoke('load-token', account.id)
+      if (!tr.success || !tr.tokenInfo) {
+        account.state = 'waiting'
+        restartAccountWithLogin(account, '本地 Token 已失效或不存在')
+        return
+      }
+      const setRes = await ipcRenderer.invoke('set-cookies', { accountId: account.id, tokenInfo: tr.tokenInfo })
+      if (!setRes?.success || setRes?.isLoginCookieReady === false) {
+        account.state = 'waiting'
+        restartAccountWithLogin(account, `Token 写入失败: ${setRes?.error || '关键登录 cookie 未写入成功'}`)
+        return
+      }
+      await ipcRenderer.invoke('navigate-to', { accountId: account.id, url: 'https://www.douyin.com' })
     }
-    await ipcRenderer.invoke('navigate-to', { accountId: account.id, url: 'https://www.douyin.com' })
     account.state = 'running'
     lotteryManager.startAccount(account, config.value, {
-      onStatusUpdate: (upd) => { const i = accounts.value.findIndex(a => a.id === upd.id); if(i !== -1) accounts.value[i] = { ...accounts.value[i], ...upd } },
-      onLotteryListUpdate: ({ accountId, list }) => {
-        const a = accounts.value.find(acc => acc.id === accountId)
-        lotteriesByAccount.value = {
-          ...lotteriesByAccount.value,
-          [accountId]: (list || []).map(item => ({
-          ...item,
-          _scanAccountId: accountId,
-            _scanAccountNickname: a?.nickname || accountId
-          }))
-        }
-      },
+      onStatusUpdate: (upd) => queueAccountUpdate(upd),
+      onLotteryListUpdate: ({ accountId, list }) => queueLotteryListUpdate(accountId, list),
       onHistoryRecord: (record) => appendLotteryHistory(record),
-      onLog: (m, t) => addLog(m, t)
+      onLog: (m, t) => addLog(m, t),
+      onTokenInvalid: async ({ id, reason }) => {
+        const latestAccount = accounts.value.find(item => item.id === id)
+        if (!latestAccount) return
+        latestAccount.state = 'waiting'
+        restartAccountWithLogin(latestAccount, reason || '本地 Token 已过期')
+      }
+    }, {
+      reuseLoggedInBrowser,
+      tokenInfo: providedTokenInfo
     })
   } catch (e) { addLog(`启动失败: ${e.message}`, 'error') }
   finally { account._starting = false }
@@ -1109,14 +1464,20 @@ async function startAccountScanning(account) {
  */
 async function removeAccount(id) {
   if (!ipcRenderer) return
+  const account = accounts.value.find(a => a.id === id)
+  const nickname = String(account?.nickname || id || '该账号').trim()
+  const confirmed = typeof window !== 'undefined'
+    ? window.confirm(`确认删除账号“${nickname}”？删除后需要重新扫码登录才能恢复。`)
+    : true
+  if (!confirmed) return
   lotteryManager.stopAccount(id)
   await ipcRenderer.invoke('delete-token', id)
   clearLotteryOutcomeCacheByAccount(id)
+  pendingAccountUpdates.delete(id)
+  pendingLotteryListUpdates.delete(id)
   accounts.value = accounts.value.filter(a => a.id !== id)
   if (lotteriesByAccount.value?.[id]) {
-    const next = { ...lotteriesByAccount.value }
-    delete next[id]
-    lotteriesByAccount.value = next
+    delete lotteriesByAccount.value[id]
   }
 }
 
@@ -1136,8 +1497,15 @@ function handleBlockRoom(roomId) {
  * addLog 方法：追加一条运行日志并驱动日志区域滚动更新。
  */
 function addLog(message, type = 'info') {
-  logs.value.push({ time: new Date().toLocaleTimeString(), message, type })
-  if (logs.value.length > 300) logs.value.shift()
+  const text = String(message || '')
+  if (FRONTEND_LOG_SUPPRESS_PATTERNS.some(pattern => pattern.test(text))) {
+    return
+  }
+  const entry = buildLogEntry(message, type)
+  if (tryMergeLogEntry(pendingLogs, entry)) return
+  if (tryMergeLogEntry(logs.value, entry)) return
+  pendingLogs.push(entry)
+  scheduleLogFlush()
 }
 </script>
 

@@ -235,3 +235,12 @@ func scoredCandidateKey(item ScoredCandidate) string {
 	}
 	return item.RoomID + ":" + item.LotteryID
 }
+
+func buildOwnerCandidateLeaseKey(owner ClaimOwner, candidateKey string) string {
+	normalized := normalizeClaimOwner(owner)
+	key := stringsTrim(candidateKey)
+	if normalized.ClientID == "" || normalized.AccountID == "" || key == "" {
+		return ""
+	}
+	return normalized.ClientID + "|" + normalized.AccountID + "|" + key
+}

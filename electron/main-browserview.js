@@ -58,6 +58,35 @@ function isHttpLikeUrl(url = '') {
   return /^https?:\/\//i.test(String(url || '').trim())
 }
 
+function rememberBrowserUrl(accountId, url = '') {
+  const browserData = browserViews.get(accountId)
+  const normalized = String(url || '').trim()
+  if (!browserData || !normalized || !isHttpLikeUrl(normalized)) return
+  browserData.lastUrl = normalized
+}
+
+function scheduleBrowserRecovery(accountId, reason = '', fallbackUrl = 'https://live.douyin.com') {
+  const browserData = browserViews.get(accountId)
+  if (!browserData || !browserData.window || browserData.window.isDestroyed()) return
+  const now = Date.now()
+  const lastRecoverAt = Number(browserData.lastRecoverAt || 0)
+  if (now - lastRecoverAt < 8000) return
+  browserData.lastRecoverAt = now
+  if (browserData.recoveryTimer) {
+    clearTimeout(browserData.recoveryTimer)
+    browserData.recoveryTimer = null
+  }
+  const targetUrl = isHttpLikeUrl(browserData.lastUrl) ? browserData.lastUrl : fallbackUrl
+  logger.warn(`[${accountId}] 页面异常，准备恢复: ${reason || 'unknown'} -> ${targetUrl}`)
+  browserData.recoveryTimer = setTimeout(() => {
+    const latest = browserViews.get(accountId)
+    if (!latest || !latest.window || latest.window.isDestroyed()) return
+    latest.window.loadURL(targetUrl).catch((error) => {
+      logger.error(`[${accountId}] 页面恢复失败: ${targetUrl}`, error)
+    })
+  }, 1200)
+}
+
 logger.debug(`Token存储路径: ${tokenStorePath}`)
 
 // 关闭后台节流，避免窗口最小化/被全屏窗口遮挡时脚本冻结
@@ -257,6 +286,89 @@ async function getAccountCookiesAndString(accountId) {
   return { cookies, cookieString }
 }
 
+function normalizeCookieSnapshotItem(cookie = {}) {
+  const name = String(cookie?.name || '').trim()
+  const value = String(cookie?.value || '').trim()
+  if (!name || !value) return null
+  const domain = String(cookie?.domain || '').trim()
+  const pathValue = String(cookie?.path || '/').trim() || '/'
+  const sameSiteRaw = String(cookie?.sameSite || 'unspecified').trim().toLowerCase()
+  const sameSite = ['no_restriction', 'lax', 'strict', 'unspecified'].includes(sameSiteRaw)
+    ? sameSiteRaw
+    : 'unspecified'
+  return {
+    name,
+    value,
+    domain,
+    path: pathValue,
+    secure: cookie?.secure !== false,
+    httpOnly: !!cookie?.httpOnly,
+    session: !!cookie?.session,
+    expirationDate: Number(cookie?.expirationDate || 0),
+    sameSite
+  }
+}
+
+function buildCookieSnapshot(cookies = []) {
+  return (Array.isArray(cookies) ? cookies : [])
+    .map(normalizeCookieSnapshotItem)
+    .filter(Boolean)
+}
+
+function parseCookieString(cookieString = '') {
+  const result = {}
+  String(cookieString || '')
+    .split(';')
+    .forEach((item) => {
+      const index = item.indexOf('=')
+      if (index <= 0) return
+      const key = item.slice(0, index).trim()
+      const value = item.slice(index + 1).trim()
+      if (key) result[key] = value
+    })
+  return result
+}
+
+function resolveCookieUrlFromSnapshot(cookie = {}) {
+  const domain = String(cookie?.domain || '').replace(/^\./, '').trim().toLowerCase()
+  if (domain.includes('live.douyin.com')) return 'https://live.douyin.com/'
+  return 'https://www.douyin.com/'
+}
+
+async function restoreCookieSnapshot(accountSession, snapshot = [], currentTime) {
+  let setCount = 0
+  const status = {}
+  for (const item of Array.isArray(snapshot) ? snapshot : []) {
+    const normalized = normalizeCookieSnapshotItem(item)
+    if (!normalized) continue
+    const payload = {
+      url: resolveCookieUrlFromSnapshot(normalized),
+      name: normalized.name,
+      value: normalized.value,
+      path: normalized.path || '/',
+      secure: normalized.secure !== false,
+      httpOnly: !!normalized.httpOnly,
+      sameSite: normalized.sameSite || 'unspecified'
+    }
+    if (normalized.domain) {
+      payload.domain = normalized.domain
+    }
+    if (!normalized.session) {
+      const expiry = Number(normalized.expirationDate || 0)
+      payload.expirationDate = expiry > currentTime ? expiry : (currentTime + 86400 * 30)
+    }
+    try {
+      await accountSession.cookies.set(payload)
+      setCount += 1
+      status[normalized.name] = 'ok'
+    } catch (error) {
+      status[normalized.name] = 'failed'
+      logger.debug(`restoreCookieSnapshot failed (${normalized.name})`, error)
+    }
+  }
+  return { setCount, status }
+}
+
 /**
  * safeGetAccountCookieString 方法：获取账号 cookie header 字符串（失败时返回空串）。
  */
@@ -330,10 +442,15 @@ function normalizeUserInfo(raw, method) {
  */
 async function fetchUserInfoFromApis(cookieString) {
   if (!cookieString) return null
+  const cookieMap = parseCookieString(cookieString)
   const commonHeaders = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'Accept': 'application/json, text/plain, */*',
     'Cookie': cookieString
+  }
+  if (cookieMap.passport_csrf_token) {
+    commonHeaders['x-tt-passport-csrf-token'] = cookieMap.passport_csrf_token
+    commonHeaders['x-secsdk-csrf-token'] = cookieMap.passport_csrf_token
   }
 
   // 参考“福袋助手”优先使用 creator 接口
@@ -366,9 +483,9 @@ async function fetchUserInfoFromApis(cookieString) {
 }
 
 /**
- * fetchUserInfoFromPage 方法：请求并获取用户信息分页。
+ * inspectPageAuthState 方法：检测当前页面是否处于显式未登录态，并尝试从页面状态中提取用户信息。
  */
-async function fetchUserInfoFromPage(webContents) {
+async function inspectPageAuthState(webContents) {
   try {
     const result = await webContents.executeJavaScript(`
       (function() {
@@ -377,37 +494,58 @@ async function fetchUserInfoFromPage(webContents) {
           if (fromState) {
             const nick = fromState.nickname || fromState.nickName || fromState.nick_name;
             const uid = fromState.sec_uid || fromState.secUid || fromState.uid;
-            if (nick) return { nickname: nick, userId: uid || null, method: 'dom_state' };
+            return {
+              authenticated: !!nick,
+              nickname: nick || '',
+              userId: uid || null,
+              method: 'dom_state'
+            };
           }
 
-          const userLinks = document.querySelectorAll('a[href*="/user/"]');
-          for (const link of userLinks) {
-            const href = link.getAttribute('href') || '';
-            const match = href.match(/\\/user\\/([^?/]+)/);
-            const text = (link.textContent || '').trim();
-            if (match && text && text.length < 50 && !text.includes('登录')) {
-              return { nickname: text, userId: match[1], method: 'dom_link' };
-            }
+          const candidates = Array.from(document.querySelectorAll('a[href*="/user/"]'));
+          for (const anchor of candidates) {
+            const rect = anchor.getBoundingClientRect();
+            if (!rect || rect.width < 20 || rect.height < 20) continue;
+            if (rect.top < -8 || rect.top > 180) continue;
+            if (rect.left < (window.innerWidth - 340)) continue;
+            const href = anchor.getAttribute('href') || '';
+            const match = href.match(/\\/user\\/([^/?#]+)/);
+            const img = anchor.querySelector('img');
+            const nick = (anchor.getAttribute('title')
+              || anchor.getAttribute('aria-label')
+              || img?.getAttribute('alt')
+              || '').trim();
+            return {
+              authenticated: true,
+              nickname: nick,
+              userId: match ? match[1] : null,
+              method: 'dom_avatar'
+            };
           }
-
-          const metaTitle = document.querySelector('meta[property="og:title"]')?.content || '';
-          const m = metaTitle.match(/(.+)的抖音/);
-          if (m && m[1]) return { nickname: m[1], userId: null, method: 'dom_meta' };
         } catch (_) {}
-        return null;
+        return {
+          authenticated: false,
+          nickname: '',
+          userId: null,
+          method: 'dom_state'
+        };
       })()
     `, true)
-    if (result?.nickname) {
-      return {
-        method: result.method || 'dom',
-        nickname: result.nickname,
-        userId: result.userId || null
-      }
+    return {
+      authenticated: !!result?.authenticated,
+      nickname: result?.nickname || '',
+      userId: result?.userId || null,
+      method: result?.method || 'dom_state'
     }
   } catch (e) {
-    logger.info(`[user-info] 页面兜底失败: ${e.message}`)
+    logger.info(`[user-info] 页面登录态检测失败: ${e.message}`)
   }
-  return null
+  return {
+    authenticated: false,
+    nickname: '',
+    userId: null,
+    method: 'dom_state'
+  }
 }
 
 /**
@@ -425,8 +563,14 @@ async function resolveUserInfo(accountId, options = {}) {
   const apiInfo = await fetchUserInfoFromApis(cookieString)
   if (apiInfo?.nickname) return apiInfo
 
-  const pageInfo = await fetchUserInfoFromPage(browserData.window.webContents)
-  if (pageInfo?.nickname) return pageInfo
+  const pageState = await inspectPageAuthState(browserData.window.webContents)
+  if (pageState?.nickname) {
+    return {
+      method: pageState.method || 'dom_state',
+      nickname: pageState.nickname,
+      userId: pageState.userId || null
+    }
+  }
 
   return null
 }
@@ -716,7 +860,11 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
     browserViews.set(accountId, {
       window: browserWindow,
       session: accountSession,
-      partition: partition
+      partition: partition,
+      lastUrl: 'https://www.douyin.com',
+      lastRecoverAt: 0,
+      recoveryTimer: null,
+      debuggerBound: false
     })
 
     // session 级拦截：拒绝 openExternal，避免触发系统协议弹窗
@@ -753,6 +901,7 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
       }
       // http/https 正常在当前窗口打开
       if (isHttpLikeUrl(url)) {
+        rememberBrowserUrl(accountId, url)
         browserWindow.loadURL(url).catch((e) => {
           logger.debug(`[${accountId}] 外链当前窗打开失败: ${url}`, e)
         })
@@ -780,9 +929,44 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
       }
     })
     
+    const bindDebuggerHooks = () => {
+      const browserData = browserViews.get(accountId)
+      if (!browserData || browserData.debuggerBound === true) return
+      browserData.debuggerBound = true
+      const wc = browserWindow.webContents
+      wc.debugger.on('detach', (event, reason) => {
+        logger.info(`[${accountId}] Debugger detached:`, reason)
+      })
+      wc.debugger.on('message', async (event, method, params) => {
+        if (method !== 'Network.responseReceived') return
+        const { url } = params.response
+        const requestId = params.requestId
+
+        const isLottery = url.includes('webcast/lottery/melon/check_user_right')
+        const isRedPacket = url.includes('webcast/luckybox/receive')
+        const isWallet = url.includes('webcast/wallet/info')
+
+        if (isLottery || isRedPacket || isWallet) {
+          try {
+            const { body } = await wc.debugger.sendCommand('Network.getResponseBody', { requestId })
+            const json = JSON.parse(body)
+
+            mainWindow.webContents.send('douyin-response', {
+              accountId,
+              type: isLottery ? 'lottery' : (isRedPacket ? 'redpacket' : 'wallet'),
+              data: json.data
+            })
+          } catch (e) {
+            logger.debug(`[${accountId}] 读取网络响应体失败`, e)
+          }
+        }
+      })
+    }
+
     // 监听页面加载完成
     browserWindow.webContents.on('did-finish-load', () => {
-    logger.debug(`[${accountId}] 页面加载完成`)
+      logger.debug(`[${accountId}] 页面加载完成`)
+      rememberBrowserUrl(accountId, browserWindow.webContents.getURL())
       try {
         browserWindow.webContents.setAudioMuted(true)
       } catch (e) {
@@ -795,37 +979,8 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
         if (!wc.debugger.isAttached()) {
           wc.debugger.attach('1.3')
         }
-        wc.debugger.on('detach', (event, reason) => {
-          logger.info(`[${accountId}] Debugger detached:`, reason)
-        })
+        bindDebuggerHooks()
         wc.debugger.sendCommand('Network.enable')
-        wc.debugger.on('message', async (event, method, params) => {
-          if (method === 'Network.responseReceived') {
-            const { url } = params.response
-            const requestId = params.requestId
-            
-            // 监听关键接口
-            const isLottery = url.includes('webcast/lottery/melon/check_user_right')
-            const isRedPacket = url.includes('webcast/luckybox/receive')
-            const isWallet = url.includes('webcast/wallet/info')
-            
-            if (isLottery || isRedPacket || isWallet) {
-              try {
-                const { body } = await wc.debugger.sendCommand('Network.getResponseBody', { requestId })
-                const json = JSON.parse(body)
-                
-                // 发送到渲染进程
-                mainWindow.webContents.send('douyin-response', {
-                  accountId,
-                  type: isLottery ? 'lottery' : (isRedPacket ? 'redpacket' : 'wallet'),
-                  data: json.data
-                })
-              } catch (e) {
-                logger.debug(`[${accountId}] 读取网络响应体失败`, e)
-              }
-            }
-          }
-        })
       } catch (err) {
         logger.error(`[${accountId}] Debugger attach error:`, err)
       }
@@ -833,6 +988,7 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
 
     // 页面跳转后再次强制静音，防止站点恢复音量
     browserWindow.webContents.on('did-navigate', () => {
+      rememberBrowserUrl(accountId, browserWindow.webContents.getURL())
       try {
         browserWindow.webContents.setAudioMuted(true)
       } catch (e) {
@@ -840,16 +996,35 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
       }
     })
     browserWindow.webContents.on('did-navigate-in-page', () => {
+      rememberBrowserUrl(accountId, browserWindow.webContents.getURL())
       try {
         browserWindow.webContents.setAudioMuted(true)
       } catch (e) {
         logger.debug(`[${accountId}] did-navigate-in-page 静音失败`, e)
       }
     })
+    browserWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame || errorCode === -3) return
+      logger.warn(`[${accountId}] 页面加载失败: ${validatedURL} (${errorCode}) ${errorDescription}`)
+      rememberBrowserUrl(accountId, validatedURL)
+      scheduleBrowserRecovery(accountId, `did-fail-load:${errorCode}`, validatedURL)
+    })
+    browserWindow.webContents.on('render-process-gone', (event, details) => {
+      logger.error(`[${accountId}] 渲染进程异常退出: ${details?.reason || 'unknown'}`)
+      scheduleBrowserRecovery(accountId, `render-process-gone:${details?.reason || 'unknown'}`)
+    })
+    browserWindow.webContents.on('unresponsive', () => {
+      logger.warn(`[${accountId}] 页面无响应，尝试恢复`)
+      scheduleBrowserRecovery(accountId, 'unresponsive')
+    })
     
     // 监听窗口关闭
     browserWindow.on('closed', () => {
       logger.info(`[${accountId}] 窗口已关闭`)
+      const browserData = browserViews.get(accountId)
+      if (browserData?.recoveryTimer) {
+        clearTimeout(browserData.recoveryTimer)
+      }
       browserViews.delete(accountId)
       
       // 通知渲染进程窗口已关闭，停止该账号的所有活动
@@ -889,7 +1064,7 @@ ipcMain.handle('navigate-to', async (event, { accountId, url }) => {
     if (isBlockedExternalProtocol(url) || !isHttpLikeUrl(url)) {
       throw new Error(`禁止导航到外部协议: ${url}`)
     }
-    
+    rememberBrowserUrl(accountId, url)
     await browserData.window.loadURL(url)
     return { success: true }
   } catch (error) {
@@ -898,16 +1073,30 @@ ipcMain.handle('navigate-to', async (event, { accountId, url }) => {
   }
 })
 
-ipcMain.handle('execute-script', async (event, { accountId, script }) => {
+ipcMain.handle('execute-script', async (event, { accountId, script, timeoutMs = 4500 }) => {
   try {
     const browserData = browserViews.get(accountId)
     if (!browserData) {
       throw new Error('浏览器实例不存在')
     }
-    
-    const result = await browserData.window.webContents.executeJavaScript(script)
+
+    const safeTimeoutMs = Math.max(1200, Math.min(12000, Number(timeoutMs || 4500)))
+    const result = await Promise.race([
+      browserData.window.webContents.executeJavaScript(script),
+      new Promise((_, reject) => {
+        setTimeout(() => {
+          const error = new Error('执行脚本超时')
+          error.code = 'EXECUTE_TIMEOUT'
+          reject(error)
+        }, safeTimeoutMs)
+      })
+    ])
     return { success: true, result }
   } catch (error) {
+    if (String(error?.message || '').includes('执行脚本超时') || error?.code === 'EXECUTE_TIMEOUT') {
+      scheduleBrowserRecovery(accountId, 'execute-script-timeout')
+      return { success: false, error: '执行脚本超时', code: 'EXECUTE_TIMEOUT' }
+    }
     logger.error('执行脚本失败:', error)
     return { success: false, error: error.message }
   }
@@ -955,6 +1144,10 @@ ipcMain.handle('delete-token', async (event, accountId) => {
 ipcMain.handle('get-user-info', async (event, accountId) => {
   try {
     logger.info(`[${accountId}] 开始获取用户信息...`)
+    const browserData = browserViews.get(accountId)
+    if (!browserData) {
+      throw new Error('浏览器实例不存在')
+    }
     const userInfo = await resolveUserInfo(accountId, { waitMs: 1500 })
     
     if (userInfo && userInfo.nickname) {
@@ -1019,9 +1212,15 @@ ipcMain.handle('get-login-token', async (event, accountId) => {
         tokenInfo[cookie.name] = cookie.value
       }
     })
+    tokenInfo.cookieSnapshot = buildCookieSnapshot(cookies)
     
-    const isLoggedIn = !!tokenInfo.sessionid || !!tokenInfo.sessionid_ss
-    
+    const hasSessionCookie = !!tokenInfo.sessionid || !!tokenInfo.sessionid_ss
+    const browserData = browserViews.get(accountId)
+    const pageState = browserData
+      ? await inspectPageAuthState(browserData.window.webContents)
+      : { authenticated: false }
+    let isLoggedIn = hasSessionCookie
+
     // 尝试获取用户信息
     let userInfo = null
     if (isLoggedIn) {
@@ -1036,13 +1235,15 @@ ipcMain.handle('get-login-token', async (event, accountId) => {
         logger.info('⚠️ 获取用户信息异常:', e.message)
       }
     }
+    isLoggedIn = hasSessionCookie && (!!userInfo?.nickname || !!pageState?.authenticated)
     
     return { 
       success: true, 
       isLoggedIn,
       tokenInfo,
       userInfo,
-      cookieCount: cookies.length
+      cookieCount: cookies.length,
+      pageAuthenticated: !!pageState?.authenticated
     }
   } catch (error) {
     return { success: false, error: error.message }
@@ -1114,6 +1315,13 @@ ipcMain.handle('set-cookies', async (event, { accountId, tokenInfo }) => {
     
     let setCookieCount = 0
     const setStatus = {}
+
+    if (Array.isArray(tokenInfo?.cookieSnapshot) && tokenInfo.cookieSnapshot.length > 0) {
+      const snapshotResult = await restoreCookieSnapshot(browserData.session, tokenInfo.cookieSnapshot, currentTime)
+      setCookieCount += Number(snapshotResult.setCount || 0)
+      Object.assign(setStatus, snapshotResult.status || {})
+      logger.info(`✅ [${accountId}] 已恢复 cookie 快照: ${snapshotResult.setCount || 0} 项`)
+    }
     
     for (const name of cookieFields) {
       const rawValue = tokenInfo?.[name]

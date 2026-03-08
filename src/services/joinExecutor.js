@@ -22,7 +22,11 @@ async function executeScriptSafely(manager, accountId, script) {
     return { success: false, error: '账号已停止', code: 'ACCOUNT_STOPPED' }
   }
   try {
-    const result = await manager.ipc.invoke('execute-script', { accountId, script })
+    const result = await manager.ipc.invoke('execute-script', {
+      accountId,
+      script,
+      timeoutMs: 4500
+    })
     if (isBrowserGoneResult(result)) {
       return { success: false, error: '浏览器实例不存在', code: 'BROWSER_NOT_FOUND' }
     }
@@ -32,12 +36,15 @@ async function executeScriptSafely(manager, accountId, script) {
     if (message.includes('浏览器实例不存在')) {
       return { success: false, error: '浏览器实例不存在', code: 'BROWSER_NOT_FOUND' }
     }
+    if (message.includes('执行脚本超时')) {
+      return { success: false, error: '执行脚本超时', code: 'EXECUTE_TIMEOUT' }
+    }
     return { success: false, error: message, code: error?.code || 'EXECUTE_SCRIPT_FAILED' }
   }
 }
 
 /**
- * 等待直播间页面可用（域名、readyState、body）后再执行后续动作。
+ * 等待直播间页面真正渲染完成后再执行后续动作；疑似白板时自动重载一次当前直播间。
  * @param {object} manager LotteryManager 实例
  * @param {string} accountId 账号ID
  * @param {number} timeoutMs 超时时间
@@ -45,23 +52,73 @@ async function executeScriptSafely(manager, accountId, script) {
  */
 export async function waitForLiveRoomReady(manager, accountId, timeoutMs = 10000) {
   const start = Date.now()
+  let reloadedOnce = false
+
   while (Date.now() - start < timeoutMs) {
     if (!manager.accounts.has(accountId) || manager.isPaused(accountId)) return false
     const result = await executeScriptSafely(manager, accountId, `
       (() => {
-        const hrefOk = location.href.includes('live.douyin.com');
+        const href = String(location.href || '');
+        const hrefOk = href.includes('live.douyin.com');
         const stateOk = document.readyState === 'interactive' || document.readyState === 'complete';
-        const hasMain = !!document.querySelector('body');
-        return hrefOk && stateOk && hasMain;
+        const body = document.body;
+        const style = body ? window.getComputedStyle(body) : null;
+        const visible = !!body && style && style.display !== 'none' && style.visibility !== 'hidden';
+        const text = String(body?.innerText || '').replace(/\\s+/g, '');
+        const elementCount = document.querySelectorAll('body *').length;
+        const interactiveCount = document.querySelectorAll('button, a, input, textarea, [role="button"]').length;
+        const liveMarker = /(直播|福袋|关注|聊天|弹幕|在线|说点什么)/.test(text);
+        const ready = hrefOk && stateOk && visible && (
+          liveMarker ||
+          text.length >= 80 ||
+          (elementCount >= 40 && interactiveCount >= 3)
+        );
+        const blankLike = hrefOk && stateOk && visible && text.length < 20 && elementCount <= 8 && interactiveCount <= 1;
+        return {
+          ready,
+          blankLike,
+          href,
+          textLength: text.length,
+          elementCount,
+          interactiveCount
+        };
       })()
     `)
     if (isBrowserGoneResult(result)) {
       return false
     }
-    if (result?.success && result?.result === true) {
+
+    const snapshot = result?.success && result?.result && typeof result.result === 'object'
+      ? result.result
+      : null
+    if (snapshot?.ready === true) {
       return true
     }
-    await manager.sleep(350)
+
+    if (
+      !reloadedOnce &&
+      snapshot?.blankLike === true &&
+      Date.now() - start >= Math.min(3500, Math.floor(timeoutMs * 0.35))
+    ) {
+      reloadedOnce = true
+      try {
+        manager.accounts.get(accountId)?.callbacks?.onLog?.('⚠️ 直播页疑似白板，自动重载一次...', 'warning')
+      } catch (_) {
+        // ignore
+      }
+      const targetUrl = String(snapshot?.href || '').includes('live.douyin.com')
+        ? String(snapshot.href)
+        : 'https://live.douyin.com'
+      try {
+        await manager.ipc.invoke('navigate-to', { accountId, url: targetUrl })
+      } catch (_) {
+        // ignore
+      }
+      await manager.sleep(900)
+      continue
+    }
+
+    await manager.sleep(snapshot?.blankLike ? 520 : 350)
   }
   return false
 }
@@ -100,7 +157,7 @@ export async function warmupLotteryEntry(manager, accountId) {
 }
 
 /**
- * 关闭直播画面渲染，降低CPU/GPU压力并减少后台冻结风险。
+ * 关闭直播画面渲染，使用最保守的静音/暂停策略，避免切房后页面进入白板态。
  * @param {object} manager LotteryManager 实例
  * @param {string} accountId 账号ID
  * @returns {Promise<object>}
@@ -118,31 +175,8 @@ export async function closeLiveStreamRendering(manager, accountId) {
               if (typeof m.pause === 'function') m.pause();
             } catch (_) {}
           });
-
-          const btns = Array.from(document.querySelectorAll('button, div[role="button"], span'));
-          const hit = btns.find(el => {
-            const t = (el?.innerText || el?.textContent || '').trim();
-            return /(关闭画面|仅听声音|关闭直播流|省流模式)/.test(t);
-          });
-          if (hit && typeof hit.click === 'function') {
-            hit.click();
-          }
-
-          const styleId = '__dy_hide_live_stream_style__';
-          if (!document.getElementById(styleId)) {
-            const style = document.createElement('style');
-            style.id = styleId;
-            style.textContent = [
-              'video { opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; }',
-              '[class*="player"] video, [class*="live-player"] video, [id*="player"] video { opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; }',
-              'canvas[class*="video"], [class*="video-canvas"], canvas[id*="video"] { opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; }',
-              '[class*="player"][class*="container"], [class*="live-player"][class*="container"] { background: #111 !important; }'
-            ].join('\\n');
-            document.head.appendChild(style);
-          }
-
           const anyVideo = !!document.querySelector('video, canvas[class*="video"], canvas[id*="video"]');
-          return { ok: true, anyVideo };
+          return { ok: true, anyVideo, clicked: false };
         } catch (e) {
           return { ok: false, error: e.message };
         }
@@ -164,13 +198,13 @@ export async function closeLiveStreamRendering(manager, accountId) {
  * @returns {Promise<boolean>}
  */
 export async function ensureCloseLiveStreamRendering(manager, accountId) {
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 3; i++) {
     if (!manager.accounts.has(accountId) || manager.isPaused(accountId)) return false
     const r = await closeLiveStreamRendering(manager, accountId)
     if (r?.aborted) {
       return false
     }
-    if (r?.ok && !r?.anyVideo) {
+    if (r?.ok) {
       return true
     }
     await manager.sleep(450)
@@ -218,6 +252,9 @@ export async function joinLotteryByUI(manager, accountId, remainingTime = 30) {
     if (isBrowserGoneResult(res)) {
       return { success: false, error: '浏览器已关闭，停止参与', code: 'BROWSER_NOT_FOUND' }
     }
+    if (res?.code === 'EXECUTE_TIMEOUT') {
+      return { success: false, error: '页面脚本超时，跳过UI参与', code: 'EXECUTE_TIMEOUT' }
+    }
     if (res?.success && res?.result?.ok) break
     await manager.sleep(500)
   }
@@ -244,6 +281,9 @@ export async function joinLotteryByUI(manager, accountId, remainingTime = 30) {
     if (isBrowserGoneResult(joinRes)) {
       return { success: false, error: '浏览器已关闭，停止参与', code: 'BROWSER_NOT_FOUND' }
     }
+    if (joinRes?.code === 'EXECUTE_TIMEOUT') {
+      return { success: false, error: '页面脚本超时，跳过UI参与', code: 'EXECUTE_TIMEOUT' }
+    }
     if (joinRes?.success && joinRes?.result?.ok) {
       await manager.sleep(800)
       const confirmRes = await executeScriptSafely(manager, accountId, `
@@ -256,6 +296,9 @@ export async function joinLotteryByUI(manager, accountId, remainingTime = 30) {
       `)
       if (isBrowserGoneResult(confirmRes)) {
         return { success: false, error: '浏览器已关闭，停止参与', code: 'BROWSER_NOT_FOUND' }
+      }
+      if (confirmRes?.code === 'EXECUTE_TIMEOUT') {
+        return { success: false, error: '页面脚本超时，跳过UI参与', code: 'EXECUTE_TIMEOUT' }
       }
       if (confirmRes?.success && confirmRes?.result?.joined) {
         return { success: true, confirmed: true }

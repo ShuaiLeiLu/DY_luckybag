@@ -16,9 +16,9 @@
       </div>
     </template>
     <div v-if="activeTab === 'logs'" ref="logContainer" class="card-inner log-scroll scroll-box">
-      <div v-for="(log, index) in logsWithMeta" :key="index" class="log-item" :class="log.type">
+      <div v-for="(log, index) in displayLogs" :key="log.id || index" class="log-item" :class="log.type">
         <span class="log-time">{{ log.time }}</span>
-        <span class="log-badge" :class="log._badge.className">{{ log._badge.label }}</span>
+        <span class="log-badge" :class="(log._badge || resolveBadge(log)).className">{{ (log._badge || resolveBadge(log)).label }}</span>
         <span class="log-msg">{{ log.message }}</span>
       </div>
       <div v-if="logs.length === 0" class="log-empty">
@@ -98,6 +98,7 @@ const logContainer = ref(null)
 const isPinnedToBottom = ref(true)
 const activeTab = ref('logs')
 const BOTTOM_THRESHOLD = 24
+const MAX_RENDERED_LOGS = 220
 const WIN_RE = /(中奖|恭喜|🎉|🧧.*成功|领取红包成功|中得)/i
 const FAIL_RE = /(失败|错误|异常|超时|未中奖|放弃)/i
 const WARN_RE = /(风控|告警|警告|降速|冷却)/i
@@ -115,11 +116,9 @@ function resolveBadge(log) {
   return { label: '运行', className: 'badge-info' }
 }
 
-const logsWithMeta = computed(() => {
-  return (props.logs || []).map((item) => ({
-    ...item,
-    _badge: resolveBadge(item)
-  }))
+const displayLogs = computed(() => {
+  const source = Array.isArray(props.logs) ? props.logs : []
+  return source.length > MAX_RENDERED_LOGS ? source.slice(-MAX_RENDERED_LOGS) : source
 })
 
 const learningConnected = computed(() => props.learning?.connected === true)

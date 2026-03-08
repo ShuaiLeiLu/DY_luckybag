@@ -63,7 +63,7 @@ function shouldLogScanProgress(roundIndex, noGrowthRounds = 0) {
 }
 
 /**
- * 读取扫描追踪日志开关（localStorage: DY_SCAN_TRACE，默认开启）。
+ * 读取扫描追踪日志开关（localStorage: DY_SCAN_TRACE，默认关闭）。
  * @returns {boolean}
  */
 function isScanTraceEnabled() {
@@ -71,13 +71,13 @@ function isScanTraceEnabled() {
     if (typeof window !== 'undefined' && window.localStorage) {
       const raw = String(window.localStorage.getItem('DY_SCAN_TRACE') || '').trim().toLowerCase()
       if (raw) {
-        return !['0', 'false', 'off', 'no'].includes(raw)
+        return ['1', 'true', 'on', 'yes'].includes(raw)
       }
     }
   } catch (_) {
     // ignore
   }
-  return true
+  return false
 }
 
 /**
@@ -95,6 +95,7 @@ const DEBUG_SAMPLE_SIZE = 6
  * emitScanDebug 方法：将扫描汇总转发到主进程控制台。
  */
 function emitScanDebug(manager, payload = {}) {
+  if (!isScanTraceEnabled()) return
   try {
     if (!manager?.ipc?.invoke) return
     manager.ipc.invoke('scan-debug-log', payload).catch(() => {})
@@ -177,20 +178,24 @@ function claimLocalDetailRooms(manager, accountId, roomInfoList, scanProfile = n
     return { list: source, skipped: 0 }
   }
   const ttlMs = Math.max(
-    15000,
-    Number(scanProfile?.localRoomLeaseTTLms || (scanProfile?.deepScan === true ? 35000 : 55000))
+    8000,
+    Number(scanProfile?.localRoomLeaseTTLms || (scanProfile?.deepScan === true ? 9000 : 12000))
   )
   return manager.claimLocalScanRooms(accountId, source, { ttlMs })
+}
+
+function releaseLocalDetailRooms(manager, roomInfoList) {
+  if (typeof manager?.releaseLocalScanRooms !== 'function') return
+  manager.releaseLocalScanRooms(roomInfoList)
 }
 
 /**
  * logRequestDetail 方法：输出每次请求的扫描明细和过滤明细。
  */
 function logRequestDetail(manager, accountId, stage, requestIndex, scannedList, qualifiedList, extra = {}) {
+  if (!isScanTraceEnabled()) return
   const summary = buildRequestSummary(scannedList, qualifiedList, extra)
-  if (isScanTraceEnabled()) {
-    console.log(`[scan-detail] [${accountId}] [${stage}] request=${requestIndex}`, JSON.stringify(summary))
-  }
+  console.log(`[scan-detail] [${accountId}] [${stage}] request=${requestIndex}`, JSON.stringify(summary))
   emitScanDebug(manager, {
     accountId,
     stage,
@@ -274,6 +279,7 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
   try {
     for (let i = 0; i < maxAllRounds; i++) {
       if (manager.isPaused(accountId)) break
+      if (typeof manager?.getTaskStage === 'function' && manager.getTaskStage(accountId) === 'joining') break
       if (toPositiveInt(scanProfile?.deadlineMs, 0) > 0 && Date.now() >= Number(scanProfile.deadlineMs)) break
 
       const roundSummary = {
@@ -433,7 +439,12 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
           const localClaim = claimLocalDetailRooms(manager, accountId, detailRooms, scanProfile)
           roundSummary.detailRequested = localClaim.list.length
           roundSummary.localDedupSkipped = Number(localClaim.skipped || 0)
-          const detailResult = await getLotteryInfo(manager, localClaim.list, accountId, scanProfile)
+          let detailResult
+          try {
+            detailResult = await getLotteryInfo(manager, localClaim.list, accountId, scanProfile)
+          } finally {
+            releaseLocalDetailRooms(manager, localClaim.list)
+          }
           const resList = detailResult.settled
           roundSummary.detailRiskCount = Number(detailResult?.stats?.hardRiskCount || 0)
           manager.applyScanRiskFeedback(accountId, detailResult.stats, accountData.callbacks.onLog)
@@ -703,6 +714,7 @@ export async function searchLiveRoomCategory(
   try {
     for (let i = 0; i < totalPages; i++) {
       if (manager.isPaused(accountId)) break
+      if (typeof manager?.getTaskStage === 'function' && manager.getTaskStage(accountId) === 'joining') break
       if (toPositiveInt(scanProfile?.deadlineMs, 0) > 0 && Date.now() >= Number(scanProfile.deadlineMs)) break
 
       try {
@@ -765,7 +777,12 @@ export async function searchLiveRoomCategory(
           forceLotteryHintOnly
         })
         const localClaim = claimLocalDetailRooms(manager, accountId, detailRooms, scanProfile)
-        const detailResult = await getLotteryInfo(manager, localClaim.list, accountId, scanProfile)
+        let detailResult
+        try {
+          detailResult = await getLotteryInfo(manager, localClaim.list, accountId, scanProfile)
+        } finally {
+          releaseLocalDetailRooms(manager, localClaim.list)
+        }
         const resList = detailResult.settled
         manager.applyScanRiskFeedback(accountId, detailResult.stats, accountData.callbacks.onLog)
         const shouldBreakByDetailRisk = detailResult.stats.hardRiskCount > 0 &&
@@ -936,6 +953,7 @@ export async function getLotteryInfo(manager, roomInfoList, accountId, scanProfi
       const index = cursor
       cursor += 1
       if (index >= candidateList.length) break
+      if (typeof manager?.getTaskStage === 'function' && manager.getTaskStage(accountId) === 'joining') break
 
       try {
         const value = await fetchOne(candidateList[index])
