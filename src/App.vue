@@ -18,6 +18,8 @@
               :total-winning="totalWinning"
               :success-rate="headerSuccessRate"
               :dispatch-summary="poolDispatchSummary"
+              :license-status="poolLicenseStatus"
+              @open-license="openLicenseModal"
             />
 
             <div class="content-body">
@@ -51,13 +53,121 @@
         </div>
       </div>
     </div>
+
+    <n-modal v-model:show="licenseModalVisible" class="license-modal" :mask-closable="false">
+      <div class="license-dialog">
+        <div class="license-dialog__header">
+          <div class="license-dialog__title">授权设置</div>
+          <button
+            class="license-dialog__close"
+            type="button"
+            :disabled="licenseSubmitting"
+            @click="licenseModalVisible = false"
+          >
+            ×
+          </button>
+        </div>
+
+        <div class="license-dialog__body">
+          <div class="license-dialog__status-row">
+            <span class="license-dialog__status-label">当前状态</span>
+            <span class="license-dialog__status-value" :class="licenseStatusToneClass">
+              {{ licenseSummaryText }}
+            </span>
+          </div>
+
+          <div class="license-dialog__meta" v-if="licenseMetaText">
+            {{ licenseMetaText }}
+          </div>
+
+          <div class="license-dialog__bind-card">
+            <div class="license-dialog__qr-wrap">
+              <n-qr-code
+                v-if="licenseBindQrValue"
+                class="license-dialog__qr"
+                :value="licenseBindQrValue"
+                :size="176"
+                error-correction-level="M"
+              />
+              <div v-else class="license-dialog__qr-placeholder">
+                {{ licenseBindLoading ? '二维码生成中...' : '当前客户端已授权' }}
+              </div>
+            </div>
+
+            <div class="license-dialog__bind-content">
+              <div class="license-dialog__bind-title">微信扫码解锁完整授权</div>
+              <div class="license-dialog__bind-desc">{{ licenseBindSummaryText }}</div>
+
+              <div class="license-dialog__bind-meta">
+                <span>一次性 bind_token</span>
+                <span>60 秒有效</span>
+                <span>绑定当前机器指纹</span>
+              </div>
+
+              <div class="license-dialog__bind-token" v-if="licenseBindSession.bindToken">
+                {{ licenseBindSession.bindToken }}
+              </div>
+
+              <div class="license-dialog__bind-extra" v-if="licenseBindSession.wechatNickname">
+                已扫码用户：{{ licenseBindSession.wechatNickname }}
+              </div>
+
+              <div class="license-dialog__bind-countdown" :class="licenseBindCountdownToneClass">
+                {{ licenseBindCountdownText }}
+              </div>
+
+              <div class="license-dialog__bind-actions">
+                <n-button
+                  class="license-dialog__bind-button"
+                  secondary
+                  type="primary"
+                  @click="refreshLicenseBindSession"
+                  :loading="licenseBindLoading"
+                  :disabled="licenseSubmitting"
+                >
+                  刷新二维码
+                </n-button>
+              </div>
+            </div>
+          </div>
+
+          <div class="license-dialog__manual-title">手动输入授权码（备用）</div>
+
+          <n-input
+            v-model:value="licenseFormKey"
+            size="large"
+            clearable
+            class="license-dialog__input"
+            placeholder="请输入授权码"
+            :disabled="licenseSubmitting"
+          />
+
+          <div
+            class="license-dialog__hint"
+            :class="licenseFormMessageToneClass"
+            v-if="licenseFormMessage"
+          >
+            {{ licenseFormMessage }}
+          </div>
+        </div>
+
+        <div class="license-dialog__footer">
+          <n-button class="license-dialog__button license-dialog__button--ghost" @click="licenseModalVisible = false" :disabled="licenseSubmitting">
+            关闭
+          </n-button>
+          <n-button class="license-dialog__button license-dialog__button--primary" type="primary" @click="submitLicenseActivation" :loading="licenseSubmitting">
+            激活授权
+          </n-button>
+        </div>
+      </div>
+    </n-modal>
   </n-config-provider>
 </template>
 
 <script setup>
 import { ref, h, computed, watch, onMounted, onUnmounted } from 'vue'
 import { 
-  NButton, NTag, NConfigProvider, NIcon
+  NButton, NTag, NConfigProvider, NIcon, NModal, NInput, NQrCode
 } from 'naive-ui'
 import SettingsOutline from '@vicons/ionicons5/es/SettingsOutline'
 
@@ -69,7 +179,7 @@ import LotteryDetail from './components/LotteryDetail.vue'
 import LogPanel from './components/LogPanel.vue'
 
 import LotteryManager from './services/LotteryManager-lite'
-import { normalizePoolServerUrl, reportPoolTaskFeedback, resolvePoolClientId } from './services/poolClient'
+import { activateLicense, createLicenseBindSession, fetchLicenseBindSessionStatus, fetchLicenseStatus, normalizePoolServerUrl, reportPoolTaskFeedback, resolveLicenseFingerprint, resolvePoolClientId } from './services/poolClient'
 
 const themeOverrides = {
   common: {
@@ -150,6 +260,9 @@ const mergedLotteries = computed(() => {
 
 const lotteryManager = new LotteryManager()
 const initialPoolServerConfig = lotteryManager.getPoolServerConfig()
+const stablePoolClientId = resolvePoolClientId()
+const stableLicenseFingerprint = resolveLicenseFingerprint()
+const POOL_CURRENT_ACCOUNTS_KEY = 'DY_CURRENT_ACCOUNTS'
 
 const config = ref({
   minProbability: 0.01,
@@ -177,8 +290,10 @@ const lotteryHistory = ref([])
 const pendingCreateAccountIds = new Set()
 let poolDispatchTimer = null
 let poolLearningTimer = null
+let poolLicenseTimer = null
 let poolDispatchInflight = false
 let poolLearningInflight = false
+let poolLicenseInflight = false
 const poolLearningLoading = ref(false)
 const poolLearningDebug = ref({
   connected: false,
@@ -192,6 +307,8 @@ const UI_LOTTERY_FLUSH_MS = 160
 const UI_LOG_FLUSH_MS = 120
 const POOL_SUMMARY_POLL_MS = 6000
 const POOL_LEARNING_POLL_MS = 20000
+const POOL_LICENSE_POLL_MS = 60000
+const LICENSE_BIND_POLL_MS = 2000
 const LOG_MAX_COUNT = 300
 const LOG_MERGE_WINDOW_MS = 2000
 const LOG_WIN_RE = /(中奖|恭喜|🎉|🧧.*成功|领取红包成功|中得)/i
@@ -233,6 +350,210 @@ function createEmptyPoolDispatchSummary(overrides = {}) {
 const poolDispatchSummary = ref(createEmptyPoolDispatchSummary({
   enabled: config.value.poolServer?.enabled !== false
 }))
+
+/**
+ * createEmptyLicenseStatus 方法：创建授权状态默认值。
+ */
+function createEmptyLicenseStatus(overrides = {}) {
+  return {
+    enabled: false,
+    available: false,
+    authorized: false,
+    state: 'disabled',
+    message: '未启用授权',
+    customerName: '',
+    plan: '',
+    expireAt: 0,
+    maxClients: 0,
+    maxAccounts: 0,
+    features: {},
+    checkedAt: 0,
+    ...overrides
+  }
+}
+
+/**
+ * createEmptyLicenseBindSession 方法：创建扫码绑定会话默认值。
+ */
+function createEmptyLicenseBindSession(overrides = {}) {
+  return {
+    bindToken: '',
+    qrText: '',
+    status: 'idle',
+    message: '',
+    clientId: '',
+    fingerprint: '',
+    appVersion: '',
+    wechatNickname: '',
+    licenseId: 0,
+    adUnlockDays: 30,
+    expireAt: 0,
+    remainingSec: 0,
+    scannedAt: 0,
+    grantedAt: 0,
+    authorized: false,
+    license: null,
+    ...overrides
+  }
+}
+
+/**
+ * applyPoolLicenseStatus 方法：将服务端返回的授权状态统一写入前端状态树。
+ */
+function applyPoolLicenseStatus(license) {
+  poolLicenseStatus.value = createEmptyLicenseStatus({
+    enabled: license?.enabled === true,
+    available: license?.available !== false,
+    authorized: license?.authorized === true,
+    state: String(license?.state || 'unknown'),
+    message: String(license?.message || ''),
+    customerName: String(license?.customerName || ''),
+    plan: String(license?.plan || ''),
+    expireAt: Number(license?.expireAt || 0),
+    maxClients: Number(license?.maxClients || 0),
+    maxAccounts: Number(license?.maxAccounts || 0),
+    features: (license?.features && typeof license.features === 'object') ? license.features : {},
+    checkedAt: Number(license?.checkedAt || Date.now())
+  })
+}
+
+/**
+ * formatLicenseErrorMessage 方法：将常见授权网络/接口错误文案转换为中文。
+ */
+function formatLicenseErrorMessage(rawMessage, fallback = '请求失败') {
+  const text = String(rawMessage || '').trim()
+  if (!text) return fallback
+  const lower = text.toLowerCase()
+
+  if (lower.includes('failed to fetch') || lower.includes('networkerror when attempting to fetch resource')) {
+    return '授权服务失败'
+  }
+  if (lower.includes('timeout') || lower.includes('aborted')) {
+    return '请求超时，请稍后重试'
+  }
+
+  const messageMap = {
+    license_backend_unavailable: '授权服务暂不可用',
+    license_service_unavailable: '授权服务暂不可用',
+    license_status_failed: '获取授权状态失败',
+    license_activate_failed: '激活授权失败',
+    license_bind_create_failed: '创建扫码授权失败',
+    license_bind_status_failed: '获取扫码授权状态失败',
+    license_not_authorized: '授权未生效',
+    bind_session_expired: '二维码已过期，请刷新后重试',
+    bind_session_not_scanned: '尚未完成微信扫码',
+    license_client_id_required: '缺少客户端标识，请重启软件后重试',
+    license_fingerprint_required: '缺少设备指纹，请重启软件后重试'
+  }
+  if (messageMap[text]) return messageMap[text]
+
+  const httpMatch = text.match(/^http_(\d{3})$/i)
+  if (httpMatch) return `请求失败（HTTP ${httpMatch[1]}）`
+
+  return text
+}
+
+const poolLicenseStatus = ref(createEmptyLicenseStatus())
+const licenseModalVisible = ref(false)
+const licenseSubmitting = ref(false)
+const licenseBindLoading = ref(false)
+const licenseFormKey = ref('')
+const licenseFormMessage = ref('')
+const licenseBindSession = ref(createEmptyLicenseBindSession())
+const APP_VERSION = 'v2.0'
+let licenseBindPollTimer = null
+let licenseBindStatusInflight = false
+
+const licenseSummaryText = computed(() => {
+  const info = poolLicenseStatus.value || {}
+  if (info.enabled !== true) return '未启用授权'
+  if (info.available === false) return info.message || '授权服务不可用'
+  if (info.authorized !== true) return info.message || '未授权'
+  const expireAt = Number(info.expireAt || 0)
+  if (expireAt > 0) {
+    const d = new Date(expireAt)
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `授权有效，截止 ${y}-${m}-${day}`
+  }
+  return '授权有效'
+})
+
+const licenseMetaText = computed(() => {
+  const parts = []
+  const info = poolLicenseStatus.value || {}
+  if (info.customerName) parts.push(`客户：${info.customerName}`)
+  if (info.plan) parts.push(`版本：${info.plan}`)
+  if (info.authorized !== true) {
+    parts.push('未授权时最多添加 1 个账号')
+  }
+  return parts.join(' · ')
+})
+
+const licenseStatusToneClass = computed(() => {
+  const info = poolLicenseStatus.value || {}
+  if (info.enabled !== true || info.available === false || info.authorized !== true) {
+    return 'license-dialog__status-value--danger'
+  }
+  const expireAt = Number(info.expireAt || 0)
+  if (expireAt > 0) {
+    const remain = expireAt - Date.now()
+    if (remain <= 7 * 24 * 60 * 60 * 1000) {
+      return 'license-dialog__status-value--warning'
+    }
+  }
+  return 'license-dialog__status-value--success'
+})
+
+const licenseFormMessageToneClass = computed(() => {
+  const text = String(licenseFormMessage.value || '')
+  if (!text) return ''
+  if (/成功|已激活|授权有效/.test(text)) return 'license-dialog__hint--success'
+  return 'license-dialog__hint--danger'
+})
+
+const licenseBindQrValue = computed(() => {
+  const session = licenseBindSession.value || {}
+  return String(session.qrText || session.bindToken || '').trim()
+})
+
+const licenseBindSummaryText = computed(() => {
+  const session = licenseBindSession.value || {}
+  if (session.authorized === true) return '当前客户端已授权，完整功能已解锁'
+  if (session.status === 'scanned') return '已完成微信扫码登录，等待激励视频结束后自动授权'
+  if (session.status === 'granted') return '授权已发放，客户端正在同步状态'
+  if (session.status === 'expired') return '二维码已过期，请点击刷新生成新的 bind_token'
+  if (licenseBindLoading.value) return '正在生成二维码，请稍候...'
+  return String(session.message || '请用微信小程序扫码，完成激励视频后自动授权')
+})
+
+const licenseBindCountdownToneClass = computed(() => {
+  const session = licenseBindSession.value || {}
+  const remain = Number(session.remainingSec || 0)
+  if (!session.bindToken || session.authorized === true) {
+    return 'license-dialog__bind-countdown--success'
+  }
+  if (remain <= 0 || session.status === 'expired') return 'license-dialog__bind-countdown--danger'
+  if (remain <= 10) return 'license-dialog__bind-countdown--warning'
+  return 'license-dialog__bind-countdown--success'
+})
+
+const licenseBindCountdownText = computed(() => {
+  const session = licenseBindSession.value || {}
+  if (session.authorized === true) return '授权已生效'
+  if (!session.bindToken) return '当前无需扫码'
+  const remain = Number(session.remainingSec || 0)
+  if (remain <= 0 || session.status === 'expired') return '二维码已过期'
+  return `${remain} 秒后过期`
+})
+
+const licenseAddLimitReached = computed(() => {
+  const info = poolLicenseStatus.value || {}
+  if (info.enabled !== true) return false
+  if (info.authorized === true) return false
+  return (accounts.value.length + pendingCreateAccountIds.size) >= 1
+})
 
 /**
  * getTodayKey 方法：获取今日键。
@@ -390,6 +711,20 @@ function upsertLoggedInAccount(account, nextState = {}, options = {}) {
   return created
 }
 
+/**
+ * persistCurrentAccountCount 方法：将当前账号数量同步到本地存储，供服务端授权硬校验放行单账号使用。
+ */
+function persistCurrentAccountCount() {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const count = Math.max(0, Number(accounts.value.length || 0))
+      window.localStorage.setItem(POOL_CURRENT_ACCOUNTS_KEY, String(count))
+    }
+  } catch (_) {
+    // ignore
+  }
+}
+
 async function resolveStableLoginSnapshot(accountId, initialResult = null) {
   let latest = initialResult && initialResult.success && initialResult.isLoggedIn ? initialResult : null
   if (!ipcRenderer) return latest
@@ -510,6 +845,7 @@ onMounted(async () => {
   lotteryManager.setScanConfig({ countPerPage: 15, pagesPerCategory: 12, allCount: 24 })
   lotteryManager.setPoolServerConfig(config.value.poolServer, { silent: true })
   await loadAllAccounts()
+  persistCurrentAccountCount()
   restartPoolDispatchPolling()
   if (ipcRenderer) {
     // 监听浏览器窗口关闭事件
@@ -610,6 +946,7 @@ onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
   window.removeEventListener('beforeunload', handleBeforeUnload)
   stopPoolDispatchPolling()
+  stopLicenseBindPolling()
   if (accountUpdateFlushTimer) clearTimeout(accountUpdateFlushTimer)
   if (lotteryListFlushTimer) clearTimeout(lotteryListFlushTimer)
   if (logFlushTimer) clearTimeout(logFlushTimer)
@@ -632,6 +969,26 @@ watch(
     }, { silent: true })
     restartPoolDispatchPolling()
   }
+)
+
+watch(
+  () => licenseModalVisible.value,
+  visible => {
+    licenseFormMessage.value = ''
+    if (!visible) {
+      stopLicenseBindPolling()
+      return
+    }
+    refreshLicenseBindSession()
+  }
+)
+
+watch(
+  () => accounts.value.length,
+  () => {
+    persistCurrentAccountCount()
+  },
+  { immediate: true }
 )
 
 watch(
@@ -661,6 +1018,10 @@ function stopPoolDispatchPolling() {
   if (poolLearningTimer) {
     clearInterval(poolLearningTimer)
     poolLearningTimer = null
+  }
+  if (poolLicenseTimer) {
+    clearInterval(poolLicenseTimer)
+    poolLicenseTimer = null
   }
 }
 
@@ -701,6 +1062,185 @@ async function refreshPoolDispatchSummary() {
     })
   } finally {
     poolDispatchInflight = false
+  }
+}
+
+/**
+ * refreshPoolLicenseStatus 方法：刷新授权状态。
+ */
+async function refreshPoolLicenseStatus() {
+  if (poolLicenseInflight) return
+  const enabled = config.value.poolServer?.enabled !== false && Boolean(config.value.poolServer?.url)
+  if (!enabled) {
+    poolLicenseStatus.value = createEmptyLicenseStatus({ enabled: false, message: '未启用授权' })
+    return
+  }
+
+  poolLicenseInflight = true
+  try {
+    const res = await fetchLicenseStatus(config.value.poolServer.url, {
+      clientId: stablePoolClientId,
+      fingerprint: stableLicenseFingerprint,
+      timeoutMs: 3000
+    })
+    if (!res?.ok) {
+      poolLicenseStatus.value = createEmptyLicenseStatus({
+        enabled: true,
+        available: false,
+        state: 'backend_unavailable',
+        message: formatLicenseErrorMessage(res?.error, '授权服务不可用'),
+        checkedAt: Date.now()
+      })
+      return
+    }
+    applyPoolLicenseStatus(res.data?.license || {})
+  } finally {
+    poolLicenseInflight = false
+  }
+}
+
+/**
+ * normalizeLicenseBindSession 方法：统一整理扫码绑定会话返回结构。
+ */
+function normalizeLicenseBindSession(payload = {}) {
+  const raw = (payload.session && typeof payload.session === 'object') ? payload.session : {}
+  return createEmptyLicenseBindSession({
+    bindToken: String(raw.bindToken || ''),
+    qrText: String(payload.qrText || raw.bindToken || ''),
+    status: String(raw.status || 'idle'),
+    message: String(raw.message || ''),
+    clientId: String(raw.clientId || ''),
+    fingerprint: String(raw.fingerprint || ''),
+    appVersion: String(raw.appVersion || ''),
+    wechatNickname: String(raw.wechatNickname || ''),
+    licenseId: Number(raw.licenseId || 0),
+    adUnlockDays: Number(raw.adUnlockDays || 30),
+    expireAt: Number(raw.expireAt || 0),
+    remainingSec: Number(raw.remainingSec || 0),
+    scannedAt: Number(raw.scannedAt || 0),
+    grantedAt: Number(raw.grantedAt || 0),
+    authorized: raw.authorized === true,
+    license: (raw.license && typeof raw.license === 'object') ? raw.license : null
+  })
+}
+
+/**
+ * stopLicenseBindPolling 方法：停止扫码授权轮询。
+ */
+function stopLicenseBindPolling() {
+  if (licenseBindPollTimer) {
+    clearTimeout(licenseBindPollTimer)
+    licenseBindPollTimer = null
+  }
+}
+
+/**
+ * scheduleLicenseBindPolling 方法：按当前 bind_token 状态继续轮询。
+ */
+function scheduleLicenseBindPolling(delay = LICENSE_BIND_POLL_MS) {
+  stopLicenseBindPolling()
+  const session = licenseBindSession.value || {}
+  if (!licenseModalVisible.value) return
+  if (!session.bindToken || session.authorized === true) return
+  if (session.status === 'expired' || Number(session.remainingSec || 0) <= 0) return
+  licenseBindPollTimer = setTimeout(() => {
+    pollLicenseBindSessionStatus()
+  }, Math.max(800, Number(delay || LICENSE_BIND_POLL_MS)))
+}
+
+/**
+ * refreshLicenseBindSession 方法：创建或刷新当前客户端的扫码绑定二维码。
+ */
+async function refreshLicenseBindSession() {
+  const baseUrl = String(config.value.poolServer?.url || '').trim()
+  if (!licenseModalVisible.value) return
+  if (!baseUrl) {
+    licenseBindSession.value = createEmptyLicenseBindSession({
+      status: 'error',
+      message: '请先配置筛选服务地址'
+    })
+    return
+  }
+
+  licenseBindLoading.value = true
+  licenseBindSession.value = createEmptyLicenseBindSession({
+    status: 'loading',
+    message: '正在生成二维码...'
+  })
+  stopLicenseBindPolling()
+  try {
+    const res = await createLicenseBindSession(baseUrl, {
+      clientId: stablePoolClientId,
+      fingerprint: stableLicenseFingerprint,
+      appVersion: APP_VERSION,
+      timeoutMs: 4000
+    })
+    if (!res?.ok) {
+      licenseBindSession.value = createEmptyLicenseBindSession({
+        status: 'error',
+        message: formatLicenseErrorMessage(res?.error, '创建扫码授权失败')
+      })
+      return
+    }
+    const nextSession = normalizeLicenseBindSession(res.data || {})
+    licenseBindSession.value = nextSession
+    if (nextSession.authorized === true) {
+      if (nextSession.license) {
+        applyPoolLicenseStatus(nextSession.license)
+      } else {
+        await refreshPoolLicenseStatus()
+      }
+      return
+    }
+    scheduleLicenseBindPolling()
+  } finally {
+    licenseBindLoading.value = false
+  }
+}
+
+/**
+ * pollLicenseBindSessionStatus 方法：轮询扫码授权状态并在授权成功后解锁完整功能。
+ */
+async function pollLicenseBindSessionStatus() {
+  if (licenseBindStatusInflight) return
+  const baseUrl = String(config.value.poolServer?.url || '').trim()
+  const bindToken = String(licenseBindSession.value?.bindToken || '').trim()
+  if (!licenseModalVisible.value || !baseUrl || !bindToken) return
+  licenseBindStatusInflight = true
+  try {
+    const res = await fetchLicenseBindSessionStatus(baseUrl, {
+      bindToken,
+      timeoutMs: 3500
+    })
+    if (!res?.ok) {
+      licenseBindSession.value = createEmptyLicenseBindSession({
+        bindToken,
+        qrText: bindToken,
+        status: 'error',
+        message: formatLicenseErrorMessage(res?.error, '获取扫码授权状态失败')
+      })
+      scheduleLicenseBindPolling(3000)
+      return
+    }
+    const previousAuthorized = licenseBindSession.value?.authorized === true
+    const nextSession = normalizeLicenseBindSession(res.data || {})
+    licenseBindSession.value = nextSession
+    if (nextSession.authorized === true) {
+      if (nextSession.license) {
+        applyPoolLicenseStatus(nextSession.license)
+      } else {
+        await refreshPoolLicenseStatus()
+      }
+      stopLicenseBindPolling()
+      if (!previousAuthorized) {
+        licenseFormMessage.value = '微信扫码授权成功，完整功能已解锁'
+        addLog('✅ 微信扫码授权成功，完整功能已解锁', 'success')
+      }
+      return
+    }
+    scheduleLicenseBindPolling()
+  } finally {
+    licenseBindStatusInflight = false
   }
 }
 
@@ -752,6 +1292,7 @@ function restartPoolDispatchPolling() {
   stopPoolDispatchPolling()
   refreshPoolDispatchSummary()
   refreshPoolLearningDebug()
+  refreshPoolLicenseStatus()
   if (config.value.poolServer?.enabled === false || !config.value.poolServer?.url) {
     return
   }
@@ -761,6 +1302,65 @@ function restartPoolDispatchPolling() {
   poolLearningTimer = setInterval(() => {
     refreshPoolLearningDebug()
   }, POOL_LEARNING_POLL_MS)
+  poolLicenseTimer = setInterval(() => {
+    refreshPoolLicenseStatus()
+  }, POOL_LICENSE_POLL_MS)
+}
+
+/**
+ * openLicenseModal 方法：打开授权设置弹窗。
+ */
+function openLicenseModal() {
+  licenseFormMessage.value = ''
+  licenseModalVisible.value = true
+}
+
+/**
+ * submitLicenseActivation 方法：提交授权码到服务端激活。
+ */
+async function submitLicenseActivation() {
+  const baseUrl = String(config.value.poolServer?.url || '').trim()
+  const licenseKey = String(licenseFormKey.value || '').trim()
+  if (!baseUrl) {
+    licenseFormMessage.value = '请先配置筛选服务地址'
+    return
+  }
+  if (!licenseKey) {
+    licenseFormMessage.value = '请输入授权码'
+    return
+  }
+
+  licenseSubmitting.value = true
+  licenseFormMessage.value = ''
+  try {
+    const res = await activateLicense(baseUrl, {
+      licenseKey,
+      clientId: stablePoolClientId,
+      fingerprint: stableLicenseFingerprint,
+      appVersion: APP_VERSION,
+      currentAccounts: accounts.value.length,
+      timeoutMs: 4000
+    })
+    if (!res?.ok) {
+      licenseFormMessage.value = formatLicenseErrorMessage(
+        res?.data?.license?.message || res?.error,
+        '授权激活失败'
+      )
+      addLog(`⚠️ 授权激活失败：${licenseFormMessage.value}`, 'warning')
+      await refreshPoolLicenseStatus()
+      return
+    }
+    const license = res.data?.license || {}
+    applyPoolLicenseStatus(license)
+    licenseFormMessage.value = license.authorized === true ? '授权激活成功' : String(license.message || '授权未生效')
+    addLog(license.authorized === true ? '✅ 授权激活成功' : `⚠️ 授权状态异常：${licenseFormMessage.value}`, license.authorized === true ? 'success' : 'warning')
+    if (license.authorized === true) {
+      licenseModalVisible.value = false
+      licenseFormKey.value = ''
+    }
+  } finally {
+    licenseSubmitting.value = false
+  }
 }
 
 /**
@@ -1264,6 +1864,10 @@ function getNextAccountSeq() {
  * addAccount 方法：添加账号。
  */
 function addAccount() {
+  if (licenseAddLimitReached.value) {
+    addLog('⚠️ 未授权状态下最多只能添加 1 个账号，请先激活授权', 'warning')
+    return
+  }
   const next = getNextAccountSeq()
   const accountId = `account_${next}`
   if (pendingCreateAccountIds.has(accountId)) return
@@ -1289,9 +1893,7 @@ function restartAccountWithLogin(account, reason = '') {
   lotteryManager.stopAccount(account.id)
   clearAccountDispatchState(account)
   pendingCreateAccountIds.add(account.id)
-  account.token = null
   account.state = 'opened'
-  ipcRenderer?.invoke?.('delete-token', account.id).catch(() => {})
   if (reason) {
     addLog(`⚠️ 账号 ${account.nickname} ${reason}，请重新扫码登录，登录成功后将更新当前账号并自动继续`, 'warning')
   } else {
@@ -1803,6 +2405,312 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.license-modal {
+  width: min(560px, calc(100vw - 40px));
+}
+
+.license-dialog {
+  overflow: hidden;
+  border: 1px solid rgba(224, 231, 239, 0.96);
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 28px 72px rgba(15, 23, 42, 0.18);
+  backdrop-filter: blur(22px);
+}
+
+.license-dialog__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 26px 30px 24px;
+  border-bottom: 1px solid #e8edf4;
+}
+
+.license-dialog__title {
+  font-size: 21px;
+  font-weight: 800;
+  color: #1f2d3d;
+  letter-spacing: 0.2px;
+}
+
+.license-dialog__close {
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 32px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.license-dialog__close:hover:not(:disabled) {
+  background: #f4f7fb;
+  color: #64748b;
+}
+
+.license-dialog__close:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+.license-dialog__body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 28px 30px 34px;
+}
+
+.license-dialog__status-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.license-dialog__status-label {
+  color: #334155;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.license-dialog__status-value {
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.license-dialog__status-value--success {
+  color: #18a058;
+}
+
+.license-dialog__status-value--warning {
+  color: #dd8b1c;
+}
+
+.license-dialog__status-value--danger {
+  color: #ef4444;
+}
+
+.license-dialog__meta {
+  color: #94a3b8;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.license-dialog__bind-card {
+  display: grid;
+  grid-template-columns: 176px minmax(0, 1fr);
+  gap: 18px;
+  padding: 18px;
+  border-radius: 22px;
+  background: linear-gradient(180deg, #f8fbff 0%, #f4f8fd 100%);
+  border: 1px solid #e3ebf5;
+}
+
+.license-dialog__qr-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 176px;
+  border-radius: 18px;
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(220, 229, 240, 0.98);
+}
+
+.license-dialog__qr {
+  border-radius: 14px;
+}
+
+.license-dialog__qr-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: 16px;
+  color: #94a3b8;
+  font-size: 14px;
+  font-weight: 700;
+  text-align: center;
+  line-height: 1.6;
+}
+
+.license-dialog__bind-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.license-dialog__bind-title,
+.license-dialog__manual-title {
+  color: #243548;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.license-dialog__bind-desc {
+  color: #516275;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.license-dialog__bind-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.license-dialog__bind-meta span {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(24, 160, 88, 0.08);
+  color: #18a058;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.license-dialog__bind-token {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: #ffffff;
+  border: 1px dashed #cbd5e1;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.license-dialog__bind-extra {
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.license-dialog__bind-countdown {
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.license-dialog__bind-countdown--success {
+  color: #18a058;
+}
+
+.license-dialog__bind-countdown--warning {
+  color: #dd8b1c;
+}
+
+.license-dialog__bind-countdown--danger {
+  color: #ef4444;
+}
+
+.license-dialog__bind-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.license-dialog__bind-button {
+  min-width: 116px;
+}
+
+.license-dialog__input :deep(.n-input) {
+  border-radius: 18px;
+}
+
+.license-dialog__input :deep(.n-input-wrapper) {
+  display: flex;
+  align-items: center;
+  min-height: 66px;
+  padding: 0 18px;
+  border-radius: 18px;
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px #dce5f0;
+}
+
+.license-dialog__input :deep(.n-input__input) {
+  display: flex;
+  align-items: center;
+}
+
+.license-dialog__input :deep(.n-input__input-el) {
+  height: 34px;
+  line-height: 34px;
+  padding: 0;
+}
+
+.license-dialog__input :deep(.n-input-wrapper:hover) {
+  box-shadow: inset 0 0 0 1px #86d7b3;
+}
+
+.license-dialog__input :deep(.n-input-wrapper.n-input-wrapper--focus),
+.license-dialog__input :deep(.n-input-wrapper.n-input-wrapper--stateful) {
+  box-shadow:
+    0 0 0 4px rgba(24, 160, 88, 0.12),
+    inset 0 0 0 1.5px #20bb78;
+}
+
+.license-dialog__input :deep(input) {
+  font-size: 16px;
+  line-height: 30px;
+}
+
+.license-dialog__hint {
+  min-height: 22px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.license-dialog__hint--success {
+  color: #18a058;
+}
+
+.license-dialog__hint--danger {
+  color: #ef4444;
+}
+
+.license-dialog__footer {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 22px 30px 24px;
+  border-top: 1px solid #e8edf4;
+  background: linear-gradient(180deg, #f7f9fc 0%, #f3f6fa 100%);
+}
+
+.license-dialog__button {
+  min-width: 112px;
+  height: 50px;
+  border-radius: 16px;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.license-dialog__button--ghost {
+  color: #334155;
+  background: #ffffff;
+  border-color: #dce4ee;
+}
+
+.license-dialog__button--primary {
+  min-width: 168px;
+}
+
+@media (max-width: 640px) {
+  .license-dialog__bind-card {
+    grid-template-columns: 1fr;
+  }
 }
 
 .hide-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }

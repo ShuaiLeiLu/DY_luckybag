@@ -1,6 +1,10 @@
-const DEFAULT_POOL_SERVER_URL = 'http://110.40.169.26:9090'
+import { APP_CONFIG } from '../config/app.config'
+
+const DEFAULT_POOL_SERVER_URL_FALLBACK = 'http://110.40.169.26:9090'
 const DEFAULT_TIMEOUT_MS = 3200
 const CLIENT_ID_STORAGE_KEY = 'DY_POOL_CLIENT_ID'
+const LICENSE_FP_STORAGE_KEY = 'DY_LICENSE_FINGERPRINT'
+const CURRENT_ACCOUNTS_STORAGE_KEY = 'DY_CURRENT_ACCOUNTS'
 
 /**
  * 规范化筛选服务地址（补协议、去结尾斜杠）。
@@ -36,9 +40,26 @@ async function requestJSON(baseUrl, path, { method = 'GET', body = null, timeout
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(new Error('timeout')), Math.max(300, Number(timeoutMs) || DEFAULT_TIMEOUT_MS))
   try {
+    const headers = { 'content-type': 'application/json' }
+    const stableClientId = String(resolvePoolClientId() || '').trim()
+    const stableFingerprint = String(resolveLicenseFingerprint() || '').trim()
+    let currentAccounts = ''
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        currentAccounts = String(window.localStorage.getItem(CURRENT_ACCOUNTS_STORAGE_KEY) || '').trim()
+      }
+    } catch (_) {
+      // ignore
+    }
+    if (stableClientId) headers['x-pool-client-id'] = stableClientId
+    if (stableFingerprint) headers['x-license-fingerprint'] = stableFingerprint
+    if (currentAccounts && Number.isFinite(Number(currentAccounts)) && Number(currentAccounts) >= 0) {
+      headers['x-current-accounts'] = String(Math.floor(Number(currentAccounts)))
+    }
+
     const res = await fetch(`${normalizePoolServerUrl(baseUrl)}${path}`, {
       method,
-      headers: { 'content-type': 'application/json' },
+      headers,
       body: body ? JSON.stringify(body) : undefined,
       signal: controller.signal
     })
@@ -55,10 +76,13 @@ async function requestJSON(baseUrl, path, { method = 'GET', body = null, timeout
 }
 
 /**
- * 解析当前客户端应使用的筛选服务地址（localStorage > env > 默认值）。
+ * 解析当前客户端应使用的筛选服务地址（代码配置文件 > localStorage > env > 默认值）。
  * @returns {string}
  */
 export function resolvePoolServerUrl() {
+  const fileUrl = normalizePoolServerUrl(APP_CONFIG?.poolServer?.url)
+  if (fileUrl) return fileUrl
+
   try {
     if (typeof window !== 'undefined' && window.localStorage) {
       const saved = normalizePoolServerUrl(window.localStorage.getItem('DY_POOL_SERVER_URL'))
@@ -68,7 +92,22 @@ export function resolvePoolServerUrl() {
 
   const envUrl = normalizePoolServerUrl(import.meta?.env?.VITE_POOL_SERVER_URL)
   if (envUrl) return envUrl
-  return DEFAULT_POOL_SERVER_URL
+  return DEFAULT_POOL_SERVER_URL_FALLBACK
+}
+
+/**
+ * 解析当前客户端应使用的筛选服务是否启用（代码配置文件 > env > 默认启用）。
+ * @returns {boolean}
+ */
+export function resolvePoolServerEnabled() {
+  if (typeof APP_CONFIG?.poolServer?.enabled === 'boolean') {
+    return APP_CONFIG.poolServer.enabled
+  }
+  const envValue = String(import.meta?.env?.VITE_POOL_SERVER_ENABLED || '').trim().toLowerCase()
+  if (!envValue) return true
+  if (['0', 'false', 'off', 'no'].includes(envValue)) return false
+  if (['1', 'true', 'on', 'yes'].includes(envValue)) return true
+  return true
 }
 
 /**
@@ -105,6 +144,38 @@ export function resolvePoolClientId() {
     }
   } catch (_) {}
   return `client_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
+}
+
+/**
+ * 获取当前客户端稳定授权指纹。
+ * 第一版先使用本地持久化随机指纹，避免每次重启变化。
+ * @returns {string}
+ */
+export function resolveLicenseFingerprint() {
+  try {
+    const electronFingerprint = typeof window !== 'undefined'
+      ? String(window.electronAPI?.machineFingerprint || '').trim()
+      : ''
+    if (electronFingerprint) {
+      try {
+        if (typeof window !== 'undefined' && window.localStorage) {
+          window.localStorage.setItem(LICENSE_FP_STORAGE_KEY, electronFingerprint)
+        }
+      } catch (_) {}
+      return electronFingerprint
+    }
+  } catch (_) {}
+
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const existing = String(window.localStorage.getItem(LICENSE_FP_STORAGE_KEY) || '').trim()
+      if (existing) return existing
+      const next = `fp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`
+      window.localStorage.setItem(LICENSE_FP_STORAGE_KEY, next)
+      return next
+    }
+  } catch (_) {}
+  return `fp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`
 }
 
 /**
@@ -576,6 +647,103 @@ export async function fetchPoolLearningDebug(baseUrl, options = {}) {
   const payload = isObject(res.data) ? res.data : {}
   if (payload.ok !== true) {
     return { ok: false, status: res.status, data: payload, error: payload?.error || 'learning_debug_failed' }
+  }
+  return { ok: true, status: res.status, data: payload }
+}
+
+/**
+ * 获取当前客户端授权状态。
+ * @param {string} baseUrl 服务地址
+ * @param {{clientId?:string,fingerprint?:string,timeoutMs?:number}} options 参数
+ * @returns {Promise<object>}
+ */
+export async function fetchLicenseStatus(baseUrl, options = {}) {
+  const params = new URLSearchParams()
+  const clientId = String(options.clientId || '').trim()
+  const fingerprint = String(options.fingerprint || '').trim()
+  if (clientId) params.set('clientId', clientId)
+  if (fingerprint) params.set('fingerprint', fingerprint)
+  const query = params.toString()
+  const res = await requestJSON(baseUrl, `/license/status${query ? `?${query}` : ''}`, {
+    timeoutMs: Number(options.timeoutMs || DEFAULT_TIMEOUT_MS)
+  })
+  if (!res.ok) return res
+  const payload = isObject(res.data) ? res.data : {}
+  if (payload.ok !== true) {
+    return { ok: false, status: res.status, data: payload, error: payload?.error || 'license_status_failed' }
+  }
+  return { ok: true, status: res.status, data: payload }
+}
+
+/**
+ * 使用授权码激活当前客户端。
+ * @param {string} baseUrl 服务地址
+ * @param {{licenseKey:string,clientId?:string,fingerprint?:string,appVersion?:string,currentAccounts?:number,timeoutMs?:number}} options 参数
+ * @returns {Promise<object>}
+ */
+export async function activateLicense(baseUrl, options = {}) {
+  const res = await requestJSON(baseUrl, '/license/activate', {
+    method: 'POST',
+    body: {
+      licenseKey: String(options.licenseKey || '').trim(),
+      clientId: String(options.clientId || '').trim(),
+      fingerprint: String(options.fingerprint || '').trim(),
+      appVersion: String(options.appVersion || '').trim(),
+      currentAccounts: Math.max(0, Number(options.currentAccounts || 0))
+    },
+    timeoutMs: Number(options.timeoutMs || DEFAULT_TIMEOUT_MS)
+  })
+  if (!res.ok) return res
+  const payload = isObject(res.data) ? res.data : {}
+  if (payload.ok !== true) {
+    return { ok: false, status: res.status, data: payload, error: payload?.error || 'license_activate_failed' }
+  }
+  return { ok: true, status: res.status, data: payload }
+}
+
+/**
+ * 创建一次性扫码绑定会话，二维码 60 秒内有效。
+ * @param {string} baseUrl 服务地址
+ * @param {{clientId?:string,fingerprint?:string,appVersion?:string,adUnlockDays?:number,timeoutMs?:number}} options 参数
+ * @returns {Promise<object>}
+ */
+export async function createLicenseBindSession(baseUrl, options = {}) {
+  const res = await requestJSON(baseUrl, '/license/bind-session/create', {
+    method: 'POST',
+    body: {
+      clientId: String(options.clientId || '').trim(),
+      fingerprint: String(options.fingerprint || '').trim(),
+      appVersion: String(options.appVersion || '').trim(),
+      adUnlockDays: Math.max(0, Number(options.adUnlockDays || 0))
+    },
+    timeoutMs: Number(options.timeoutMs || DEFAULT_TIMEOUT_MS)
+  })
+  if (!res.ok) return res
+  const payload = isObject(res.data) ? res.data : {}
+  if (payload.ok !== true) {
+    return { ok: false, status: res.status, data: payload, error: payload?.error || 'license_bind_create_failed' }
+  }
+  return { ok: true, status: res.status, data: payload }
+}
+
+/**
+ * 查询一次性扫码绑定会话状态，供客户端轮询授权结果。
+ * @param {string} baseUrl 服务地址
+ * @param {{bindToken?:string,timeoutMs?:number}} options 参数
+ * @returns {Promise<object>}
+ */
+export async function fetchLicenseBindSessionStatus(baseUrl, options = {}) {
+  const params = new URLSearchParams()
+  const bindToken = String(options.bindToken || '').trim()
+  if (bindToken) params.set('bindToken', bindToken)
+  const query = params.toString()
+  const res = await requestJSON(baseUrl, `/license/bind-session/status${query ? `?${query}` : ''}`, {
+    timeoutMs: Number(options.timeoutMs || DEFAULT_TIMEOUT_MS)
+  })
+  if (!res.ok) return res
+  const payload = isObject(res.data) ? res.data : {}
+  if (payload.ok !== true) {
+    return { ok: false, status: res.status, data: payload, error: payload?.error || 'license_bind_status_failed' }
   }
   return { ok: true, status: res.status, data: payload }
 }

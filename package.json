@@ -13,10 +13,13 @@
     "pool:learning:replay": "cd pool-server-go && sh -c 'if command -v go >/dev/null 2>&1; then exec go run ./cmd/learning-replay; elif [ -x \"$HOME/.local/go/bin/go\" ]; then exec \"$HOME/.local/go/bin/go\" run ./cmd/learning-replay; else echo \"go not found: install Go or add ~/.local/go/bin to PATH\"; exit 127; fi'",
     "pool:docker:build": "bash ./scripts/build-pool-image.sh",
     "pool:docker:up": "bash ./scripts/deploy-pool-local.sh",
+    "pool:db:init": "node ./scripts/init-license-db.mjs",
+    "pool:db:init:dry": "node ./scripts/init-license-db.mjs --dry-run",
     "pool:dump": "node ./scripts/pool-dump.mjs",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
     "electron:build": "vite build && electron-builder",
     "electron:build:win": "vite build && electron-builder --win",
+    "electron:build:win:portable": "vite build && electron-builder --win portable",
     "electron:build:mac": "vite build && electron-builder --mac"
   },
   "dependencies": {

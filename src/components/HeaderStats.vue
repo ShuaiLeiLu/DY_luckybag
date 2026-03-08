@@ -6,9 +6,9 @@
       </div>
       <div class="monitor-copy">
         <div class="monitor-title">监控中心</div>
-        <div class="status-pill">
+        <div class="status-pill" :class="licenseClassName">
           <span class="dot"></span>
-          <span class="status-text">系统运行正常</span>
+          <span class="status-text">{{ licenseText }}</span>
         </div>
       </div>
     </div>
@@ -36,6 +36,9 @@
         <span class="dispatch-pill">本端 {{ dispatchSummary.clientLeaseCount }}</span>
       </div>
       <div class="tool-group">
+        <button class="license-button" :class="licenseButtonClass" @click="$emit('open-license')">
+          {{ licenseButtonText }}
+        </button>
         <n-tag :bordered="false" round size="small" type="success" class="version-tag">v2.0</n-tag>
       </div>
     </div>
@@ -46,6 +49,8 @@
 import { computed } from 'vue'
 import { NIcon, NTag } from 'naive-ui'
 import GiftOutline from '@vicons/ionicons5/es/GiftOutline'
+
+defineEmits(['open-license'])
 
 const props = defineProps({
   totalDiamonds: {
@@ -74,6 +79,17 @@ const props = defineProps({
       leaseCount: 0,
       clientLeaseCount: 0
     })
+  },
+  licenseStatus: {
+    type: Object,
+    default: () => ({
+      enabled: false,
+      available: false,
+      authorized: false,
+      state: 'disabled',
+      message: '未启用授权',
+      expireAt: 0
+    })
   }
 })
 
@@ -83,6 +99,52 @@ const successRate = computed(() => {
   }
   if (!props.totalParticipation) return '0.0'
   return ((props.totalWinning / props.totalParticipation) * 100).toFixed(1)
+})
+
+const licenseText = computed(() => {
+  const info = props.licenseStatus || {}
+  if (info.enabled !== true) return '未启用授权'
+  if (info.available === false) return info.message || '授权服务不可用'
+  if (info.authorized !== true) {
+    if (info.state === 'expired') return '授权已过期'
+    return info.message || '未授权'
+  }
+  const expireAt = Number(info.expireAt || 0)
+  if (expireAt > 0) {
+    const d = new Date(expireAt)
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `授权至 ${y}-${m}-${day}`
+  }
+  return '授权有效'
+})
+
+const licenseClassName = computed(() => {
+  const info = props.licenseStatus || {}
+  if (info.enabled !== true) return 'status-pill--warning'
+  if (info.available === false) return 'status-pill--danger'
+  if (info.authorized !== true) {
+    return info.state === 'expired' ? 'status-pill--danger' : 'status-pill--warning'
+  }
+  const expireAt = Number(info.expireAt || 0)
+  if (expireAt > 0 && (expireAt - Date.now()) <= 7 * 24 * 60 * 60 * 1000) {
+    return 'status-pill--warning'
+  }
+  return 'status-pill--success'
+})
+
+const licenseButtonText = computed(() => {
+  const info = props.licenseStatus || {}
+  if (info.enabled !== true) return '授权'
+  if (info.authorized === true) return '续期'
+  return '激活'
+})
+
+const licenseButtonClass = computed(() => {
+  const info = props.licenseStatus || {}
+  if (info.enabled !== true || info.authorized !== true) return 'license-button--warning'
+  return 'license-button--normal'
 })
 </script>
 
@@ -141,6 +203,21 @@ const successRate = computed(() => {
   border: 1px solid #d3efdf;
 }
 
+.status-pill--success {
+  background: #e8f8f0;
+  border-color: #d3efdf;
+}
+
+.status-pill--warning {
+  background: #fff7e8;
+  border-color: #f4ddb1;
+}
+
+.status-pill--danger {
+  background: #fff1f1;
+  border-color: #f3cccc;
+}
+
 .dot {
   width: 6px;
   height: 6px;
@@ -148,10 +225,26 @@ const successRate = computed(() => {
   border-radius: 50%;
 }
 
+.status-pill--warning .dot {
+  background-color: #d99100;
+}
+
+.status-pill--danger .dot {
+  background-color: #e05252;
+}
+
 .status-text {
   font-size: 12px;
   color: #1b8f5c;
   font-weight: 700;
+}
+
+.status-pill--warning .status-text {
+  color: #b27100;
+}
+
+.status-pill--danger .status-text {
+  color: #c74646;
 }
 
 .monitor-right {
@@ -209,7 +302,41 @@ const successRate = computed(() => {
 .tool-group {
   display: flex;
   align-items: center;
+  gap: 8px;
   padding: 0 8px 0 14px;
+}
+
+.license-button {
+  border: 1px solid #d8e2ef;
+  background: #fff;
+  color: #516173;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1;
+  padding: 7px 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.license-button:hover {
+  border-color: #b8c7d9;
+  color: #2f3f52;
+}
+
+.license-button--warning {
+  background: #fff7e8;
+  border-color: #f4ddb1;
+  color: #b27100;
+}
+
+.license-button--warning:hover {
+  border-color: #e9c97d;
+  color: #9e6500;
+}
+
+.license-button--normal {
+  background: #f8fafc;
 }
 
 .dispatch-strip {

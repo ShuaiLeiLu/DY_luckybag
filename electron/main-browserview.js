@@ -9,6 +9,7 @@ const { createLogger } = require('./logger')
 let mainWindow
 let browserViews = new Map() // 存储多个BrowserView实例
 let keepAwakeBlockerId = null
+let browserInstanceSeq = 0
 
 // 修改token存储路径到项目根目录
 // 开发环境：项目根目录
@@ -825,8 +826,14 @@ ipcMain.handle('check-browser-exists', async (event, accountId) => {
 
 ipcMain.handle('launch-browser', async (event, accountId) => {
   try {
+    const previousBrowserData = browserViews.get(accountId)
+    if (previousBrowserData) {
+      previousBrowserData.superseded = true
+    }
+
     // 为每个账号创建独立的 session partition
     const partition = `persist:douyin_${accountId}`
+    const instanceId = `${accountId}:${++browserInstanceSeq}`
     
     // 创建新窗口用于显示抖音页面
     const browserWindow = new BrowserWindow({
@@ -857,15 +864,26 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
       logger.debug(`[${accountId}] 启动后静音失败`, e)
     }
     
-    browserViews.set(accountId, {
+    const instanceData = {
       window: browserWindow,
       session: accountSession,
       partition: partition,
+      instanceId,
       lastUrl: 'https://www.douyin.com',
       lastRecoverAt: 0,
       recoveryTimer: null,
-      debuggerBound: false
-    })
+      debuggerBound: false,
+      superseded: false
+    }
+    browserViews.set(accountId, instanceData)
+
+    if (previousBrowserData?.window && !previousBrowserData.window.isDestroyed()) {
+      try {
+        previousBrowserData.window.close()
+      } catch (e) {
+        logger.debug(`[${accountId}] 关闭旧窗口失败`, e)
+      }
+    }
 
     // session 级拦截：拒绝 openExternal，避免触发系统协议弹窗
     if (!protocolGuardPartitions.has(partition)) {
@@ -1021,9 +1039,16 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
     // 监听窗口关闭
     browserWindow.on('closed', () => {
       logger.info(`[${accountId}] 窗口已关闭`)
-      const browserData = browserViews.get(accountId)
-      if (browserData?.recoveryTimer) {
-        clearTimeout(browserData.recoveryTimer)
+      if (instanceData.recoveryTimer) {
+        clearTimeout(instanceData.recoveryTimer)
+      }
+      const currentBrowserData = browserViews.get(accountId)
+      const isCurrentWindow = currentBrowserData
+        && currentBrowserData.window === browserWindow
+        && currentBrowserData.instanceId === instanceId
+      if (!isCurrentWindow) {
+        logger.debug(`[${accountId}] 忽略旧窗口关闭事件: ${instanceId}`)
+        return
       }
       browserViews.delete(accountId)
       

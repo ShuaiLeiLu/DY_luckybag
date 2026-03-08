@@ -1,3 +1,5 @@
+const crypto = require('crypto')
+const os = require('os')
 const { contextBridge, ipcRenderer } = require('electron')
 
 const INVOKE_CHANNELS = new Set([
@@ -29,7 +31,33 @@ const EVENT_CHANNELS = new Set([
   'douyin-response'
 ])
 
+/**
+ * buildMachineFingerprint 方法：生成稳定机器指纹，优先使用网卡 MAC，其次回退主机信息。
+ */
+function buildMachineFingerprint() {
+  const interfaces = os.networkInterfaces()
+  const macs = []
+  Object.values(interfaces || {}).forEach(list => {
+    ;(Array.isArray(list) ? list : []).forEach(item => {
+      const mac = String(item?.mac || '').trim().toLowerCase()
+      if (!mac || mac === '00:00:00:00:00:00') return
+      macs.push(mac)
+    })
+  })
+  const stableParts = [
+    os.hostname(),
+    os.platform(),
+    os.arch(),
+    ...macs.sort()
+  ]
+  const raw = stableParts.join('|')
+  return `machine_${crypto.createHash('sha256').update(raw).digest('hex').slice(0, 32)}`
+}
+
+const MACHINE_FINGERPRINT = buildMachineFingerprint()
+
 contextBridge.exposeInMainWorld('electronAPI', {
+  machineFingerprint: MACHINE_FINGERPRINT,
   /**
    * invoke 方法：向主进程发起白名单 IPC 调用并返回结果。
    */

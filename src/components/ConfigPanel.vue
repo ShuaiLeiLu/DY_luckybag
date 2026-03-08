@@ -53,29 +53,6 @@
         </div>
       </div>
 
-      <div class="config-group">
-        <div class="group-title">
-          <n-icon size="18"><server-outline /></n-icon>
-          <span>服务端配置</span>
-        </div>
-        <div class="config-item">
-          <div class="item-header">
-            <div class="item-info">
-              <span class="item-label">启用筛选服务</span>
-              <span class="item-desc">由远端服务统一筛选候选福袋</span>
-            </div>
-            <n-switch v-model:value="config.poolServer.enabled" size="small" />
-          </div>
-          <n-input
-            v-model:value="config.poolServer.url"
-            :disabled="!config.poolServer.enabled"
-            size="small"
-            clearable
-            placeholder="http://pool.example.com:9090"
-          />
-        </div>
-      </div>
-
       <!-- 时间与限制分组 -->
       <div class="config-group">
         <div class="group-title">
@@ -161,13 +138,12 @@
 </template>
 
 <script setup>
-import { NScrollbar, NIcon, NSwitch, NInput, NInputNumber } from 'naive-ui'
+import { NScrollbar, NIcon, NSwitch, NInputNumber } from 'naive-ui'
 import TimeOutline from '@vicons/ionicons5/es/TimeOutline'
 import ChatboxEllipsesOutline from '@vicons/ionicons5/es/ChatboxEllipsesOutline'
 import GiftOutline from '@vicons/ionicons5/es/GiftOutline'
 import CubeOutline from '@vicons/ionicons5/es/CubeOutline'
 import WalletOutline from '@vicons/ionicons5/es/WalletOutline'
-import ServerOutline from '@vicons/ionicons5/es/ServerOutline'
 
 const props = defineProps({
   config: {

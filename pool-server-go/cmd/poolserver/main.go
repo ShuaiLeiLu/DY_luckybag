@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/subtle"
+	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	licensepkg "dy_fudai/pool-server-go/internal/license"
 	"dy_fudai/pool-server-go/internal/pool"
 )
 
@@ -43,6 +47,21 @@ type fileConfig struct {
 		LearningWinWeight  float64 `json:"learningWinWeight"`
 		FeedbackLogPath    string  `json:"feedbackLogPath"`
 	} `json:"pool"`
+	License struct {
+		Enabled            bool   `json:"enabled"`
+		AdminToken         string `json:"adminToken"`
+		AdUnlockDays       int    `json:"adUnlockDays"`
+		DSN                string `json:"dsn"`
+		Host               string `json:"host"`
+		Port               int    `json:"port"`
+		User               string `json:"user"`
+		Password           string `json:"password"`
+		Database           string `json:"database"`
+		Params             string `json:"params"`
+		MaxOpenConns       int    `json:"maxOpenConns"`
+		MaxIdleConns       int    `json:"maxIdleConns"`
+		ConnMaxLifetimeMin int    `json:"connMaxLifetimeMin"`
+	} `json:"license"`
 	Redis struct {
 		Enabled        bool   `json:"enabled"`
 		Addr           string `json:"addr"`
@@ -56,6 +75,9 @@ type fileConfig struct {
 		WriteTimeoutMS int64  `json:"writeTimeoutMS"`
 	} `json:"redis"`
 }
+
+//go:embed web/license-admin.html
+var adminLicenseHTML []byte
 
 // getenvInt 方法：处理整数。
 func getenvInt(name string, fallback int) int {
@@ -143,9 +165,148 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "content-type")
+	w.Header().Set("Access-Control-Allow-Headers", "content-type,x-pool-client-id,x-license-fingerprint,x-client-id,x-current-accounts,x-admin-token,authorization")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func extractLicenseIdentity(r *http.Request) (string, string) {
+	clientID := firstNonEmpty(
+		r.URL.Query().Get("clientId"),
+		r.Header.Get("x-pool-client-id"),
+		r.Header.Get("x-client-id"),
+	)
+	fingerprint := firstNonEmpty(
+		r.URL.Query().Get("fingerprint"),
+		r.Header.Get("x-license-fingerprint"),
+	)
+	return clientID, fingerprint
+}
+
+func extractCurrentAccountsHint(r *http.Request) (int, bool) {
+	raw := firstNonEmpty(
+		r.URL.Query().Get("currentAccounts"),
+		r.Header.Get("x-current-accounts"),
+	)
+	if raw == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+func writeLicenseGuardErr(w http.ResponseWriter, httpStatus int, errCode, msg string, status map[string]any) {
+	payload := map[string]any{
+		"ok":    false,
+		"error": errCode,
+	}
+	if msg != "" {
+		payload["message"] = msg
+	}
+	if status != nil {
+		payload["license"] = status
+	}
+	writeJSON(w, httpStatus, payload)
+}
+
+func ensureLicenseAuthorized(w http.ResponseWriter, r *http.Request, licenseSvc *licensepkg.Service) bool {
+	if licenseSvc == nil {
+		return true
+	}
+	if currentAccounts, ok := extractCurrentAccountsHint(r); ok && currentAccounts <= 1 {
+		return true
+	}
+
+	clientID, fingerprint := extractLicenseIdentity(r)
+	if clientID == "" {
+		writeLicenseGuardErr(w, http.StatusUnauthorized, "license_client_id_required", "缺少 clientId", map[string]any{
+			"enabled":    true,
+			"available":  true,
+			"authorized": false,
+			"state":      "invalid_client",
+			"message":    "缺少 clientId",
+			"checkedAt":  time.Now().UnixMilli(),
+		})
+		return false
+	}
+	if fingerprint == "" {
+		writeLicenseGuardErr(w, http.StatusUnauthorized, "license_fingerprint_required", "缺少 fingerprint", map[string]any{
+			"enabled":    true,
+			"available":  true,
+			"authorized": false,
+			"state":      "invalid_fingerprint",
+			"message":    "缺少设备指纹",
+			"checkedAt":  time.Now().UnixMilli(),
+		})
+		return false
+	}
+
+	status, err := licenseSvc.Status(r.Context(), clientID, fingerprint)
+	if err != nil && status.Available == false {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"ok":      false,
+			"error":   "license_backend_unavailable",
+			"license": status,
+		})
+		return false
+	}
+	if status.Enabled != true {
+		return true
+	}
+	if status.Authorized != true {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"ok":      false,
+			"error":   "license_not_authorized",
+			"license": status,
+		})
+		return false
+	}
+	return true
+}
+
+func extractAdminToken(r *http.Request) string {
+	bearer := ""
+	auth := strings.TrimSpace(r.Header.Get("authorization"))
+	if len(auth) > 7 && strings.EqualFold(auth[:7], "bearer ") {
+		bearer = strings.TrimSpace(auth[7:])
+	}
+	return firstNonEmpty(
+		r.URL.Query().Get("token"),
+		r.Header.Get("x-admin-token"),
+		bearer,
+	)
+}
+
+func ensureAdminAuthorized(w http.ResponseWriter, r *http.Request, expectedToken string) bool {
+	adminToken := strings.TrimSpace(expectedToken)
+	if adminToken == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"ok":    false,
+			"error": "admin_not_configured",
+		})
+		return false
+	}
+	gotToken := strings.TrimSpace(extractAdminToken(r))
+	if gotToken == "" || subtle.ConstantTimeCompare([]byte(gotToken), []byte(adminToken)) != 1 {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{
+			"ok":    false,
+			"error": "admin_unauthorized",
+		})
+		return false
+	}
+	return true
 }
 
 // parseBody 方法：解析请求体。
@@ -391,6 +552,73 @@ func main() {
 		pc.FeedbackLogPath = v
 	}
 
+	lc := licensepkg.Config{
+		Enabled:            false,
+		Host:               "127.0.0.1",
+		Port:               3306,
+		User:               "root",
+		Database:           "dy_fudai",
+		Params:             "charset=utf8mb4&parseTime=true&loc=Local",
+		MaxOpenConns:       8,
+		MaxIdleConns:       4,
+		ConnMaxLifetimeMin: 30,
+	}
+	adminToken := ""
+	licenseAdUnlockDays := 30
+	if hasFileCfg {
+		lc.Enabled = fileCfg.License.Enabled
+		adminToken = strings.TrimSpace(fileCfg.License.AdminToken)
+		if fileCfg.License.AdUnlockDays > 0 {
+			licenseAdUnlockDays = fileCfg.License.AdUnlockDays
+		}
+		if strings.TrimSpace(fileCfg.License.DSN) != "" {
+			lc.DSN = strings.TrimSpace(fileCfg.License.DSN)
+		}
+		if strings.TrimSpace(fileCfg.License.Host) != "" {
+			lc.Host = strings.TrimSpace(fileCfg.License.Host)
+		}
+		if fileCfg.License.Port > 0 {
+			lc.Port = fileCfg.License.Port
+		}
+		if strings.TrimSpace(fileCfg.License.User) != "" {
+			lc.User = strings.TrimSpace(fileCfg.License.User)
+		}
+		if strings.TrimSpace(fileCfg.License.Password) != "" {
+			lc.Password = fileCfg.License.Password
+		}
+		if strings.TrimSpace(fileCfg.License.Database) != "" {
+			lc.Database = strings.TrimSpace(fileCfg.License.Database)
+		}
+		if strings.TrimSpace(fileCfg.License.Params) != "" {
+			lc.Params = strings.TrimSpace(fileCfg.License.Params)
+		}
+		if fileCfg.License.MaxOpenConns > 0 {
+			lc.MaxOpenConns = fileCfg.License.MaxOpenConns
+		}
+		if fileCfg.License.MaxIdleConns > 0 {
+			lc.MaxIdleConns = fileCfg.License.MaxIdleConns
+		}
+		if fileCfg.License.ConnMaxLifetimeMin > 0 {
+			lc.ConnMaxLifetimeMin = fileCfg.License.ConnMaxLifetimeMin
+		}
+	}
+	lc.Enabled = getenvBool("POOL_LICENSE_ENABLED", lc.Enabled)
+	lc.DSN = getenvStr("POOL_LICENSE_DSN", lc.DSN)
+	lc.Host = getenvStr("POOL_LICENSE_MYSQL_HOST", lc.Host)
+	lc.Port = getenvInt("POOL_LICENSE_MYSQL_PORT", lc.Port)
+	lc.User = getenvStr("POOL_LICENSE_MYSQL_USER", lc.User)
+	lc.Password = getenvStr("POOL_LICENSE_MYSQL_PASSWORD", lc.Password)
+	lc.Database = getenvStr("POOL_LICENSE_MYSQL_DATABASE", lc.Database)
+	lc.Params = getenvStr("POOL_LICENSE_MYSQL_PARAMS", lc.Params)
+	lc.MaxOpenConns = getenvInt("POOL_LICENSE_MYSQL_MAX_OPEN_CONNS", lc.MaxOpenConns)
+	lc.MaxIdleConns = getenvInt("POOL_LICENSE_MYSQL_MAX_IDLE_CONNS", lc.MaxIdleConns)
+	lc.ConnMaxLifetimeMin = getenvInt("POOL_LICENSE_MYSQL_CONN_MAX_LIFETIME_MIN", lc.ConnMaxLifetimeMin)
+	adminToken = strings.TrimSpace(getenvStr("POOL_LICENSE_ADMIN_TOKEN", getenvStr("LICENSE_ADMIN_TOKEN", adminToken)))
+	licenseAdUnlockDays = getenvInt("POOL_LICENSE_AD_UNLOCK_DAYS", licenseAdUnlockDays)
+	if licenseAdUnlockDays <= 0 {
+		licenseAdUnlockDays = 30
+	}
+
 	rc := pool.DefaultRedisConfig()
 	redisEnabled := false
 	if hasFileCfg {
@@ -452,6 +680,25 @@ func main() {
 	defer func() {
 		_ = svc.Close()
 	}()
+
+	licenseSvc, licenseErr := licensepkg.NewService(lc)
+	if licenseErr != nil {
+		log.Printf("[pool-server-go] license init failed: %v", licenseErr)
+	} else if lc.Enabled {
+		log.Printf("[pool-server-go] license=mysql host=%s port=%d db=%s", lc.Host, lc.Port, lc.Database)
+	} else {
+		log.Printf("[pool-server-go] license=disabled")
+	}
+	if strings.TrimSpace(adminToken) != "" {
+		log.Printf("[pool-server-go] license-admin=enabled")
+	} else {
+		log.Printf("[pool-server-go] license-admin=disabled (set POOL_LICENSE_ADMIN_TOKEN)")
+	}
+	defer func() {
+		if licenseSvc != nil {
+			_ = licenseSvc.Close()
+		}
+	}()
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -493,9 +740,485 @@ func main() {
 		})
 	})
 
+	mux.HandleFunc("/license/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok": true,
+				"license": map[string]any{
+					"enabled":    false,
+					"available":  false,
+					"authorized": false,
+					"state":      "disabled",
+					"message":    "未启用授权",
+					"checkedAt":  time.Now().UnixMilli(),
+					"features":   map[string]any{},
+				},
+			})
+			return
+		}
+
+		clientID := strings.TrimSpace(r.URL.Query().Get("clientId"))
+		fingerprint := strings.TrimSpace(r.URL.Query().Get("fingerprint"))
+		status, err := licenseSvc.Status(r.Context(), clientID, fingerprint)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "license": status})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "license": status})
+	})
+
+	mux.HandleFunc("/license/activate", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":    false,
+				"error": "license_disabled",
+				"license": map[string]any{
+					"enabled":    false,
+					"available":  false,
+					"authorized": false,
+					"state":      "disabled",
+					"message":    "未启用授权",
+					"checkedAt":  time.Now().UnixMilli(),
+					"features":   map[string]any{},
+				},
+			})
+			return
+		}
+
+		var req struct {
+			LicenseKey   string `json:"licenseKey"`
+			ClientID     string `json:"clientId"`
+			Fingerprint  string `json:"fingerprint"`
+			AppVersion   string `json:"appVersion"`
+			CurrentAccts int    `json:"currentAccounts"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+
+		status, err := licenseSvc.Activate(r.Context(), licensepkg.ActivateRequest{
+			LicenseKey:   req.LicenseKey,
+			ClientID:     req.ClientID,
+			Fingerprint:  req.Fingerprint,
+			AppVersion:   req.AppVersion,
+			CurrentAccts: req.CurrentAccts,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error(), "license": status})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "license": status})
+	})
+
+	mux.HandleFunc("/license/bind-session/create", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+
+		var req struct {
+			ClientID     string `json:"clientId"`
+			Fingerprint  string `json:"fingerprint"`
+			AppVersion   string `json:"appVersion"`
+			AdUnlockDays int    `json:"adUnlockDays"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		if req.AdUnlockDays <= 0 {
+			req.AdUnlockDays = licenseAdUnlockDays
+		}
+		session, err := licenseSvc.CreateBindSession(r.Context(), licensepkg.CreateBindSessionRequest{
+			ClientID:     req.ClientID,
+			Fingerprint:  req.Fingerprint,
+			AppVersion:   req.AppVersion,
+			AdUnlockDays: req.AdUnlockDays,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"session": session,
+			"qrText":  strings.TrimSpace(session.BindToken),
+		})
+	})
+
+	mux.HandleFunc("/license/bind-session/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+
+		bindToken := strings.TrimSpace(r.URL.Query().Get("bindToken"))
+		session, err := licenseSvc.GetBindSession(r.Context(), bindToken)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"session": session,
+			"qrText":  strings.TrimSpace(session.BindToken),
+		})
+	})
+
+	mux.HandleFunc("/license/bind-session/scan", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureAdminAuthorized(w, r, adminToken) {
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+
+		var req struct {
+			BindToken string `json:"bindToken"`
+			OpenID    string `json:"openId"`
+			UnionID   string `json:"unionId"`
+			Nickname  string `json:"nickname"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		session, err := licenseSvc.MarkBindSessionScanned(r.Context(), licensepkg.BindSessionScanRequest{
+			BindToken: req.BindToken,
+			OpenID:    req.OpenID,
+			UnionID:   req.UnionID,
+			Nickname:  req.Nickname,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": session})
+	})
+
+	mux.HandleFunc("/license/bind-session/grant", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureAdminAuthorized(w, r, adminToken) {
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+
+		var req struct {
+			BindToken string `json:"bindToken"`
+			Days      int    `json:"days"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		if req.Days <= 0 {
+			req.Days = licenseAdUnlockDays
+		}
+		session, err := licenseSvc.GrantBindSession(r.Context(), licensepkg.BindSessionGrantRequest{
+			BindToken: req.BindToken,
+			Days:      req.Days,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": session})
+	})
+
+	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(adminLicenseHTML)
+	})
+
+	mux.HandleFunc("/admin/api/licenses", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureAdminAuthorized(w, r, adminToken) {
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+		query := licensepkg.AdminListQuery{
+			Keyword:  strings.TrimSpace(r.URL.Query().Get("keyword")),
+			Status:   strings.TrimSpace(r.URL.Query().Get("status")),
+			Page:     parsePositiveIntQuery(r.URL.Query().Get("page"), 1),
+			PageSize: parsePositiveIntQuery(r.URL.Query().Get("pageSize"), 30),
+		}
+		result, err := licenseSvc.ListAdminLicenses(r.Context(), query)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": result})
+	})
+
+	mux.HandleFunc("/admin/api/licenses/create", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureAdminAuthorized(w, r, adminToken) {
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+		var req struct {
+			LicenseKey   string         `json:"licenseKey"`
+			CustomerName string         `json:"customerName"`
+			PlanName     string         `json:"planName"`
+			Status       string         `json:"status"`
+			ExpireAtMS   int64          `json:"expireAt"`
+			MaxClients   int            `json:"maxClients"`
+			MaxAccounts  int            `json:"maxAccounts"`
+			Features     map[string]any `json:"features"`
+			Days         int            `json:"days"`
+			Quantity     int            `json:"quantity"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		if strings.TrimSpace(req.LicenseKey) == "" {
+			effectiveDays := req.Days
+			if effectiveDays <= 0 {
+				effectiveDays = 30
+			}
+			if effectiveDays > 3650 {
+				effectiveDays = 3650
+			}
+			items, err := licenseSvc.AdminCreateLicensesBatch(r.Context(), licensepkg.AdminCreateBatchRequest{
+				Days:     req.Days,
+				Quantity: req.Quantity,
+			})
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+			keys := make([]string, 0, len(items))
+			for _, item := range items {
+				key := strings.TrimSpace(item.LicenseKey)
+				if key == "" {
+					continue
+				}
+				keys = append(keys, key)
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok": true,
+				"result": map[string]any{
+					"count": len(items),
+					"days":  effectiveDays,
+					"keys":  keys,
+					"items": items,
+				},
+			})
+			return
+		}
+		item, err := licenseSvc.AdminCreateLicense(r.Context(), licensepkg.AdminCreateRequest{
+			LicenseKey:   req.LicenseKey,
+			CustomerName: req.CustomerName,
+			PlanName:     req.PlanName,
+			Status:       req.Status,
+			ExpireAtMS:   req.ExpireAtMS,
+			MaxClients:   req.MaxClients,
+			MaxAccounts:  req.MaxAccounts,
+			Features:     req.Features,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item})
+	})
+
+	mux.HandleFunc("/admin/api/licenses/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureAdminAuthorized(w, r, adminToken) {
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+		var req struct {
+			ID     int64  `json:"id"`
+			Status string `json:"status"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		item, err := licenseSvc.AdminSetLicenseStatus(r.Context(), req.ID, req.Status)
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, sql.ErrNoRows) {
+				writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "license_not_found"})
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item})
+	})
+
+	mux.HandleFunc("/admin/api/licenses/extend", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureAdminAuthorized(w, r, adminToken) {
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+		var req struct {
+			ID   int64 `json:"id"`
+			Days int   `json:"days"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		item, err := licenseSvc.AdminExtendLicense(r.Context(), req.ID, req.Days)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "license_not_found"})
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item})
+	})
+
+	mux.HandleFunc("/admin/api/licenses/unbind", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureAdminAuthorized(w, r, adminToken) {
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+		var req struct {
+			ID int64 `json:"id"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		item, err := licenseSvc.AdminUnbindLicense(r.Context(), req.ID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "license_not_found"})
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item})
+	})
+
 	mux.HandleFunc("/filter/profile", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions {
 			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 		switch r.Method {
@@ -523,6 +1246,9 @@ func main() {
 		}
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 
@@ -562,6 +1288,9 @@ func main() {
 		}
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 		limit := 50
@@ -613,6 +1342,9 @@ func main() {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 			return
 		}
+		if !ensureLicenseAuthorized(w, r, licenseSvc) {
+			return
+		}
 
 		clientID := strings.TrimSpace(r.URL.Query().Get("clientId"))
 		if clientID == "" {
@@ -639,6 +1371,9 @@ func main() {
 		}
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 
@@ -678,6 +1413,9 @@ func main() {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 			return
 		}
+		if !ensureLicenseAuthorized(w, r, licenseSvc) {
+			return
+		}
 
 		var req struct {
 			ClientID   string `json:"clientId"`
@@ -711,6 +1449,9 @@ func main() {
 		}
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 
@@ -760,6 +1501,9 @@ func main() {
 		}
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 
@@ -815,6 +1559,9 @@ func main() {
 		}
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 
@@ -879,6 +1626,9 @@ func main() {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 			return
 		}
+		if !ensureLicenseAuthorized(w, r, licenseSvc) {
+			return
+		}
 
 		var req struct {
 			ClientID  string `json:"clientId"`
@@ -908,6 +1658,9 @@ func main() {
 		}
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 
@@ -941,6 +1694,9 @@ func main() {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 			return
 		}
+		if !ensureLicenseAuthorized(w, r, licenseSvc) {
+			return
+		}
 
 		var req struct {
 			ClientID        string `json:"clientId"`
@@ -971,6 +1727,9 @@ func main() {
 		}
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 
@@ -1055,6 +1814,9 @@ func main() {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 			return
 		}
+		if !ensureLicenseAuthorized(w, r, licenseSvc) {
+			return
+		}
 
 		baseProfile, _ := svc.Profile()
 		effectiveProfile := pool.ApplyProfilePatch(baseProfile, parseTopFilterPatch(r))
@@ -1079,6 +1841,9 @@ func main() {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 			return
 		}
+		if !ensureLicenseAuthorized(w, r, licenseSvc) {
+			return
+		}
 
 		baseProfile, _ := svc.Profile()
 		effectiveProfile := pool.ApplyProfilePatch(baseProfile, parseTopFilterPatch(r))
@@ -1101,6 +1866,9 @@ func main() {
 		}
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 

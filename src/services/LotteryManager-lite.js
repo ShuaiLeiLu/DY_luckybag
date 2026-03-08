@@ -41,6 +41,7 @@ import {
   reportPoolTaskFeedback,
   renewPoolTask,
   resolvePoolClientId,
+  resolvePoolServerEnabled,
   resolvePoolServerUrl,
   upsertPoolCandidates
 } from './poolClient'
@@ -133,7 +134,7 @@ class LotteryManager {
     this.startingAccounts = new Set() // 正在启动中的账号，避免重复启动
     this.blockList = new Set() // 屏蔽的直播间列表 (roomId)
     this.poolServerUrl = resolvePoolServerUrl()
-    this.poolServerEnabled = true
+    this.poolServerEnabled = resolvePoolServerEnabled()
     this.poolTopLimit = 2500
     this.poolClientId = resolvePoolClientId()
     this.lastPoolWarnAt = new Map() // `${accountId}:${type}` -> timestamp(ms)
@@ -1173,6 +1174,33 @@ class LotteryManager {
   }
 
   /**
+   * formatPoolErrorMessage 方法：将服务端错误码和网络异常转换为中文可读文案。
+   */
+  formatPoolErrorMessage(rawMessage, fallback = '请求失败') {
+    const text = String(rawMessage || '').trim()
+    if (!text) return fallback
+    const lower = text.toLowerCase()
+    if (lower.includes('failed to fetch') || lower.includes('networkerror when attempting to fetch resource')) {
+      return '连接服务端失败，请检查服务地址与网络'
+    }
+    if (lower.includes('timeout') || lower.includes('aborted')) {
+      return '请求超时，请稍后重试'
+    }
+
+    const codeMap = {
+      license_backend_unavailable: '授权服务暂不可用',
+      license_not_authorized: '授权未生效',
+      license_client_id_required: '缺少客户端标识',
+      license_fingerprint_required: '缺少设备指纹'
+    }
+    if (codeMap[text]) return codeMap[text]
+
+    const httpMatch = text.match(/^http_(\d{3})$/i)
+    if (httpMatch) return `请求失败（HTTP ${httpMatch[1]}）`
+    return text
+  }
+
+  /**
    * toPoolCandidate 方法：将输入转换为福袋池候选项。
    */
   toPoolCandidate(lottery, sourceId = '') {
@@ -1269,7 +1297,7 @@ class LotteryManager {
     const res = await upsertPoolCandidates(this.poolServerUrl, accountId, candidates)
     if (!res.ok && this.shouldLogPoolWarn(accountId, 'upsert')) {
       const accountData = this.accounts.get(accountId)
-      accountData?.callbacks?.onLog?.(`⚠️ 服务端候选上报失败: ${res.error}`, 'warning')
+      accountData?.callbacks?.onLog?.(`⚠️ 服务端候选上报失败: ${this.formatPoolErrorMessage(res.error, '上报失败')}`, 'warning')
     }
   }
 
@@ -1290,7 +1318,7 @@ class LotteryManager {
     })
     if (!res.ok) {
       if (this.shouldLogPoolWarn(accountId, 'top')) {
-        accountData?.callbacks?.onLog?.(`⚠️ 服务端拉取最优福袋失败: ${res.error}`, 'warning')
+        accountData?.callbacks?.onLog?.(`⚠️ 服务端拉取最优福袋失败: ${this.formatPoolErrorMessage(res.error, '拉取失败')}`, 'warning')
       }
       return false
     }
@@ -1321,7 +1349,7 @@ class LotteryManager {
     })
     if (!res.ok) {
       if (this.shouldLogPoolWarn(accountId, 'claim', 5000)) {
-        this.accounts.get(accountId)?.callbacks?.onLog?.(`⚠️ 服务端任务领取失败: ${res.error}`, 'warning')
+        this.accounts.get(accountId)?.callbacks?.onLog?.(`⚠️ 服务端任务领取失败: ${this.formatPoolErrorMessage(res.error, '领取失败')}`, 'warning')
       }
       return null
     }
@@ -1366,7 +1394,7 @@ class LotteryManager {
     })
     if (!res.ok) {
       if (this.shouldLogPoolWarn(accountId, 'review', 3500)) {
-        this.accounts.get(accountId)?.callbacks?.onLog?.(`⚠️ 服务端复评分失败: ${res.error}`, 'warning')
+        this.accounts.get(accountId)?.callbacks?.onLog?.(`⚠️ 服务端复评分失败: ${this.formatPoolErrorMessage(res.error, '复评分失败')}`, 'warning')
       }
       return null
     }

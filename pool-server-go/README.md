@@ -145,10 +145,11 @@ docker logs -f dy-pool-server
 
 ### 7) 客户端接入
 
-前端配置面板把“筛选服务地址”设置成：
+前端已改为“代码配置文件”管理地址，修改：
 
-- `http://你的服务器IP:9090`
-- 或域名：`https://pool.example.com`（若你前面挂了反向代理）
+- `src/config/app.config.js`
+- `poolServer.url` 设为 `http://你的服务器IP:9090`
+- 若走反向代理可写 `https://pool.example.com`
 
 ### 8) 升级与回滚
 
@@ -171,6 +172,26 @@ docker run -d --name dy-pool-server --restart unless-stopped -p 9090:9090 \
 - `Redis connect fail`：检查 `REDIS_ADDR`、密码、白名单、端口。
 - `/pool/top` 长期为空：说明采集端还未上报有效候选，先看 `/stats` 的 `totalAccepted` 是否增长。
 - `404/跨域`：服务已内置 CORS，若走 Nginx 反代，确认转发到 `9090`。
+
+### 10) 授权管理后台（简版）
+
+1. 在服务端设置管理 Token（推荐使用环境变量）：
+
+```bash
+export POOL_LICENSE_ADMIN_TOKEN='请改成强随机字符串'
+```
+
+2. 启动后访问：
+
+- `http://你的服务器IP:9090/admin`
+
+3. 页面中输入同一个 Token 后即可使用：
+
+- 查询授权列表
+- 新增授权
+- 启用/停用
+- 续期（+30 天）
+- 解绑（清除绑定与激活记录）
 
 ## 配置文件（推荐）
 
@@ -236,6 +257,14 @@ docker run -d --name dy-pool-server --restart unless-stopped -p 9090:9090 \
 - `POOL_REDIS_WRITE_TIMEOUT_MS` 默认 `3000`
 
 环境变量优先级高于配置文件。
+
+### License 授权配置
+
+- `POOL_LICENSE_ENABLED` 授权功能开关
+- `POOL_LICENSE_MYSQL_HOST` / `POOL_LICENSE_MYSQL_PORT`
+- `POOL_LICENSE_MYSQL_USER` / `POOL_LICENSE_MYSQL_PASSWORD`
+- `POOL_LICENSE_MYSQL_DATABASE`
+- `POOL_LICENSE_ADMIN_TOKEN` 授权管理后台 Token（访问 `/admin` 的管理 API 需要）
 
 ## 接口
 

@@ -12,6 +12,20 @@
     "expireSweepMS": 500,
     "shards": 64
   },
+  "license": {
+    "enabled": false,
+    "adminToken": "CHANGE_ME_ADMIN_TOKEN",
+    "adUnlockDays": 30,
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "root",
+    "password": "REPLACE_ME",
+    "database": "dy_fudai",
+    "params": "charset=utf8mb4&parseTime=true&loc=Local",
+    "maxOpenConns": 8,
+    "maxIdleConns": 4,
+    "connMaxLifetimeMin": 30
+  },
   "redis": {
     "enabled": false,
     "addr": "127.0.0.1:6379",
