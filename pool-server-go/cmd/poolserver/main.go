@@ -49,6 +49,7 @@ type fileConfig struct {
 	} `json:"pool"`
 	License struct {
 		Enabled            bool   `json:"enabled"`
+		Unrestricted       bool   `json:"unrestricted"`
 		AdminToken         string `json:"adminToken"`
 		AdUnlockDays       int    `json:"adUnlockDays"`
 		DSN                string `json:"dsn"`
@@ -228,27 +229,47 @@ func ensureLicenseAuthorized(w http.ResponseWriter, r *http.Request, licenseSvc 
 	if currentAccounts, ok := extractCurrentAccountsHint(r); ok && currentAccounts <= 1 {
 		return true
 	}
+	if unrestricted, err := licenseSvc.IsUnrestricted(r.Context()); err == nil && unrestricted {
+		return true
+	} else if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"ok":    false,
+			"error": "license_backend_unavailable",
+			"license": map[string]any{
+				"enabled":      true,
+				"available":    false,
+				"authorized":   false,
+				"unrestricted": false,
+				"state":        "backend_unavailable",
+				"message":      "授权服务不可用",
+				"checkedAt":    time.Now().UnixMilli(),
+			},
+		})
+		return false
+	}
 
 	clientID, fingerprint := extractLicenseIdentity(r)
 	if clientID == "" {
 		writeLicenseGuardErr(w, http.StatusUnauthorized, "license_client_id_required", "缺少 clientId", map[string]any{
-			"enabled":    true,
-			"available":  true,
-			"authorized": false,
-			"state":      "invalid_client",
-			"message":    "缺少 clientId",
-			"checkedAt":  time.Now().UnixMilli(),
+			"enabled":      true,
+			"available":    true,
+			"authorized":   false,
+			"unrestricted": false,
+			"state":        "invalid_client",
+			"message":      "缺少 clientId",
+			"checkedAt":    time.Now().UnixMilli(),
 		})
 		return false
 	}
 	if fingerprint == "" {
 		writeLicenseGuardErr(w, http.StatusUnauthorized, "license_fingerprint_required", "缺少 fingerprint", map[string]any{
-			"enabled":    true,
-			"available":  true,
-			"authorized": false,
-			"state":      "invalid_fingerprint",
-			"message":    "缺少设备指纹",
-			"checkedAt":  time.Now().UnixMilli(),
+			"enabled":      true,
+			"available":    true,
+			"authorized":   false,
+			"unrestricted": false,
+			"state":        "invalid_fingerprint",
+			"message":      "缺少设备指纹",
+			"checkedAt":    time.Now().UnixMilli(),
 		})
 		return false
 	}
@@ -553,20 +574,22 @@ func main() {
 	}
 
 	lc := licensepkg.Config{
-		Enabled:            false,
-		Host:               "127.0.0.1",
-		Port:               3306,
-		User:               "root",
-		Database:           "dy_fudai",
-		Params:             "charset=utf8mb4&parseTime=true&loc=Local",
-		MaxOpenConns:       8,
-		MaxIdleConns:       4,
-		ConnMaxLifetimeMin: 30,
+		Enabled:             false,
+		DefaultUnrestricted: false,
+		Host:                "127.0.0.1",
+		Port:                3306,
+		User:                "root",
+		Database:            "dy_fudai",
+		Params:              "charset=utf8mb4&parseTime=true&loc=Local",
+		MaxOpenConns:        8,
+		MaxIdleConns:        4,
+		ConnMaxLifetimeMin:  30,
 	}
 	adminToken := ""
 	licenseAdUnlockDays := 30
 	if hasFileCfg {
 		lc.Enabled = fileCfg.License.Enabled
+		lc.DefaultUnrestricted = fileCfg.License.Unrestricted
 		adminToken = strings.TrimSpace(fileCfg.License.AdminToken)
 		if fileCfg.License.AdUnlockDays > 0 {
 			licenseAdUnlockDays = fileCfg.License.AdUnlockDays
@@ -603,6 +626,7 @@ func main() {
 		}
 	}
 	lc.Enabled = getenvBool("POOL_LICENSE_ENABLED", lc.Enabled)
+	lc.DefaultUnrestricted = getenvBool("POOL_LICENSE_UNRESTRICTED", lc.DefaultUnrestricted)
 	lc.DSN = getenvStr("POOL_LICENSE_DSN", lc.DSN)
 	lc.Host = getenvStr("POOL_LICENSE_MYSQL_HOST", lc.Host)
 	lc.Port = getenvInt("POOL_LICENSE_MYSQL_PORT", lc.Port)
@@ -685,7 +709,7 @@ func main() {
 	if licenseErr != nil {
 		log.Printf("[pool-server-go] license init failed: %v", licenseErr)
 	} else if lc.Enabled {
-		log.Printf("[pool-server-go] license=mysql host=%s port=%d db=%s", lc.Host, lc.Port, lc.Database)
+		log.Printf("[pool-server-go] license=mysql host=%s port=%d db=%s unrestrictedDefault=%v", lc.Host, lc.Port, lc.Database, lc.DefaultUnrestricted)
 	} else {
 		log.Printf("[pool-server-go] license=disabled")
 	}
@@ -825,6 +849,45 @@ func main() {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "license": status})
+	})
+
+	mux.HandleFunc("/admin/api/license-settings", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if !ensureAdminAuthorized(w, r, adminToken) {
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			result, err := licenseSvc.AdminGetGlobalSettings(r.Context())
+			if err != nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_settings_failed"})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": result})
+		case http.MethodPost:
+			var req struct {
+				Unrestricted bool `json:"unrestricted"`
+			}
+			if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+				writeBodyErr(w, err)
+				return
+			}
+			result, err := licenseSvc.AdminSetUnrestricted(r.Context(), req.Unrestricted)
+			if err != nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_settings_update_failed"})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": result})
+		default:
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+		}
 	})
 
 	mux.HandleFunc("/license/bind-session/create", func(w http.ResponseWriter, r *http.Request) {

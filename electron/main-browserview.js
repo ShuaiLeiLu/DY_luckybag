@@ -581,11 +581,11 @@ async function resolveUserInfo(accountId, options = {}) {
  */
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1400,
+    width: 1680,
     height: 1000,
     webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
+      nodeIntegration: true,
+      contextIsolation: false,
       preload: path.join(__dirname, 'preload.js'),
       backgroundThrottling: false
     }
@@ -849,12 +849,12 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
     
     // 获取该账号的独立 session
     const accountSession = browserWindow.webContents.session
-    
+
     // 清除该账号的所有缓存和数据（确保是全新的）
     await accountSession.clearStorageData({
       storages: ['cookies', 'localstorage', 'sessionstorage', 'cachestorage', 'indexdb']
     })
-    
+
     logger.info(`[${accountId}] 已创建独立session: ${partition}`)
 
     // 参考福袋：默认静音，避免多账号运行时音频干扰
@@ -1072,7 +1072,7 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
         }
       }
     )
-    
+
     return { success: true, accountId, partition }
   } catch (error) {
     logger.error('启动浏览器失败:', error)

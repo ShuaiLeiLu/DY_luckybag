@@ -48,14 +48,39 @@ import {
 
 // 使用 require 导入 electron (在 Electron 渲染进程中)
 let ipcRenderer
-if (typeof window !== 'undefined' && window.electronAPI) {
-  try {
-    ipcRenderer = window.electronAPI
-  } catch (e) {
-    const fallbackLogger = createLogger('lottery-manager')
-    fallbackLogger.warn('无法加载 electron ipcRenderer:', e)
+function getIpcRenderer() {
+  if (typeof window !== 'undefined' && window.electronAPI) {
+    try {
+      ipcRenderer = window.electronAPI
+      return ipcRenderer
+    } catch (e) {
+      const fallbackLogger = createLogger('lottery-manager')
+      fallbackLogger.warn('无法加载 electron ipcRenderer:', e)
+    }
   }
+  if (typeof window !== 'undefined' && typeof window.require === 'function') {
+    try {
+      const electron = window.require('electron')
+      const rawIpc = electron?.ipcRenderer
+      if (rawIpc && typeof rawIpc.invoke === 'function') {
+        ipcRenderer = {
+          invoke: rawIpc.invoke.bind(rawIpc),
+          on(channel, handler) {
+            const wrapped = (_event, ...args) => handler(...args)
+            rawIpc.on(channel, wrapped)
+            return () => rawIpc.removeListener(channel, wrapped)
+          }
+        }
+        return ipcRenderer
+      }
+    } catch (e) {
+      const fallbackLogger = createLogger('lottery-manager')
+      fallbackLogger.warn('无法通过 require 加载 electron ipcRenderer:', e)
+    }
+  }
+  return null
 }
+ipcRenderer = getIpcRenderer()
 
 // 抖音直播分类列表（参考原项目，使用中文名称）
 const DEFAULT_CATEGORIES = [
@@ -2375,6 +2400,7 @@ class LotteryManager {
    * startAccount 方法：启动账号。
    */
   async startAccount(account, config, callbacks, bootOptions = {}) {
+    ipcRenderer = getIpcRenderer()
     if (!ipcRenderer) {
       callbacks.onLog('Electron IPC 不可用', 'error')
       return

@@ -76,10 +76,6 @@
             </span>
           </div>
 
-          <div class="license-dialog__meta" v-if="licenseMetaText">
-            {{ licenseMetaText }}
-          </div>
-
           <div class="license-dialog__bind-card">
             <div class="license-dialog__qr-wrap">
               <n-qr-code
@@ -97,12 +93,6 @@
             <div class="license-dialog__bind-content">
               <div class="license-dialog__bind-title">微信扫码解锁完整授权</div>
               <div class="license-dialog__bind-desc">{{ licenseBindSummaryText }}</div>
-
-              <div class="license-dialog__bind-meta">
-                <span>一次性 bind_token</span>
-                <span>60 秒有效</span>
-                <span>绑定当前机器指纹</span>
-              </div>
 
               <div class="license-dialog__bind-token" v-if="licenseBindSession.bindToken">
                 {{ licenseBindSession.bindToken }}
@@ -135,7 +125,7 @@
 
           <n-input
             v-model:value="licenseFormKey"
-            size="large"
+            size="medium"
             clearable
             class="license-dialog__input"
             placeholder="请输入授权码"
@@ -468,6 +458,7 @@ const licenseSummaryText = computed(() => {
   const info = poolLicenseStatus.value || {}
   if (info.enabled !== true) return '未启用授权'
   if (info.available === false) return info.message || '授权服务不可用'
+  if (info.unrestricted === true || info.state === 'unrestricted') return '服务端已开启免授权'
   if (info.authorized !== true) return info.message || '未授权'
   const expireAt = Number(info.expireAt || 0)
   if (expireAt > 0) {
@@ -480,21 +471,13 @@ const licenseSummaryText = computed(() => {
   return '授权有效'
 })
 
-const licenseMetaText = computed(() => {
-  const parts = []
-  const info = poolLicenseStatus.value || {}
-  if (info.customerName) parts.push(`客户：${info.customerName}`)
-  if (info.plan) parts.push(`版本：${info.plan}`)
-  if (info.authorized !== true) {
-    parts.push('未授权时最多添加 1 个账号')
-  }
-  return parts.join(' · ')
-})
-
 const licenseStatusToneClass = computed(() => {
   const info = poolLicenseStatus.value || {}
   if (info.enabled !== true || info.available === false || info.authorized !== true) {
     return 'license-dialog__status-value--danger'
+  }
+  if (info.unrestricted === true || info.state === 'unrestricted') {
+    return 'license-dialog__status-value--success'
   }
   const expireAt = Number(info.expireAt || 0)
   if (expireAt > 0) {
@@ -575,6 +558,7 @@ function createAccountModel(base = {}) {
     nickname: normalizeNickname(base.nickname || ''),
     userId: base.userId || base.id || '',
     state: base.state || 'waiting',
+    actionActive: base.actionActive === true,
     currentRoom: base.currentRoom || '',
     token: base.token || null,
     participationCount: Number(base.participationCount || 0),
@@ -692,12 +676,16 @@ function upsertLoggedInAccount(account, nextState = {}, options = {}) {
   const accountId = String(account?.id || nextState?.id || '').trim()
   if (!accountId) return null
   const immediateState = options.autoStartAfterLogin === true ? 'running' : (nextState.state || 'waiting')
+  const nextActionActive = nextState.actionActive !== undefined
+    ? nextState.actionActive === true
+    : (options.autoStartAfterLogin === true)
   pendingAccountUpdates.delete(accountId)
   const index = accounts.value.findIndex(a => a.id === accountId)
   if (index >= 0) {
     Object.assign(accounts.value[index], {
       ...nextState,
-      state: immediateState
+      state: immediateState,
+      actionActive: nextActionActive
     })
     ensureDailyStats(accounts.value[index])
     return accounts.value[index]
@@ -705,7 +693,8 @@ function upsertLoggedInAccount(account, nextState = {}, options = {}) {
   const created = createAccountModel({
     ...account,
     ...nextState,
-    state: immediateState
+    state: immediateState,
+    actionActive: nextActionActive
   })
   accounts.value.push(created)
   return created
@@ -810,13 +799,33 @@ function ensureDailyStats(account) {
 }
 
 let ipcRenderer = null
-try {
-  if (window.electronAPI) {
-    ipcRenderer = window.electronAPI
+function getIpcRenderer() {
+  try {
+    if (typeof window !== 'undefined' && window.electronAPI && typeof window.electronAPI.invoke === 'function') {
+      ipcRenderer = window.electronAPI
+      return ipcRenderer
+    }
+    if (typeof window !== 'undefined' && typeof window.require === 'function') {
+      const electron = window.require('electron')
+      const rawIpc = electron?.ipcRenderer
+      if (rawIpc && typeof rawIpc.invoke === 'function') {
+        ipcRenderer = {
+          invoke: rawIpc.invoke.bind(rawIpc),
+          on(channel, handler) {
+            const wrapped = (_event, ...args) => handler(...args)
+            rawIpc.on(channel, wrapped)
+            return () => rawIpc.removeListener(channel, wrapped)
+          }
+        }
+        return ipcRenderer
+      }
+    }
+  } catch (e) {
+    console.error('无法加载 electron:', e)
   }
-} catch (e) {
-  console.error('无法加载 electron:', e)
+  return null
 }
+ipcRenderer = getIpcRenderer()
 
 const ipcUnsubscribers = []
 const resolvedLotteryResultKeys = new Set()
@@ -840,6 +849,7 @@ function handleBeforeUnload() {
 }
 
 onMounted(async () => {
+  ipcRenderer = getIpcRenderer()
   window.addEventListener('resize', handleResize)
   window.addEventListener('beforeunload', handleBeforeUnload)
   lotteryManager.setScanConfig({ countPerPage: 15, pagesPerCategory: 12, allCount: 24 })
@@ -858,6 +868,7 @@ onMounted(async () => {
         }
         lotteryManager.stopAccount(accountId)
         account.state = 'paused'
+        account.actionActive = false
         clearAccountDispatchState(account)
         if (wasPendingRelogin) {
           addLog(`⚠️ [${account.nickname}] 重新登录窗口已关闭，当前账号未更新`, 'warning')
@@ -1367,6 +1378,7 @@ async function submitLicenseActivation() {
  * loadAllAccounts 方法：加载账号列表。
  */
 async function loadAllAccounts() {
+  ipcRenderer = getIpcRenderer()
   if (!ipcRenderer) return
   try {
     const result = await ipcRenderer.invoke('load-all-tokens')
@@ -1777,11 +1789,11 @@ const responsiveColumns = computed(() => {
     render: (row) => h('div', { class: 'account-actions-cell' }, [
       h(NButton, {
         size: compact ? 'tiny' : 'small',
-        type: row.state === 'running' ? 'warning' : 'primary',
+        type: row.actionActive === true ? 'warning' : 'primary',
         secondary: true,
         strong: true,
         onClick: () => toggleAccount(row)
-      }, { default: () => row.state === 'running' ? '暂停' : '启动' }),
+      }, { default: () => row.actionActive === true ? '暂停' : '启动' }),
       h(NButton, {
         size: compact ? 'tiny' : 'small',
         quaternary: true,
@@ -1866,6 +1878,7 @@ function getNextAccountSeq() {
 function addAccount() {
   if (licenseAddLimitReached.value) {
     addLog('⚠️ 未授权状态下最多只能添加 1 个账号，请先激活授权', 'warning')
+    openLicenseModal()
     return
   }
   const next = getNextAccountSeq()
@@ -1909,8 +1922,10 @@ function restartAccountWithLogin(account, reason = '') {
  * startAccountWithLogin 方法：启动账号登录。
  */
 async function startAccountWithLogin(account, options = {}) {
+  ipcRenderer = getIpcRenderer()
   if (!ipcRenderer) {
     pendingCreateAccountIds.delete(account.id)
+    addLog('❌ 当前窗口未注入 Electron IPC，无法打开登录窗口', 'error')
     return
   }
 
@@ -2004,9 +2019,10 @@ async function startAccountWithLogin(account, options = {}) {
  * toggleAccount 方法：处理切换账号。
  */
 function toggleAccount(account) {
-  if (account.state === 'running') {
+  if (account.actionActive === true) {
     lotteryManager.stopAccount(account.id)
     account.state = 'paused'
+    account.actionActive = false
     clearAccountDispatchState(account)
     addLog(`账号 ${account.nickname} 已暂停`)
   } else {
@@ -2018,6 +2034,7 @@ function toggleAccount(account) {
  * startAccountScanning 方法：启动账号扫描。
  */
 async function startAccountScanning(account, options = {}) {
+  ipcRenderer = getIpcRenderer()
   const providedTokenInfo = options?.tokenInfo || null
   const reuseLoggedInBrowser = options?.reuseLoggedInBrowser === true
   if ((!account.token && !providedTokenInfo) || !ipcRenderer) return
@@ -2026,21 +2043,27 @@ async function startAccountScanning(account, options = {}) {
   try {
     if (!reuseLoggedInBrowser) {
       const lr = await ipcRenderer.invoke('launch-browser', account.id)
-      if (!lr.success) return
+      if (!lr.success) {
+        account.actionActive = false
+        return
+      }
       const tr = await ipcRenderer.invoke('load-token', account.id)
       if (!tr.success || !tr.tokenInfo) {
         account.state = 'waiting'
+        account.actionActive = false
         restartAccountWithLogin(account, '本地 Token 已失效或不存在')
         return
       }
       const setRes = await ipcRenderer.invoke('set-cookies', { accountId: account.id, tokenInfo: tr.tokenInfo })
       if (!setRes?.success || setRes?.isLoginCookieReady === false) {
         account.state = 'waiting'
+        account.actionActive = false
         restartAccountWithLogin(account, `Token 写入失败: ${setRes?.error || '关键登录 cookie 未写入成功'}`)
         return
       }
       await ipcRenderer.invoke('navigate-to', { accountId: account.id, url: 'https://www.douyin.com' })
     }
+    account.actionActive = true
     account.state = 'running'
     lotteryManager.startAccount(account, config.value, {
       onStatusUpdate: (upd) => queueAccountUpdate(upd),
@@ -2057,7 +2080,10 @@ async function startAccountScanning(account, options = {}) {
       reuseLoggedInBrowser,
       tokenInfo: providedTokenInfo
     })
-  } catch (e) { addLog(`启动失败: ${e.message}`, 'error') }
+  } catch (e) {
+    account.actionActive = false
+    addLog(`启动失败: ${e.message}`, 'error')
+  }
   finally { account._starting = false }
 }
 
@@ -2498,12 +2524,6 @@ body {
   color: #ef4444;
 }
 
-.license-dialog__meta {
-  color: #94a3b8;
-  font-size: 13px;
-  line-height: 1.6;
-}
-
 .license-dialog__bind-card {
   display: grid;
   grid-template-columns: 176px minmax(0, 1fr);
@@ -2562,23 +2582,6 @@ body {
   line-height: 1.7;
 }
 
-.license-dialog__bind-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.license-dialog__bind-meta span {
-  display: inline-flex;
-  align-items: center;
-  padding: 5px 10px;
-  border-radius: 999px;
-  background: rgba(24, 160, 88, 0.08);
-  color: #18a058;
-  font-size: 12px;
-  font-weight: 700;
-}
-
 .license-dialog__bind-token {
   padding: 10px 12px;
   border-radius: 14px;
@@ -2632,8 +2635,8 @@ body {
 .license-dialog__input :deep(.n-input-wrapper) {
   display: flex;
   align-items: center;
-  min-height: 66px;
-  padding: 0 18px;
+  min-height: 54px;
+  padding: 0 16px;
   border-radius: 18px;
   background: #ffffff;
   box-shadow: inset 0 0 0 1px #dce5f0;
@@ -2645,8 +2648,8 @@ body {
 }
 
 .license-dialog__input :deep(.n-input__input-el) {
-  height: 34px;
-  line-height: 34px;
+  height: 28px;
+  line-height: 28px;
   padding: 0;
 }
 
@@ -2662,8 +2665,8 @@ body {
 }
 
 .license-dialog__input :deep(input) {
-  font-size: 16px;
-  line-height: 30px;
+  font-size: 15px;
+  line-height: 28px;
 }
 
 .license-dialog__hint {

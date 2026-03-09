@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -15,17 +16,18 @@ import (
 
 // Config 描述授权模块的 MySQL 配置。
 type Config struct {
-	Enabled            bool
-	DSN                string
-	Host               string
-	Port               int
-	User               string
-	Password           string
-	Database           string
-	Params             string
-	MaxOpenConns       int
-	MaxIdleConns       int
-	ConnMaxLifetimeMin int
+	Enabled             bool
+	DefaultUnrestricted bool
+	DSN                 string
+	Host                string
+	Port                int
+	User                string
+	Password            string
+	Database            string
+	Params              string
+	MaxOpenConns        int
+	MaxIdleConns        int
+	ConnMaxLifetimeMin  int
 }
 
 // ActivateRequest 描述授权激活请求。
@@ -42,6 +44,7 @@ type Status struct {
 	Enabled      bool           `json:"enabled"`
 	Available    bool           `json:"available"`
 	Authorized   bool           `json:"authorized"`
+	Unrestricted bool           `json:"unrestricted"`
 	State        string         `json:"state"`
 	Message      string         `json:"message"`
 	LicenseID    int64          `json:"licenseId"`
@@ -109,10 +112,18 @@ type AdminCreateBatchRequest struct {
 	Quantity int
 }
 
+// AdminGlobalSettings 描述全局授权设置。
+type AdminGlobalSettings struct {
+	Unrestricted bool `json:"unrestricted"`
+}
+
 type Service struct {
-	cfg     Config
-	db      *sql.DB
-	initErr error
+	cfg                  Config
+	db                   *sql.DB
+	initErr              error
+	settingsMu           sync.RWMutex
+	cachedUnrestricted   bool
+	cachedUnrestrictedAt time.Time
 }
 
 type licenseRow struct {
@@ -203,6 +214,12 @@ func NewService(cfg Config) (*Service, error) {
 		return svc, err
 	}
 	svc.db = db
+	if err := svc.ensureSettingsSchema(context.Background()); err != nil {
+		_ = db.Close()
+		svc.db = nil
+		svc.initErr = err
+		return svc, err
+	}
 	return svc, nil
 }
 
@@ -227,17 +244,140 @@ func (s *Service) ensureAdminReady() error {
 	return nil
 }
 
+func (s *Service) ensureSettingsSchema(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	schemaCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if _, err := s.db.ExecContext(schemaCtx, `
+		CREATE TABLE IF NOT EXISTS license_settings (
+			setting_key VARCHAR(64) NOT NULL PRIMARY KEY,
+			setting_value VARCHAR(255) NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+	`); err != nil {
+		return err
+	}
+	defaultValue := "0"
+	if s.cfg.DefaultUnrestricted {
+		defaultValue = "1"
+	}
+	if _, err := s.db.ExecContext(schemaCtx, `
+		INSERT INTO license_settings (setting_key, setting_value)
+		VALUES ('license_unrestricted', ?)
+		ON DUPLICATE KEY UPDATE setting_key = setting_key
+	`, defaultValue); err != nil {
+		return err
+	}
+	s.updateUnrestrictedCache(s.cfg.DefaultUnrestricted)
+	if value, err := s.loadUnrestrictedSetting(schemaCtx); err == nil {
+		s.updateUnrestrictedCache(value)
+	}
+	return nil
+}
+
+func (s *Service) updateUnrestrictedCache(enabled bool) {
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+	s.cachedUnrestricted = enabled
+	s.cachedUnrestrictedAt = time.Now()
+}
+
+func (s *Service) cachedUnrestrictedState() (bool, bool) {
+	s.settingsMu.RLock()
+	defer s.settingsMu.RUnlock()
+	if s.cachedUnrestrictedAt.IsZero() {
+		return false, false
+	}
+	if time.Since(s.cachedUnrestrictedAt) > 2*time.Second {
+		return false, false
+	}
+	return s.cachedUnrestricted, true
+}
+
+func normalizeSettingBool(raw string) bool {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "1", "true", "on", "yes", "enabled", "active":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) loadUnrestrictedSetting(ctx context.Context) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, nil
+	}
+	var raw string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT setting_value
+		FROM license_settings
+		WHERE setting_key = 'license_unrestricted'
+		LIMIT 1
+	`).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return s.cfg.DefaultUnrestricted, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return normalizeSettingBool(raw), nil
+}
+
+// IsUnrestricted 查询当前服务端是否已开启全局免授权。
+func (s *Service) IsUnrestricted(ctx context.Context) (bool, error) {
+	if s == nil || !s.cfg.Enabled {
+		return false, nil
+	}
+	if enabled, ok := s.cachedUnrestrictedState(); ok {
+		return enabled, nil
+	}
+	if s.initErr != nil || s.db == nil {
+		return false, s.initErr
+	}
+	enabled, err := s.loadUnrestrictedSetting(ctx)
+	if err != nil {
+		return false, err
+	}
+	s.updateUnrestrictedCache(enabled)
+	return enabled, nil
+}
+
+func unrestrictedFeatures() map[string]any {
+	return map[string]any{
+		"fullAccess":         true,
+		"all":                true,
+		"serverUnrestricted": true,
+	}
+}
+
+func (s *Service) buildUnrestrictedStatus(now time.Time) Status {
+	return Status{
+		Enabled:      true,
+		Available:    true,
+		Authorized:   true,
+		Unrestricted: true,
+		State:        "unrestricted",
+		Message:      "服务端已开启免授权",
+		Features:     unrestrictedFeatures(),
+		CheckedAtMS:  now.UnixMilli(),
+	}
+}
+
 // Status 查询当前客户端的授权状态。
 func (s *Service) Status(ctx context.Context, clientID, fingerprint string) (Status, error) {
 	now := time.Now()
 	base := Status{
-		Enabled:     s != nil && s.cfg.Enabled,
-		Available:   s != nil && s.db != nil,
-		Authorized:  false,
-		State:       "disabled",
-		Message:     "未启用授权",
-		CheckedAtMS: now.UnixMilli(),
-		Features:    map[string]any{},
+		Enabled:      s != nil && s.cfg.Enabled,
+		Available:    s != nil && s.db != nil,
+		Authorized:   false,
+		Unrestricted: false,
+		State:        "disabled",
+		Message:      "未启用授权",
+		CheckedAtMS:  now.UnixMilli(),
+		Features:     map[string]any{},
 	}
 	if s == nil || !s.cfg.Enabled {
 		return base, nil
@@ -246,6 +386,13 @@ func (s *Service) Status(ctx context.Context, clientID, fingerprint string) (Sta
 		base.State = "backend_unavailable"
 		base.Message = "授权服务不可用"
 		return base, s.initErr
+	}
+	if unrestricted, err := s.IsUnrestricted(ctx); err == nil && unrestricted {
+		return s.buildUnrestrictedStatus(now), nil
+	} else if err != nil {
+		base.State = "query_failed"
+		base.Message = "授权查询失败"
+		return base, err
 	}
 	if strings.TrimSpace(clientID) == "" {
 		base.State = "invalid_client"
@@ -276,13 +423,14 @@ func (s *Service) Status(ctx context.Context, clientID, fingerprint string) (Sta
 func (s *Service) Activate(ctx context.Context, req ActivateRequest) (Status, error) {
 	now := time.Now()
 	base := Status{
-		Enabled:     s != nil && s.cfg.Enabled,
-		Available:   s != nil && s.db != nil,
-		Authorized:  false,
-		State:       "disabled",
-		Message:     "未启用授权",
-		CheckedAtMS: now.UnixMilli(),
-		Features:    map[string]any{},
+		Enabled:      s != nil && s.cfg.Enabled,
+		Available:    s != nil && s.db != nil,
+		Authorized:   false,
+		Unrestricted: false,
+		State:        "disabled",
+		Message:      "未启用授权",
+		CheckedAtMS:  now.UnixMilli(),
+		Features:     map[string]any{},
 	}
 	if s == nil || !s.cfg.Enabled {
 		return base, nil
@@ -291,6 +439,13 @@ func (s *Service) Activate(ctx context.Context, req ActivateRequest) (Status, er
 		base.State = "backend_unavailable"
 		base.Message = "授权服务不可用"
 		return base, s.initErr
+	}
+	if unrestricted, err := s.IsUnrestricted(ctx); err == nil && unrestricted {
+		return s.buildUnrestrictedStatus(now), nil
+	} else if err != nil {
+		base.State = "query_failed"
+		base.Message = "授权查询失败"
+		return base, err
 	}
 	if strings.TrimSpace(req.ClientID) == "" || strings.TrimSpace(req.LicenseKey) == "" {
 		base.State = "invalid_request"
@@ -365,6 +520,38 @@ func (s *Service) Activate(ctx context.Context, req ActivateRequest) (Status, er
 		return base, err
 	}
 	return s.Status(ctx, clientID, fingerprint)
+}
+
+// AdminGetGlobalSettings 返回授权全局设置。
+func (s *Service) AdminGetGlobalSettings(ctx context.Context) (AdminGlobalSettings, error) {
+	if err := s.ensureAdminReady(); err != nil {
+		return AdminGlobalSettings{}, err
+	}
+	enabled, err := s.IsUnrestricted(ctx)
+	if err != nil {
+		return AdminGlobalSettings{}, err
+	}
+	return AdminGlobalSettings{Unrestricted: enabled}, nil
+}
+
+// AdminSetUnrestricted 更新全局免授权开关。
+func (s *Service) AdminSetUnrestricted(ctx context.Context, enabled bool) (AdminGlobalSettings, error) {
+	if err := s.ensureAdminReady(); err != nil {
+		return AdminGlobalSettings{}, err
+	}
+	value := "0"
+	if enabled {
+		value = "1"
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO license_settings (setting_key, setting_value)
+		VALUES ('license_unrestricted', ?)
+		ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = NOW()
+	`, value); err != nil {
+		return AdminGlobalSettings{}, err
+	}
+	s.updateUnrestrictedCache(enabled)
+	return AdminGlobalSettings{Unrestricted: enabled}, nil
 }
 
 // ListAdminLicenses 返回授权管理后台分页列表。
@@ -943,6 +1130,7 @@ func (s *Service) buildStatus(row licenseRow, clientID, fingerprint string, now 
 		Enabled:      true,
 		Available:    true,
 		Authorized:   authorized,
+		Unrestricted: false,
 		State:        state,
 		Message:      message,
 		LicenseID:    row.ID,

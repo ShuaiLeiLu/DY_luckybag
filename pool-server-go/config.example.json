@@ -14,6 +14,7 @@
   },
   "license": {
     "enabled": false,
+    "unrestricted": false,
     "adminToken": "CHANGE_ME_ADMIN_TOKEN",
     "adUnlockDays": 30,
     "host": "127.0.0.1",

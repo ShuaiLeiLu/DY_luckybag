@@ -62,6 +62,21 @@ CREATE TABLE IF NOT EXISTS license_bind_sessions (
     ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS license_settings (
+  setting_key VARCHAR(64) NOT NULL PRIMARY KEY,
+  setting_value VARCHAR(255) NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO license_settings (
+  setting_key,
+  setting_value
+) VALUES (
+  'license_unrestricted',
+  '0'
+) ON DUPLICATE KEY UPDATE updated_at = NOW();
+
 INSERT INTO licenses (
   license_key,
   customer_name,

@@ -105,6 +105,7 @@ const licenseText = computed(() => {
   const info = props.licenseStatus || {}
   if (info.enabled !== true) return '未启用授权'
   if (info.available === false) return info.message || '授权服务不可用'
+  if (info.unrestricted === true || info.state === 'unrestricted') return '服务端免授权'
   if (info.authorized !== true) {
     if (info.state === 'expired') return '授权已过期'
     return info.message || '未授权'
@@ -137,6 +138,7 @@ const licenseClassName = computed(() => {
 const licenseButtonText = computed(() => {
   const info = props.licenseStatus || {}
   if (info.enabled !== true) return '授权'
+  if (info.unrestricted === true || info.state === 'unrestricted') return '授权'
   if (info.authorized === true) return '续期'
   return '激活'
 })
