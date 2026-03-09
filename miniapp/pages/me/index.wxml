@@ -1,0 +1,60 @@
+<view class="page page-shell me-page">
+  <view class="me-top-space" style="height: {{ topInset }}px;"></view>
+
+  <view class="profile-hero">
+    <view class="profile-hero__body">
+      <view class="profile-avatar">我</view>
+      <view class="profile-meta">
+        <view class="profile-name">{{ profileName }}</view>
+        <view class="profile-level">{{ profileLevel }}</view>
+      </view>
+    </view>
+  </view>
+
+  <view class="summary-card">
+    <view class="summary-item">
+      <view class="summary-label">当前剩余时长</view>
+      <view class="summary-value-row">
+        <text class="summary-value">{{ remainValue }}</text>
+        <text class="summary-unit">{{ remainUnit }}</text>
+      </view>
+    </view>
+    <view class="summary-divider"></view>
+    <view class="summary-item">
+      <view class="summary-label">绑定设备数</view>
+      <view class="summary-value-row">
+        <text class="summary-value">{{ deviceCount }}</text>
+        <text class="summary-unit">台</text>
+      </view>
+    </view>
+  </view>
+
+  <view class="status-banner">{{ statusText }}</view>
+
+  <view class="menu-list">
+    <view class="menu-card" wx:for="{{ menuItems }}" wx:key="key" data-key="{{ item.key }}" bindtap="openMenu">
+      <view class="menu-card__icon">{{ item.icon }}</view>
+      <view class="menu-card__content">
+        <view class="menu-card__title">{{ item.title }}</view>
+        <view class="menu-card__desc">{{ item.desc }}</view>
+      </view>
+      <view class="menu-card__trailing">
+        <view class="menu-card__count" wx:if="{{ item.trailing }}">{{ item.trailing }}</view>
+        <view class="menu-card__arrow">›</view>
+      </view>
+    </view>
+  </view>
+
+  <view class="footer-spacer"></view>
+
+  <view class="bottom-nav">
+    <view class="nav-item" bindtap="goWorkbench">
+      <view class="nav-icon">工</view>
+      <view class="nav-label">工作台</view>
+    </view>
+    <view class="nav-item active">
+      <view class="nav-icon">我</view>
+      <view class="nav-label">我的</view>
+    </view>
+  </view>
+</view>

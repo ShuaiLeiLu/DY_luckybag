@@ -78,25 +78,20 @@
 
           <div class="license-dialog__bind-card">
             <div class="license-dialog__qr-wrap">
-              <n-qr-code
-                v-if="licenseBindQrValue"
+              <img
+                v-if="licenseBindImageUrl"
                 class="license-dialog__qr"
-                :value="licenseBindQrValue"
-                :size="176"
-                error-correction-level="M"
+                :src="licenseBindImageUrl"
+                alt="微信小程序码"
               />
               <div v-else class="license-dialog__qr-placeholder">
-                {{ licenseBindLoading ? '二维码生成中...' : '当前客户端已授权' }}
+                {{ licenseBindLoading ? '小程序码生成中...' : '当前客户端已授权' }}
               </div>
             </div>
 
             <div class="license-dialog__bind-content">
               <div class="license-dialog__bind-title">微信扫码解锁完整授权</div>
               <div class="license-dialog__bind-desc">{{ licenseBindSummaryText }}</div>
-
-              <div class="license-dialog__bind-token" v-if="licenseBindSession.bindToken">
-                {{ licenseBindSession.bindToken }}
-              </div>
 
               <div class="license-dialog__bind-extra" v-if="licenseBindSession.wechatNickname">
                 已扫码用户：{{ licenseBindSession.wechatNickname }}
@@ -157,7 +152,7 @@
 <script setup>
 import { ref, h, computed, watch, onMounted, onUnmounted } from 'vue'
 import { 
-  NButton, NTag, NConfigProvider, NIcon, NModal, NInput, NQrCode
+  NButton, NTag, NConfigProvider, NIcon, NModal, NInput
 } from 'naive-ui'
 import SettingsOutline from '@vicons/ionicons5/es/SettingsOutline'
 
@@ -368,7 +363,7 @@ function createEmptyLicenseStatus(overrides = {}) {
 function createEmptyLicenseBindSession(overrides = {}) {
   return {
     bindToken: '',
-    qrText: '',
+    sceneCode: '',
     status: 'idle',
     message: '',
     clientId: '',
@@ -430,8 +425,8 @@ function formatLicenseErrorMessage(rawMessage, fallback = '请求失败') {
     license_bind_create_failed: '创建扫码授权失败',
     license_bind_status_failed: '获取扫码授权状态失败',
     license_not_authorized: '授权未生效',
-    bind_session_expired: '二维码已过期，请刷新后重试',
-    bind_session_not_scanned: '尚未完成微信扫码',
+    bind_session_expired: '小程序码已过期，请刷新后重试',
+    bind_session_not_scanned: '尚未完成客户端绑定',
     license_client_id_required: '缺少客户端标识，请重启软件后重试',
     license_fingerprint_required: '缺少设备指纹，请重启软件后重试'
   }
@@ -496,19 +491,26 @@ const licenseFormMessageToneClass = computed(() => {
   return 'license-dialog__hint--danger'
 })
 
-const licenseBindQrValue = computed(() => {
+const licenseBindImageUrl = computed(() => {
+  const baseUrl = String(config.value.poolServer?.url || '').trim()
   const session = licenseBindSession.value || {}
-  return String(session.qrText || session.bindToken || '').trim()
+  const sceneCode = String(session.sceneCode || '').trim()
+  if (!baseUrl || !sceneCode || session.authorized === true) return ''
+  const normalizedBase = normalizePoolServerUrl(baseUrl)
+  const params = new URLSearchParams()
+  params.set('sceneCode', sceneCode)
+  params.set('t', String(Number(session.expireAt || 0) || Date.now()))
+  return `${normalizedBase}/license/bind-session/miniapp-code?${params.toString()}`
 })
 
 const licenseBindSummaryText = computed(() => {
   const session = licenseBindSession.value || {}
   if (session.authorized === true) return '当前客户端已授权，完整功能已解锁'
-  if (session.status === 'scanned') return '已完成微信扫码登录，等待激励视频结束后自动授权'
+  if (session.status === 'scanned') return '已进入小程序并完成绑定，观看激励视频后将自动授权'
   if (session.status === 'granted') return '授权已发放，客户端正在同步状态'
-  if (session.status === 'expired') return '二维码已过期，请点击刷新生成新的 bind_token'
-  if (licenseBindLoading.value) return '正在生成二维码，请稍候...'
-  return String(session.message || '请用微信小程序扫码，完成激励视频后自动授权')
+  if (session.status === 'expired') return '小程序码已过期，请点击刷新生成新的二维码'
+  if (licenseBindLoading.value) return '正在生成小程序码，请稍候...'
+  return String(session.message || '请使用微信直接扫描小程序码，进入小程序后自动绑定并完成授权')
 })
 
 const licenseBindCountdownToneClass = computed(() => {
@@ -527,7 +529,7 @@ const licenseBindCountdownText = computed(() => {
   if (session.authorized === true) return '授权已生效'
   if (!session.bindToken) return '当前无需扫码'
   const remain = Number(session.remainingSec || 0)
-  if (remain <= 0 || session.status === 'expired') return '二维码已过期'
+  if (remain <= 0 || session.status === 'expired') return '小程序码已过期'
   return `${remain} 秒后过期`
 })
 
@@ -830,7 +832,7 @@ ipcRenderer = getIpcRenderer()
 const ipcUnsubscribers = []
 const resolvedLotteryResultKeys = new Set()
 const countedLotteryWinKeys = new Set()
-const countedWalletFallbackKeys = new Set()
+const creditedLotteryRewardByKey = new Map()
 
 // 监听串口大小
 const handleResize = () => {
@@ -914,12 +916,23 @@ onMounted(async () => {
           }
 
           if (outcome.isWin) {
-            const shouldCount = outcomeKey
-              ? incrementLotteryWinStats(account, accountId, outcome.lotteryId, Number(outcome.winDiamonds || 0))
+            const statsResult = outcomeKey
+              ? applyLotteryWinStats(account, accountId, outcome.lotteryId, Number(outcome.winDiamonds || 0))
               : (historyUpdated
-                ? incrementLotteryWinStats(account, accountId, updatedHistoryRecord?.lotteryId || '', Number(outcome.winDiamonds || 0))
-                : false)
-            if (shouldCount) {
+                ? applyLotteryWinStats(
+                  account,
+                  accountId,
+                  updatedHistoryRecord?.lotteryId || '',
+                  Math.max(
+                    Number(outcome.winDiamonds || 0),
+                    Number(updatedHistoryRecord?.rewardAmount || 0)
+                  ),
+                  {
+                    fallbackKey: buildLotteryHistoryFallbackKey(accountId, updatedHistoryRecord)
+                  }
+                )
+                : { counted: false, rewardAdded: 0 })
+            if (statsResult.counted || statsResult.rewardAdded > 0) {
               addLog(`🎉 [${account.nickname}] 恭喜！福袋中奖了！`, 'success')
             }
           }
@@ -1117,7 +1130,7 @@ function normalizeLicenseBindSession(payload = {}) {
   const raw = (payload.session && typeof payload.session === 'object') ? payload.session : {}
   return createEmptyLicenseBindSession({
     bindToken: String(raw.bindToken || ''),
-    qrText: String(payload.qrText || raw.bindToken || ''),
+    sceneCode: String(raw.sceneCode || ''),
     status: String(raw.status || 'idle'),
     message: String(raw.message || ''),
     clientId: String(raw.clientId || ''),
@@ -1176,7 +1189,7 @@ async function refreshLicenseBindSession() {
   licenseBindLoading.value = true
   licenseBindSession.value = createEmptyLicenseBindSession({
     status: 'loading',
-    message: '正在生成二维码...'
+    message: '正在生成小程序码...'
   })
   stopLicenseBindPolling()
   try {
@@ -1226,7 +1239,7 @@ async function pollLicenseBindSessionStatus() {
     if (!res?.ok) {
       licenseBindSession.value = createEmptyLicenseBindSession({
         bindToken,
-        qrText: bindToken,
+        sceneCode: String(licenseBindSession.value?.sceneCode || ''),
         status: 'error',
         message: formatLicenseErrorMessage(res?.error, '获取扫码授权状态失败')
       })
@@ -1433,8 +1446,8 @@ function clearLotteryOutcomeCacheByAccount(accountId) {
   for (const key of Array.from(countedLotteryWinKeys)) {
     if (key.startsWith(prefix)) countedLotteryWinKeys.delete(key)
   }
-  for (const key of Array.from(countedWalletFallbackKeys)) {
-    if (key.startsWith(prefix)) countedWalletFallbackKeys.delete(key)
+  for (const key of Array.from(creditedLotteryRewardByKey.keys())) {
+    if (key.startsWith(prefix)) creditedLotteryRewardByKey.delete(key)
   }
 }
 
@@ -1485,6 +1498,112 @@ function parseLotteryOutcome(raw) {
 }
 
 /**
+ * buildLotteryHistoryFallbackKey 方法：为缺少 lotteryId 的记录生成稳定统计键，避免钱包回填时重复计数。
+ */
+function buildLotteryHistoryFallbackKey(accountId, record = {}) {
+  const normalizedAccountId = String(accountId || '').trim()
+  if (!normalizedAccountId) return ''
+  const roomId = String(record.roomId || '').trim() || 'room'
+  const endTime = Number(record.endTime || 0)
+  const joinedAt = Number(record.joinedAt || 0)
+  return `${normalizedAccountId}:history:${roomId}:${endTime}:${joinedAt}`
+}
+
+/**
+ * buildLotteryHistoryMergeKey 方法：为历史面板生成去重键，避免同一福袋重复插入多条记录。
+ */
+function buildLotteryHistoryMergeKey(record = {}) {
+  const accountId = String(record.accountId || '').trim()
+  if (!accountId) return ''
+  const lotteryId = String(record.lotteryId || '').trim()
+  if (lotteryId) return `${accountId}:${lotteryId}`
+  const roomId = String(record.roomId || '').trim() || 'room'
+  const endTime = Number(record.endTime || 0)
+  const lotteryName = String(record.lotteryName || '').trim() || 'lottery'
+  return `${accountId}:merge:${roomId}:${endTime}:${lotteryName}`
+}
+
+/**
+ * findExactLotteryHistoryIndex 方法：按账号与福袋ID精确匹配历史记录，优先命中同一条参与记录。
+ */
+function findExactLotteryHistoryIndex(accountId, lotteryId) {
+  const targetAccountId = String(accountId || '').trim()
+  const targetLotteryId = String(lotteryId || '').trim()
+  if (!targetAccountId || !targetLotteryId) return -1
+  return lotteryHistory.value.findIndex(item =>
+    item.accountId === targetAccountId &&
+    String(item.lotteryId || '').trim() === targetLotteryId
+  )
+}
+
+/**
+ * findNearestLotteryHistoryIndex 方法：按账号查找距离当前时间最近的历史记录，可限制状态与奖励条件。
+ */
+function findNearestLotteryHistoryIndex(accountId, options = {}) {
+  const targetAccountId = String(accountId || '').trim()
+  if (!targetAccountId) return -1
+  const allowedStatuses = new Set(
+    (Array.isArray(options.statuses) ? options.statuses : ['pending'])
+      .map(status => String(status || 'pending'))
+  )
+  const rewardMustBeZeroForWon = options.rewardMustBeZeroForWon === true
+  const now = Number(options.now || Date.now())
+  let bestIndex = -1
+  let bestDistance = Number.POSITIVE_INFINITY
+
+  lotteryHistory.value.forEach((item, index) => {
+    if (item.accountId !== targetAccountId) return
+    const status = String(item.resultStatus || 'pending')
+    if (!allowedStatuses.has(status)) return
+    if (status === 'won' && rewardMustBeZeroForWon && Number(item.rewardAmount || 0) > 0) return
+    const anchorTime = Number(item.endTime || item.joinedAt || 0)
+    if (anchorTime <= 0) return
+    const distance = Math.abs(now - anchorTime)
+    if (distance > 10 * 60 * 1000) return
+    if (distance < bestDistance) {
+      bestDistance = distance
+      bestIndex = index
+    }
+  })
+
+  return bestIndex
+}
+
+/**
+ * findRewardBackfillHistoryMatch 方法：为钱包到账补偿查找最近一条待开奖或已开奖但奖励未写入的记录。
+ */
+function findRewardBackfillHistoryMatch(accountId) {
+  const now = Date.now()
+  let bestIndex = -1
+  let bestScore = Number.NEGATIVE_INFINITY
+
+  lotteryHistory.value.forEach((item, index) => {
+    if (item.accountId !== accountId) return
+    const status = String(item.resultStatus || 'pending')
+    const isPending = status === 'pending'
+    const isRewardlessWin = status === 'won' && Number(item.rewardAmount || 0) <= 0
+    if (!isPending && !isRewardlessWin) return
+
+    const anchorTime = Number(item.endTime || item.joinedAt || 0)
+    if (anchorTime <= 0) return
+    const distance = Math.abs(now - anchorTime)
+    if (distance > 10 * 60 * 1000) return
+
+    const score = (isRewardlessWin ? 1000000 : 500000) - distance
+    if (score > bestScore) {
+      bestScore = score
+      bestIndex = index
+    }
+  })
+
+  if (bestIndex < 0) return null
+  return {
+    index: bestIndex,
+    record: lotteryHistory.value[bestIndex]
+  }
+}
+
+/**
  * parseRedPacketOutcome 方法：解析红包领取结果，兼容多种返回字段。
  */
 function parseRedPacketOutcome(raw) {
@@ -1514,80 +1633,86 @@ function updateLotteryHistoryOutcome(accountId, outcome) {
   const targetReason = outcome.isWin ? '中奖' : '未中奖'
   const targetLotteryId = String(outcome.lotteryId || '').trim()
 
-  let index = -1
-  if (targetLotteryId) {
-    index = lotteryHistory.value.findIndex(item =>
-      item.accountId === accountId &&
-      String(item.lotteryId || '').trim() === targetLotteryId
-    )
-  }
+  let index = targetLotteryId
+    ? findExactLotteryHistoryIndex(accountId, targetLotteryId)
+    : -1
   if (index < 0) {
-    index = lotteryHistory.value.findIndex(item =>
-      item.accountId === accountId &&
-      String(item.resultStatus || 'pending') === 'pending'
-    )
+    index = findNearestLotteryHistoryIndex(accountId, {
+      statuses: ['pending']
+    })
+  }
+  if (index < 0 && outcome.isWin) {
+    index = findNearestLotteryHistoryIndex(accountId, {
+      statuses: ['won'],
+      rewardMustBeZeroForWon: true
+    })
   }
   if (index < 0) return { updated: false, record: null }
 
   const current = lotteryHistory.value[index]
-  if (current.resultStatus === 'won' || current.resultStatus === 'lost') {
+  const nextRewardAmount = Math.max(
+    Number(current.rewardAmount || 0),
+    Number(outcome.winDiamonds || 0)
+  )
+  const nextStatus = outcome.isWin
+    ? 'won'
+    : (current.resultStatus === 'won' ? 'won' : targetStatus)
+  const nextReason = nextStatus === 'won' ? '中奖' : targetReason
+
+  if (
+    current.resultStatus === nextStatus &&
+    Number(current.rewardAmount || 0) === nextRewardAmount &&
+    String(current.resultReason || '') === nextReason
+  ) {
     return { updated: false, record: current }
   }
 
   const nextRecord = {
     ...current,
     lotteryId: current.lotteryId || targetLotteryId,
-    resultStatus: targetStatus,
-    resultReason: targetReason,
-    rewardAmount: Number(outcome.winDiamonds || current.rewardAmount || 0)
+    resultStatus: nextStatus,
+    resultReason: nextReason,
+    rewardAmount: nextRewardAmount
   }
   lotteryHistory.value[index] = nextRecord
   return { updated: true, record: nextRecord }
 }
 
 /**
- * incrementLotteryWinStats 方法：累计账号福袋中奖统计，并做去重保护。
+ * applyLotteryWinStats 方法：累计账号福袋中奖次数与中奖钻石，分别做去重和到账补差。
  */
-function incrementLotteryWinStats(account, accountId, lotteryId, rewardAmount = 0) {
-  if (!account) return false
-  const key = makeLotteryOutcomeKey(accountId, lotteryId) || `${accountId}:wallet-fallback:${String(lotteryId || '').trim() || Date.now()}`
-  if (countedLotteryWinKeys.has(key)) return false
-  countedLotteryWinKeys.add(key)
-  account.lotteryWinCount++
-  account.todayLotteryWinCount++
-  account.lotteryWonDiamonds += Number(rewardAmount || 0)
-  account.todayLotteryWonDiamonds += Number(rewardAmount || 0)
-  return true
+function applyLotteryWinStats(account, accountId, lotteryId, rewardAmount = 0, options = {}) {
+  if (!account) return { counted: false, rewardAdded: 0, key: '' }
+  const fallbackKey = String(options.fallbackKey || '').trim()
+  const key = makeLotteryOutcomeKey(accountId, lotteryId) || fallbackKey
+  if (!key) return { counted: false, rewardAdded: 0, key: '' }
+
+  let counted = false
+  if (options.countWin !== false && !countedLotteryWinKeys.has(key)) {
+    countedLotteryWinKeys.add(key)
+    account.lotteryWinCount++
+    account.todayLotteryWinCount++
+    counted = true
+  }
+
+  const normalizedReward = Math.max(0, Number(rewardAmount || 0))
+  const creditedReward = Math.max(0, Number(creditedLotteryRewardByKey.get(key) || 0))
+  let rewardAdded = 0
+  if (normalizedReward > creditedReward) {
+    rewardAdded = normalizedReward - creditedReward
+    creditedLotteryRewardByKey.set(key, normalizedReward)
+    account.lotteryWonDiamonds += rewardAdded
+    account.todayLotteryWonDiamonds += rewardAdded
+  }
+
+  return { counted, rewardAdded, key }
 }
 
 /**
  * findPendingLotteryHistoryRecord 方法：查找当前账号最可能对应本次到账的待开奖记录。
  */
 function findPendingLotteryHistoryRecord(accountId) {
-  const now = Date.now()
-  let bestIndex = -1
-  let bestDistance = Number.POSITIVE_INFINITY
-
-  lotteryHistory.value.forEach((item, index) => {
-    if (item.accountId !== accountId) return
-    if (String(item.resultStatus || 'pending') !== 'pending') return
-    const endTime = Number(item.endTime || 0)
-    const joinedAt = Number(item.joinedAt || 0)
-    const anchorTime = endTime > 0 ? endTime : joinedAt
-    if (!anchorTime) return
-    const distance = Math.abs(now - anchorTime)
-    if (distance > 10 * 60 * 1000) return
-    if (distance < bestDistance) {
-      bestDistance = distance
-      bestIndex = index
-    }
-  })
-
-  if (bestIndex < 0) return null
-  return {
-    index: bestIndex,
-    record: lotteryHistory.value[bestIndex]
-  }
+  return findRewardBackfillHistoryMatch(accountId)
 }
 
 /**
@@ -1605,19 +1730,22 @@ function applyWalletWinFallback(accountId, account, rewardDelta) {
   const fallbackKey = lotteryId
     ? makeLotteryOutcomeKey(accountId, lotteryId)
     : `${accountId}:wallet-fallback:${matched.index}:${Number(record.joinedAt || 0)}`
-  if (!fallbackKey || countedWalletFallbackKeys.has(fallbackKey)) return false
-
-  countedWalletFallbackKeys.add(fallbackKey)
+  if (!fallbackKey) return false
 
   const nextRecord = {
     ...record,
     resultStatus: 'won',
     resultReason: '中奖',
-    rewardAmount: reward
+    rewardAmount: Math.max(Number(record.rewardAmount || 0), reward)
   }
   lotteryHistory.value[matched.index] = nextRecord
-  incrementLotteryWinStats(account, accountId, lotteryId || fallbackKey, reward)
-  addLog(`🎉 [${account.nickname}] 已按到账结果回填福袋中奖：${reward} 钻石`, 'success')
+  const statsResult = applyLotteryWinStats(account, accountId, lotteryId, nextRecord.rewardAmount, {
+    fallbackKey,
+    countWin: String(record.resultStatus || 'pending') !== 'won'
+  })
+  if (statsResult.counted || statsResult.rewardAdded > 0) {
+    addLog(`🎉 [${account.nickname}] 已按到账结果回填福袋中奖：${reward} 钻石`, 'success')
+  }
   reportLotteryOutcomeFeedback(accountId, nextRecord, {
     lotteryId,
     isWin: true,
@@ -1847,7 +1975,40 @@ function appendLotteryHistory(record) {
     rewardAmount: Number(record.rewardAmount || 0),
     startTime: Number(record.startTime || 0)
   }
-  lotteryHistory.value = [normalized, ...lotteryHistory.value].slice(0, 300)
+  const nextHistory = lotteryHistory.value.slice()
+  const identityKey = buildLotteryHistoryMergeKey(normalized)
+  let existingIndex = -1
+
+  if (normalized.lotteryId) {
+    existingIndex = findExactLotteryHistoryIndex(normalized.accountId, normalized.lotteryId)
+  }
+  if (existingIndex < 0 && identityKey) {
+    existingIndex = nextHistory.findIndex(item =>
+      buildLotteryHistoryMergeKey(item) === identityKey
+    )
+  }
+
+  if (existingIndex >= 0) {
+    const current = nextHistory[existingIndex]
+    const currentStatus = String(current.resultStatus || 'pending')
+    const merged = {
+      ...current,
+      ...normalized,
+      resultStatus: currentStatus === 'won' || currentStatus === 'lost'
+        ? currentStatus
+        : normalized.resultStatus,
+      resultReason: currentStatus === 'won' || currentStatus === 'lost'
+        ? current.resultReason
+        : normalized.resultReason,
+      rewardAmount: Math.max(Number(current.rewardAmount || 0), Number(normalized.rewardAmount || 0))
+    }
+    nextHistory.splice(existingIndex, 1)
+    nextHistory.unshift(merged)
+  } else {
+    nextHistory.unshift(normalized)
+  }
+
+  lotteryHistory.value = nextHistory.slice(0, 300)
 }
 
 /**
@@ -2546,6 +2707,10 @@ body {
 
 .license-dialog__qr {
   border-radius: 14px;
+  width: 176px;
+  height: 176px;
+  object-fit: contain;
+  display: block;
 }
 
 .license-dialog__qr-placeholder {
@@ -2580,18 +2745,6 @@ body {
   color: #516275;
   font-size: 13px;
   line-height: 1.7;
-}
-
-.license-dialog__bind-token {
-  padding: 10px 12px;
-  border-radius: 14px;
-  background: #ffffff;
-  border: 1px dashed #cbd5e1;
-  color: #334155;
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1.6;
-  word-break: break-all;
 }
 
 .license-dialog__bind-extra {

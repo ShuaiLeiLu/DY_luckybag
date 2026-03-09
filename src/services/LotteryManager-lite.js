@@ -2421,12 +2421,16 @@ class LotteryManager {
     this.startingAccounts.add(account.id)
 
     try {
+      const initialParticipationCount = Math.max(
+        0,
+        Number(existing?.participationCount ?? account?.participationCount ?? 0)
+      )
       const accountData = {
         ...account,
         config,
         callbacks,
         tokenInfo: null,
-        participationCount: 0,
+        participationCount: initialParticipationCount,
         startedAt: Date.now(),
         monitoringStarted: false,
         firstRoundScanDone: false

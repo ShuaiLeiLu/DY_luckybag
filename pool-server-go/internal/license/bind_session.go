@@ -2,20 +2,25 @@ package license
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	bindSessionTTL = 60 * time.Second
+	bindSessionTTL = 5 * time.Minute
 )
 
 // BindSession 描述扫码绑定授权会话。
 type BindSession struct {
 	BindToken      string  `json:"bindToken"`
+	SceneCode      string  `json:"sceneCode"`
 	Status         string  `json:"status"`
 	Message        string  `json:"message"`
 	ClientID       string  `json:"clientId"`
@@ -54,6 +59,7 @@ type BindSessionScanRequest struct {
 type BindSessionGrantRequest struct {
 	BindToken string
 	Days      int
+	OpenID    string
 }
 
 type bindSessionRow struct {
@@ -73,7 +79,7 @@ type bindSessionRow struct {
 	GrantedAt      sql.NullTime
 }
 
-// CreateBindSession 为客户端创建一个 60 秒有效的扫码绑定会话。
+// CreateBindSession 为客户端创建一个短时有效的扫码绑定会话。
 func (s *Service) CreateBindSession(ctx context.Context, req CreateBindSessionRequest) (BindSession, error) {
 	if err := s.ensureAdminReady(); err != nil {
 		return BindSession{}, err
@@ -183,6 +189,9 @@ func (s *Service) MarkBindSessionScanned(ctx context.Context, req BindSessionSca
 		}
 		return s.buildBindSession(ctx, row, now)
 	}
+	if strings.TrimSpace(row.WechatOpenID) != "" && strings.TrimSpace(req.OpenID) != "" && strings.TrimSpace(row.WechatOpenID) != strings.TrimSpace(req.OpenID) {
+		return BindSession{}, fmt.Errorf("bind_session_claimed_by_other_user")
+	}
 
 	nextStatus := "scanned"
 	if _, err := tx.ExecContext(ctx, `
@@ -250,6 +259,9 @@ func (s *Service) GrantBindSession(ctx context.Context, req BindSessionGrantRequ
 	}
 	if strings.TrimSpace(row.WechatOpenID) == "" {
 		return BindSession{}, fmt.Errorf("bind_session_not_scanned")
+	}
+	if strings.TrimSpace(req.OpenID) != "" && strings.TrimSpace(row.WechatOpenID) != strings.TrimSpace(req.OpenID) {
+		return BindSession{}, fmt.Errorf("bind_session_claimed_by_other_user")
 	}
 
 	licenseKey, err := generateLicenseKey()
@@ -420,6 +432,7 @@ func (s *Service) findBindSessionByTokenTx(ctx context.Context, tx *sql.Tx, bind
 func (s *Service) buildBindSession(ctx context.Context, row bindSessionRow, now time.Time) (BindSession, error) {
 	session := BindSession{
 		BindToken:      strings.TrimSpace(row.BindToken),
+		SceneCode:      s.buildBindSceneCode(row.ID, row.BindToken),
 		Status:         strings.TrimSpace(row.Status),
 		ClientID:       strings.TrimSpace(row.ClientID),
 		Fingerprint:    strings.TrimSpace(row.Fingerprint),
@@ -443,7 +456,7 @@ func (s *Service) buildBindSession(ctx context.Context, row bindSessionRow, now 
 
 	if isBindSessionExpired(row, now) && !row.GrantedAt.Valid {
 		session.Status = "expired"
-		session.Message = "二维码已过期，请刷新后重试"
+		session.Message = "小程序码已过期，请刷新后重试"
 		return session, nil
 	}
 	switch session.Status {
@@ -455,7 +468,7 @@ func (s *Service) buildBindSession(ctx context.Context, row bindSessionRow, now 
 		session.Message = "当前客户端已授权"
 	default:
 		session.Status = "pending"
-		session.Message = "请使用微信小程序扫码并完成激励视频"
+		session.Message = "请使用微信直接扫描小程序码，进入小程序后完成激励视频"
 	}
 
 	licenseStatus, err := s.Status(ctx, session.ClientID, session.Fingerprint)
@@ -471,6 +484,76 @@ func (s *Service) buildBindSession(ctx context.Context, row bindSessionRow, now 
 		}
 	}
 	return session, nil
+}
+
+func (s *Service) buildBindSceneCode(id int64, bindToken string) string {
+	if id <= 0 {
+		return ""
+	}
+	idPart := strings.ToLower(strconv.FormatInt(id, 36))
+	mac := hmac.New(sha256.New, []byte(strings.TrimSpace(s.cfg.MiniAppSessionSecret)+"|bind-scene"))
+	_, _ = mac.Write([]byte(fmt.Sprintf("%d:%s", id, strings.TrimSpace(bindToken))))
+	sign := hex.EncodeToString(mac.Sum(nil))
+	if len(sign) > 8 {
+		sign = sign[:8]
+	}
+	return "b" + idPart + "-" + sign
+}
+
+func (s *Service) resolveBindTokenBySceneCode(ctx context.Context, sceneCode string) (string, error) {
+	scene := strings.TrimSpace(sceneCode)
+	if scene == "" {
+		return "", fmt.Errorf("bind_scene_required")
+	}
+	if !strings.HasPrefix(scene, "b") || !strings.Contains(scene, "-") {
+		return "", fmt.Errorf("bind_scene_invalid")
+	}
+	parts := strings.SplitN(strings.TrimPrefix(scene, "b"), "-", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", fmt.Errorf("bind_scene_invalid")
+	}
+	id, err := strconv.ParseInt(parts[0], 36, 64)
+	if err != nil || id <= 0 {
+		return "", fmt.Errorf("bind_scene_invalid")
+	}
+	row, err := s.findBindSessionByID(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	expected := s.buildBindSceneCode(row.ID, row.BindToken)
+	if !hmac.Equal([]byte(expected), []byte(scene)) {
+		return "", fmt.Errorf("bind_scene_invalid")
+	}
+	return strings.TrimSpace(row.BindToken), nil
+}
+
+func (s *Service) findBindSessionByID(ctx context.Context, id int64) (bindSessionRow, error) {
+	row := bindSessionRow{}
+	err := s.db.QueryRowContext(ctx, `
+		SELECT
+			id, bind_token, client_id, fingerprint, app_version, status,
+			wechat_open_id, wechat_union_id, wechat_nickname, license_id,
+			ad_unlock_days, expire_at, scanned_at, granted_at
+		FROM license_bind_sessions
+		WHERE id = ?
+		LIMIT 1
+	`, id).Scan(
+		&row.ID,
+		&row.BindToken,
+		&row.ClientID,
+		&row.Fingerprint,
+		&row.AppVersion,
+		&row.Status,
+		&row.WechatOpenID,
+		&row.WechatUnionID,
+		&row.WechatNickname,
+		&row.LicenseID,
+		&row.AdUnlockDays,
+		&row.ExpireAt,
+		&row.ScannedAt,
+		&row.GrantedAt,
+	)
+	return row, err
 }
 
 func maxInt64(a, b int64) int64 {

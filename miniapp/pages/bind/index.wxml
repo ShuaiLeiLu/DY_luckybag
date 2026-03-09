@@ -1,0 +1,86 @@
+<view class="page page-shell bind-page">
+  <view class="bind-top-space" style="height: {{ topInset }}px;"></view>
+
+  <view class="bind-header">
+    <view class="bind-title">授权中心</view>
+    <view class="bind-status-row">
+      <view class="bind-status-dot {{ statusTone }}"></view>
+      <text class="bind-status-text">{{ deviceStatusText }}</text>
+    </view>
+  </view>
+
+  <view class="license-card">
+    <view class="license-card__blob license-card__blob--top"></view>
+    <view class="license-card__blob license-card__blob--bottom"></view>
+    <view class="license-card__glow"></view>
+    <view class="license-card__head">
+      <view class="license-icon">礼</view>
+      <view class="license-meta">
+        <view class="license-meta__row">
+          <view class="license-name">抖音福袋助手</view>
+          <view class="license-chip {{ licenseChipClass }}">
+            {{ licenseChipText }}
+          </view>
+        </view>
+        <view class="license-subtitle">{{ licenseSubtitleText }}</view>
+      </view>
+    </view>
+
+    <view class="license-card__body">
+      <view class="license-label">剩余授权时长</view>
+      <view class="license-value-row">
+        <text class="license-value">{{ remainingValue }}</text>
+        <text class="license-unit">{{ remainingUnit }}</text>
+      </view>
+      <view class="license-hint">{{ deviceHintText }}</view>
+    </view>
+  </view>
+
+  <view class="reward-card">
+    <view class="reward-card__decor"></view>
+    <view class="reward-card__title-row">
+      <view class="reward-icon">免</view>
+      <view>
+        <view class="reward-title">免费观看广告获取时长</view>
+        <view class="reward-subtitle">{{ rewardSubtitleText }}</view>
+      </view>
+    </view>
+    <button class="reward-button" bindtap="watchRewardAd" loading="{{ rewardLoading }}" disabled="{{ !bindReady }}">
+      {{ rewardButtonText }}
+    </button>
+    <button class="assist-button" bindtap="ensureSession" loading="{{ sessionLoading || bindLoading }}">
+      重新连接设备
+    </button>
+  </view>
+
+  <view class="section-block">
+    <view class="section-title-row">
+      <view class="section-dot">时</view>
+      <view class="section-title">最近动态</view>
+    </view>
+    <view class="timeline-list" wx:if="{{ recentActivities.length }}">
+      <view class="timeline-item" wx:for="{{ recentActivities }}" wx:key="type">
+        <view class="timeline-icon">时</view>
+        <view class="timeline-content">
+          <view class="timeline-title">{{ item.title }}</view>
+          <view class="timeline-time">{{ item.timeLabel }}</view>
+        </view>
+        <view class="timeline-gain" wx:if="{{ item.gainLabel }}">{{ item.gainLabel }}</view>
+      </view>
+    </view>
+    <view class="timeline-empty" wx:else>等待首次绑定或广告解锁记录</view>
+  </view>
+
+  <view class="footer-spacer"></view>
+
+  <view class="bottom-nav">
+    <view class="nav-item active">
+      <view class="nav-icon">工</view>
+      <view class="nav-label">工作台</view>
+    </view>
+    <view class="nav-item" bindtap="goMe">
+      <view class="nav-icon">我</view>
+      <view class="nav-label">我的</view>
+    </view>
+  </view>
+</view>

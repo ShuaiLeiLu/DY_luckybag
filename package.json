@@ -17,10 +17,7 @@
     "pool:db:init:dry": "node ./scripts/init-license-db.mjs --dry-run",
     "pool:dump": "node ./scripts/pool-dump.mjs",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
-    "electron:build": "vite build && electron-builder",
-    "electron:build:win": "vite build && electron-builder --win",
-    "electron:build:win:portable": "vite build && electron-builder --win portable",
-    "electron:build:mac": "vite build && electron-builder --mac"
+    "electron:build:win": "vite build && electron-builder --win portable --x64 && mv \"dist-electron/抖音福袋助手 ${npm_package_version}.exe\" \"dist-electron/抖音福袋助手 ${npm_package_version}-x64.exe\" && electron-builder --win portable --arm64 && mv \"dist-electron/抖音福袋助手 ${npm_package_version}.exe\" \"dist-electron/抖音福袋助手 ${npm_package_version}-arm64.exe\""
   },
   "dependencies": {
     "@vicons/ionicons5": "^0.13.0",
@@ -52,27 +49,10 @@
     },
     "win": {
       "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64",
-            "ia32"
-          ]
-        }
+        "portable"
       ],
       "icon": "build/icon.ico",
       "requestedExecutionLevel": "asInvoker"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": false,
-      "perMachine": false,
-      "allowElevation": true,
-      "guid": "6f3d6e8f-7c2a-4f34-9f6d-8f3f7a2a9b11",
-      "include": "build/installer.nsh",
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "抖音福袋助手"
     }
   }
 }

@@ -16,18 +16,25 @@ import (
 
 // Config 描述授权模块的 MySQL 配置。
 type Config struct {
-	Enabled             bool
-	DefaultUnrestricted bool
-	DSN                 string
-	Host                string
-	Port                int
-	User                string
-	Password            string
-	Database            string
-	Params              string
-	MaxOpenConns        int
-	MaxIdleConns        int
-	ConnMaxLifetimeMin  int
+	Enabled              bool
+	DefaultUnrestricted  bool
+	DSN                  string
+	Host                 string
+	Port                 int
+	User                 string
+	Password             string
+	Database             string
+	Params               string
+	MaxOpenConns         int
+	MaxIdleConns         int
+	ConnMaxLifetimeMin   int
+	MiniAppEnabled       bool
+	MiniAppAppID         string
+	MiniAppAppSecret     string
+	MiniAppSessionSecret string
+	MiniAppSessionTTLMin int
+	MiniAppPagePath      string
+	MiniAppEnvVersion    string
 }
 
 // ActivateRequest 描述授权激活请求。
@@ -124,6 +131,9 @@ type Service struct {
 	settingsMu           sync.RWMutex
 	cachedUnrestricted   bool
 	cachedUnrestrictedAt time.Time
+	miniAppTokenMu       sync.Mutex
+	miniAppAccessToken   string
+	miniAppAccessTokenAt time.Time
 }
 
 type licenseRow struct {

@@ -70,3 +70,4 @@ out/
 *.bak
 *.old
 App.vue.backup
+/pool-server-go/.gocache/

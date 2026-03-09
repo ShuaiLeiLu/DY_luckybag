@@ -48,20 +48,27 @@ type fileConfig struct {
 		FeedbackLogPath    string  `json:"feedbackLogPath"`
 	} `json:"pool"`
 	License struct {
-		Enabled            bool   `json:"enabled"`
-		Unrestricted       bool   `json:"unrestricted"`
-		AdminToken         string `json:"adminToken"`
-		AdUnlockDays       int    `json:"adUnlockDays"`
-		DSN                string `json:"dsn"`
-		Host               string `json:"host"`
-		Port               int    `json:"port"`
-		User               string `json:"user"`
-		Password           string `json:"password"`
-		Database           string `json:"database"`
-		Params             string `json:"params"`
-		MaxOpenConns       int    `json:"maxOpenConns"`
-		MaxIdleConns       int    `json:"maxIdleConns"`
-		ConnMaxLifetimeMin int    `json:"connMaxLifetimeMin"`
+		Enabled              bool   `json:"enabled"`
+		Unrestricted         bool   `json:"unrestricted"`
+		AdminToken           string `json:"adminToken"`
+		AdUnlockDays         int    `json:"adUnlockDays"`
+		MiniAppEnabled       bool   `json:"miniAppEnabled"`
+		MiniAppAppID         string `json:"miniAppAppId"`
+		MiniAppAppSecret     string `json:"miniAppAppSecret"`
+		MiniAppSessionSecret string `json:"miniAppSessionSecret"`
+		MiniAppSessionTTLMin int    `json:"miniAppSessionTTLMin"`
+		MiniAppPagePath      string `json:"miniAppPagePath"`
+		MiniAppEnvVersion    string `json:"miniAppEnvVersion"`
+		DSN                  string `json:"dsn"`
+		Host                 string `json:"host"`
+		Port                 int    `json:"port"`
+		User                 string `json:"user"`
+		Password             string `json:"password"`
+		Database             string `json:"database"`
+		Params               string `json:"params"`
+		MaxOpenConns         int    `json:"maxOpenConns"`
+		MaxIdleConns         int    `json:"maxIdleConns"`
+		ConnMaxLifetimeMin   int    `json:"connMaxLifetimeMin"`
 	} `json:"license"`
 	Redis struct {
 		Enabled        bool   `json:"enabled"`
@@ -574,16 +581,20 @@ func main() {
 	}
 
 	lc := licensepkg.Config{
-		Enabled:             false,
-		DefaultUnrestricted: false,
-		Host:                "127.0.0.1",
-		Port:                3306,
-		User:                "root",
-		Database:            "dy_fudai",
-		Params:              "charset=utf8mb4&parseTime=true&loc=Local",
-		MaxOpenConns:        8,
-		MaxIdleConns:        4,
-		ConnMaxLifetimeMin:  30,
+		Enabled:              false,
+		DefaultUnrestricted:  false,
+		Host:                 "127.0.0.1",
+		Port:                 3306,
+		User:                 "root",
+		Database:             "dy_fudai",
+		Params:               "charset=utf8mb4&parseTime=true&loc=Local",
+		MaxOpenConns:         8,
+		MaxIdleConns:         4,
+		ConnMaxLifetimeMin:   30,
+		MiniAppEnabled:       false,
+		MiniAppSessionTTLMin: 1440,
+		MiniAppPagePath:      "pages/index/index",
+		MiniAppEnvVersion:    "release",
 	}
 	adminToken := ""
 	licenseAdUnlockDays := 30
@@ -593,6 +604,19 @@ func main() {
 		adminToken = strings.TrimSpace(fileCfg.License.AdminToken)
 		if fileCfg.License.AdUnlockDays > 0 {
 			licenseAdUnlockDays = fileCfg.License.AdUnlockDays
+		}
+		lc.MiniAppEnabled = fileCfg.License.MiniAppEnabled
+		lc.MiniAppAppID = strings.TrimSpace(fileCfg.License.MiniAppAppID)
+		lc.MiniAppAppSecret = strings.TrimSpace(fileCfg.License.MiniAppAppSecret)
+		lc.MiniAppSessionSecret = strings.TrimSpace(fileCfg.License.MiniAppSessionSecret)
+		if fileCfg.License.MiniAppSessionTTLMin > 0 {
+			lc.MiniAppSessionTTLMin = fileCfg.License.MiniAppSessionTTLMin
+		}
+		if strings.TrimSpace(fileCfg.License.MiniAppPagePath) != "" {
+			lc.MiniAppPagePath = strings.TrimSpace(fileCfg.License.MiniAppPagePath)
+		}
+		if strings.TrimSpace(fileCfg.License.MiniAppEnvVersion) != "" {
+			lc.MiniAppEnvVersion = strings.TrimSpace(fileCfg.License.MiniAppEnvVersion)
 		}
 		if strings.TrimSpace(fileCfg.License.DSN) != "" {
 			lc.DSN = strings.TrimSpace(fileCfg.License.DSN)
@@ -627,6 +651,13 @@ func main() {
 	}
 	lc.Enabled = getenvBool("POOL_LICENSE_ENABLED", lc.Enabled)
 	lc.DefaultUnrestricted = getenvBool("POOL_LICENSE_UNRESTRICTED", lc.DefaultUnrestricted)
+	lc.MiniAppEnabled = getenvBool("POOL_LICENSE_MINIAPP_ENABLED", lc.MiniAppEnabled)
+	lc.MiniAppAppID = getenvStr("POOL_LICENSE_MINIAPP_APP_ID", lc.MiniAppAppID)
+	lc.MiniAppAppSecret = getenvStr("POOL_LICENSE_MINIAPP_APP_SECRET", lc.MiniAppAppSecret)
+	lc.MiniAppSessionSecret = getenvStr("POOL_LICENSE_MINIAPP_SESSION_SECRET", lc.MiniAppSessionSecret)
+	lc.MiniAppSessionTTLMin = getenvInt("POOL_LICENSE_MINIAPP_SESSION_TTL_MIN", lc.MiniAppSessionTTLMin)
+	lc.MiniAppPagePath = getenvStr("POOL_LICENSE_MINIAPP_PAGE_PATH", lc.MiniAppPagePath)
+	lc.MiniAppEnvVersion = getenvStr("POOL_LICENSE_MINIAPP_ENV_VERSION", lc.MiniAppEnvVersion)
 	lc.DSN = getenvStr("POOL_LICENSE_DSN", lc.DSN)
 	lc.Host = getenvStr("POOL_LICENSE_MYSQL_HOST", lc.Host)
 	lc.Port = getenvInt("POOL_LICENSE_MYSQL_PORT", lc.Port)
@@ -961,6 +992,39 @@ func main() {
 		})
 	})
 
+	mux.HandleFunc("/license/bind-session/miniapp-code", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+
+		bindRef := firstNonEmpty(
+			strings.TrimSpace(r.URL.Query().Get("sceneCode")),
+			strings.TrimSpace(r.URL.Query().Get("scene")),
+			strings.TrimSpace(r.URL.Query().Get("bindToken")),
+		)
+		imageBytes, contentType, err := licenseSvc.GetMiniAppCodeImage(r.Context(), bindRef)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "content-type")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(imageBytes)
+	})
+
 	mux.HandleFunc("/license/bind-session/scan", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions {
 			writeJSON(w, http.StatusNoContent, map[string]any{})
@@ -1033,6 +1097,187 @@ func main() {
 			BindToken: req.BindToken,
 			Days:      req.Days,
 		})
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": session})
+	})
+
+	mux.HandleFunc("/miniapp/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+		var req struct {
+			Code string `json:"code"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		session, err := licenseSvc.MiniAppLogin(r.Context(), req.Code)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": session})
+	})
+
+	mux.HandleFunc("/miniapp/bootstrap", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		unrestricted := false
+		if licenseSvc != nil {
+			if value, err := licenseSvc.IsUnrestricted(r.Context()); err == nil {
+				unrestricted = value
+			}
+		}
+		reason := ""
+		message := "ok"
+		ready := false
+		switch {
+		case !lc.Enabled:
+			reason = "license_disabled"
+			message = "授权服务未启用"
+		case licenseErr != nil:
+			reason = "license_service_init_failed"
+			message = "授权服务初始化失败"
+		case unrestricted:
+			reason = "license_unrestricted"
+			message = "服务端免授权已开启"
+			ready = true
+		case !lc.MiniAppEnabled:
+			reason = "miniapp_disabled"
+			message = "小程序授权未启用"
+		case strings.TrimSpace(lc.MiniAppAppID) == "" || strings.TrimSpace(lc.MiniAppAppSecret) == "":
+			reason = "miniapp_config_incomplete"
+			message = "服务端未配置小程序参数"
+		case strings.TrimSpace(lc.MiniAppSessionSecret) == "":
+			reason = "miniapp_session_secret_required"
+			message = "服务端缺少会话密钥"
+		default:
+			ready = true
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true,
+			"bootstrap": map[string]any{
+				"licenseEnabled": lc.Enabled,
+				"unrestricted":   unrestricted,
+				"miniAppEnabled": lc.MiniAppEnabled,
+				"ready":          ready,
+				"reason":         reason,
+				"message":        message,
+				"adUnlockDays":   licenseAdUnlockDays,
+				"pagePath":       lc.MiniAppPagePath,
+				"envVersion":     lc.MiniAppEnvVersion,
+				"serverTime":     time.Now().UnixMilli(),
+			},
+		})
+	})
+
+	mux.HandleFunc("/miniapp/bind-session/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+		bindRef := firstNonEmpty(
+			strings.TrimSpace(r.URL.Query().Get("scene")),
+			strings.TrimSpace(r.URL.Query().Get("sceneCode")),
+			strings.TrimSpace(r.URL.Query().Get("bindToken")),
+		)
+		session, err := licenseSvc.MiniAppGetBindSession(r.Context(), bindRef)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": session})
+	})
+
+	mux.HandleFunc("/miniapp/bind-session/scan", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+		var req struct {
+			BindToken    string `json:"bindToken"`
+			Scene        string `json:"scene"`
+			SceneCode    string `json:"sceneCode"`
+			SessionToken string `json:"sessionToken"`
+			Nickname     string `json:"nickname"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		bindRef := firstNonEmpty(req.Scene, req.SceneCode, req.BindToken)
+		session, err := licenseSvc.MiniAppScanBindSession(r.Context(), bindRef, req.SessionToken, req.Nickname)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": session})
+	})
+
+	mux.HandleFunc("/miniapp/bind-session/grant", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+		var req struct {
+			BindToken    string `json:"bindToken"`
+			Scene        string `json:"scene"`
+			SceneCode    string `json:"sceneCode"`
+			SessionToken string `json:"sessionToken"`
+			Days         int    `json:"days"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		if req.Days <= 0 {
+			req.Days = licenseAdUnlockDays
+		}
+		bindRef := firstNonEmpty(req.Scene, req.SceneCode, req.BindToken)
+		session, err := licenseSvc.MiniAppGrantBindSession(r.Context(), bindRef, req.SessionToken, req.Days)
 		if err != nil {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 			return

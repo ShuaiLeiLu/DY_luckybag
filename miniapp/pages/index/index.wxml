@@ -1,0 +1,97 @@
+<view class="container">
+  <view class="header">
+    <view class="title-group">
+      <text class="page-title">授权中心</text>
+      <view class="status-indicator">
+        <view class="dot blink"></view>
+        <text class="status-text">{{ deviceStatusText }}</text>
+      </view>
+    </view>
+  </view>
+
+  <view class="auth-card">
+    <view class="glow glow-tr"></view>
+    <view class="glow glow-bl"></view>
+
+    <view class="card-content">
+      <view class="card-header">
+        <view class="software-info">
+          <view class="icon-box">
+            <image class="icon-image icon-gift" src="/assets/gift.svg" mode="aspectFit"></image>
+          </view>
+          <view class="software-text">
+            <text class="software-name">抖音福袋助手</text>
+            <view class="software-version">
+              <image class="icon-image icon-shield" src="/assets/shield-check.svg" mode="aspectFit"></image>
+              <text>{{ licenseSubtitleText }}</text>
+            </view>
+          </view>
+        </view>
+        <view class="status-tag">{{ licenseChipText }}</view>
+      </view>
+
+      <view class="card-body">
+        <text class="time-label">剩余授权时长</text>
+        <view class="time-box">
+          <text class="time-number">{{ remainingValue }}</text>
+          <text class="time-unit">{{ remainingUnit }}</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <view class="action-card-wrapper">
+    <view class="action-card">
+      <view class="action-orb"></view>
+      <view class="action-inner">
+        <view class="action-header">
+          <view class="action-title-box">
+            <image class="icon-image icon-zap" src="/assets/zap.svg" mode="aspectFit"></image>
+            <text class="action-title">延长授权时长</text>
+          </view>
+          <text class="action-desc">{{ rewardSubtitleText }}</text>
+        </view>
+
+        <view class="btn-ad {{ rewardLoading ? 'btn-disabled' : '' }}" hover-class="btn-hover" bindtap="handleWatchAd">
+          <view class="shimmer"></view>
+          <image class="icon-image icon-key-button" src="/assets/key-white.svg" mode="aspectFit"></image>
+          <text class="btn-text">免费获取授权（{{ rewardGainText }}）</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <view class="history-section">
+    <view class="section-title">
+      <image class="icon-image icon-history" src="/assets/history.svg" mode="aspectFit"></image>
+      <text>最近动态</text>
+    </view>
+
+    <view class="history-list">
+      <block wx:for="{{history}}" wx:key="id">
+        <view class="history-item">
+          <view class="history-left">
+            <view class="history-icon-bg">
+              <image class="icon-image icon-clock" src="/assets/clock.svg" mode="aspectFit"></image>
+            </view>
+            <view class="history-info">
+              <text class="history-action">{{item.action}}</text>
+              <text class="history-date">{{item.date}}</text>
+            </view>
+          </view>
+          <text class="history-time-change">{{item.time}}</text>
+        </view>
+      </block>
+    </view>
+  </view>
+
+  <view class="grant-mask" wx:if="{{ grantSubmitting }}">
+    <view class="grant-mask__panel">
+      <view class="grant-mask__orb"></view>
+      <view class="grant-mask__ring grant-mask__ring--outer"></view>
+      <view class="grant-mask__ring grant-mask__ring--inner"></view>
+      <text class="grant-mask__title">正在获取授权...</text>
+      <text class="grant-mask__desc">系统正在同步授权时长，请稍候</text>
+    </view>
+  </view>
+</view>
