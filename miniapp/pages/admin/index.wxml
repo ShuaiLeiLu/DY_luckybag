@@ -1,0 +1,169 @@
+<view class="admin-page" style="padding-top: {{ topInset }}px;">
+  <view class="admin-header">
+    <view class="admin-title-row">
+      <view class="admin-title">抖娃控制台</view>
+      <view class="admin-subtitle">系统级监控与配置</view>
+    </view>
+    <view class="admin-tabs">
+      <view class="admin-tab {{ adminTab === 'overview' ? 'is-active' : '' }}" data-tab="overview" bindtap="switchTab">系统概览</view>
+      <view class="admin-tab {{ adminTab === 'config' ? 'is-active' : '' }}" data-tab="config" bindtap="switchTab">系统配置</view>
+      <view class="admin-tab {{ adminTab === 'devices' ? 'is-active' : '' }}" data-tab="devices" bindtap="switchTab">终端流水</view>
+    </view>
+  </view>
+
+  <view class="admin-body">
+    <view wx:if="{{ adminTab === 'overview' }}" class="panel">
+      <view class="stats-grid">
+        <view class="stat-card">
+          <view class="stat-label">授权码总量</view>
+          <view class="stat-value">{{ metrics.total }}</view>
+          <view class="stat-note">数据口径：授权池</view>
+        </view>
+        <view class="stat-card">
+          <view class="stat-label">有效授权数量</view>
+          <view class="stat-value">{{ metrics.active }}</view>
+        </view>
+        <view class="stat-card">
+          <view class="stat-label">已绑定设备数</view>
+          <view class="stat-value">{{ metrics.bound }}</view>
+        </view>
+        <view class="stat-card">
+          <view class="stat-label">已绑定微信数</view>
+          <view class="stat-value">{{ metrics.wechat }}</view>
+        </view>
+      </view>
+
+      <view class="card">
+        <view class="card-hd">系统状态</view>
+        <view class="card-bd">
+          <view class="service-grid">
+            <view class="service-chip">
+              <view class="service-dot {{ serviceStatus.license ? 'ok' : 'off' }}"></view>
+              <view>
+                <view class="service-name">授权服务</view>
+                <view class="service-status">{{ serviceStatus.license ? '正常' : '异常' }}</view>
+              </view>
+            </view>
+            <view class="service-chip">
+              <view class="service-dot {{ serviceStatus.unrestricted ? 'ok' : 'off' }}"></view>
+              <view>
+                <view class="service-name">免授权</view>
+                <view class="service-status">{{ serviceStatus.unrestricted ? '开启' : '关闭' }}</view>
+              </view>
+            </view>
+            <view class="service-chip">
+              <view class="service-dot info"></view>
+              <view>
+                <view class="service-name">数据源</view>
+                <view class="service-status">MySQL</view>
+              </view>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <view class="card risk-card">
+        <view class="card-hd">风控异常（近24h）</view>
+        <view class="card-bd">
+          <view class="risk-item" wx:for="{{ riskItems }}" wx:key="label">
+            <view class="risk-label">{{ item.label }}</view>
+            <view class="risk-count">{{ item.count }} 起</view>
+          </view>
+        </view>
+      </view>
+    </view>
+
+    <view wx:elif="{{ adminTab === 'config' }}" class="panel">
+      <view class="card">
+        <view class="card-hd">授权系统配置</view>
+        <view class="card-bd">
+          <view class="config-row">
+            <view>
+              <view class="config-title">授权免限制开关</view>
+              <view class="config-desc">开启后全局免授权即可使用</view>
+            </view>
+            <switch checked="{{ serviceStatus.unrestricted }}" bindchange="toggleUnrestricted" color="#4f46e5"></switch>
+          </view>
+          <view class="config-row config-row--spaced">
+            <view>
+              <view class="config-title">小程序授权开关</view>
+              <view class="config-desc">控制小程序端是否允许签到</view>
+            </view>
+            <switch checked="{{ true }}" color="#4f46e5"></switch>
+          </view>
+        </view>
+      </view>
+
+      <view class="card">
+        <view class="card-hd">新增授权</view>
+        <view class="card-bd">
+          <view class="form-row">
+            <input class="input" type="number" value="{{ createDays }}" placeholder="授权天数" bindinput="onDaysInput" />
+            <input class="input" type="number" value="{{ createCount }}" placeholder="授权码数量" bindinput="onCountInput" />
+            <button class="btn" bindtap="mockCreate">创建授权</button>
+          </view>
+          <textarea class="textarea" value="{{ createdKeys }}" placeholder="创建成功后，这里会显示授权码（每行一个）" disabled></textarea>
+        </view>
+      </view>
+
+      <view class="card">
+        <view class="card-hd">运营与数值</view>
+        <view class="card-bd">
+          <view class="config-row">
+            <view>
+              <view class="config-title">每日签到奖励时长</view>
+              <view class="config-desc">单位：天</view>
+            </view>
+            <input class="input input--sm" type="number" value="{{ rewardDays }}" bindinput="onRewardInput" />
+          </view>
+          <view class="config-row config-row--spaced">
+            <view>
+              <view class="config-title">最小客户端版本</view>
+              <view class="config-desc">低于该版本强制升级</view>
+            </view>
+            <input class="input input--sm" type="text" value="{{ minVersion }}" bindinput="onMinVersionInput" />
+          </view>
+          <view class="config-row config-row--spaced config-row--block">
+            <view class="config-title">首页公告</view>
+            <textarea class="textarea" value="{{ noticeText }}" bindinput="onNoticeInput" placeholder="输入公告内容"></textarea>
+          </view>
+        </view>
+      </view>
+    </view>
+
+    <view wx:elif="{{ adminTab === 'devices' }}" class="panel">
+      <view class="search-row">
+        <input class="search-input" placeholder="搜索 OpenID / 设备指纹" />
+      </view>
+
+      <view class="section-title">实时终端连接</view>
+      <view class="device-list">
+        <view class="device-card" wx:for="{{ devices }}" wx:key="id">
+          <view>
+            <view class="device-title">
+              <text class="device-id">{{ item.id }}</text>
+              <view class="device-dot {{ item.status === 'online' ? 'ok' : 'off' }}"></view>
+            </view>
+            <view class="device-meta">绑定用户：{{ item.user }}</view>
+            <view class="device-meta">授权到期：{{ item.expire }}</view>
+          </view>
+          <button class="btn-secondary">{{ item.status === 'online' ? '禁用' : '解禁' }}</button>
+        </view>
+      </view>
+
+      <view class="section-title">授权 / 签到流水</view>
+      <view class="log-list">
+        <view class="log-card" wx:for="{{ logs }}" wx:key="id">
+          <view class="log-main">
+            <view class="log-title">{{ item.action }}</view>
+            <view class="log-target">{{ item.target }}</view>
+          </view>
+          <view class="log-side">
+            <view class="log-tag {{ item.type }}">{{ item.typeLabel }}</view>
+            <view class="log-time">{{ item.time }}</view>
+          </view>
+        </view>
+      </view>
+    </view>
+  </view>
+</view>

@@ -172,6 +172,7 @@ class LotteryManager {
     this.activeScanAccountId = '' // 当前客户端内唯一允许处于扫描态的账号
     this.clientFirstRoundScanDone = false // 本客户端首轮全站快速扫描是否已完成
     this.localScanRoomLeaseById = new Map() // roomId -> expireMs，本客户端内短期去重，避免多个账号重复打详情
+    this.allScanSeenRooms = new Map() // roomId -> expireMs，全站扫描跨轮次去重，减少重复拉详情
     this.skipLotteryUntilByAccount = new Map() // accountId -> Map(`${roomId}:${lotteryId}`, expireMs)
     this.waitRandomChatStateByAccount = new Map() // accountId -> { roomId, nextAt, lastContent, sentCount }
     this.preheatStateByAccount = new Map() // accountId -> 预热中的福袋上下文
@@ -447,7 +448,7 @@ class LotteryManager {
     this.syncLocalScanPlans()
 
     if (changed) {
-      this.logger.info(
+      this.logger.debug(
         `[scan-assignment] client=${assignment.clientId} mode=${assignment.mode} rank=${assignment.rank}/${assignment.activeClients} all=${assignment.allScanEnabled ? 'on' : 'off'} categories=${assignment.categoryIds.join(',') || '(none)'} scanners=${assignment.budget?.maxConcurrentScanners || 1} pages=${assignment.budget?.maxCategoryPages || 0} risk=${assignment.clusterRiskLevel || 0}`
       )
     }
@@ -1062,7 +1063,7 @@ class LotteryManager {
     this.syncLocalScanPlans(accountId ? [accountId, ...this.getEligibleScannerAccounts()] : null)
     if (accountId && this.scanPlanByAccount.has(accountId)) {
       const suffix = reason ? ` (${reason})` : ''
-      this.logger.info(`[${accountId}] local scan plan => ${this.getScanPlanLabel(this.scanPlanByAccount.get(accountId))}${suffix}`)
+      this.logger.debug(`[${accountId}] local scan plan => ${this.getScanPlanLabel(this.scanPlanByAccount.get(accountId))}${suffix}`)
     }
   }
 
@@ -1086,7 +1087,7 @@ class LotteryManager {
     if (prev === normalizedRole) return
     this.scanRoleByAccount.set(accountId, normalizedRole)
     const label = normalizedRole === 'scanner' ? this.getScanPlanLabel(plan || this.scanPlanByAccount.get(accountId)) : '执行'
-    this.logger.info(`[${accountId}] scan role => ${normalizedRole} (${label})`)
+    this.logger.debug(`[${accountId}] scan role => ${normalizedRole} (${label})`)
     this.emitAccountDispatchUpdate(accountId)
   }
 
@@ -1189,7 +1190,7 @@ class LotteryManager {
   /**
    * shouldLogPoolWarn 方法：根据冷却时间判断是否允许再次输出池服务告警日志。
    */
-  shouldLogPoolWarn(accountId, type, cooldownMs = 15000) {
+  shouldLogPoolWarn(accountId, type, cooldownMs = 60000) {
     const key = `${accountId}:${type}`
     const now = Date.now()
     const prev = Number(this.lastPoolWarnAt.get(key) || 0)
@@ -1367,13 +1368,13 @@ class LotteryManager {
       filters: this.buildServerTopFilters(config, {
         maxRemainingSec: Number.isFinite(Number(options?.maxRemainingSec))
           ? Number(options.maxRemainingSec)
-          : LOCKED_ROOM_SELECT_MAX_SEC
+          : PREHEAT_SELECT_MAX_SEC
       }),
       preferKeys: Array.isArray(options?.preferKeys) ? options.preferKeys : [],
       excludeKeys: Array.isArray(options?.excludeKeys) ? options.excludeKeys : []
     })
     if (!res.ok) {
-      if (this.shouldLogPoolWarn(accountId, 'claim', 5000)) {
+      if (this.shouldLogPoolWarn(accountId, 'claim', 60000)) {
         this.accounts.get(accountId)?.callbacks?.onLog?.(`⚠️ 服务端任务领取失败: ${this.formatPoolErrorMessage(res.error, '领取失败')}`, 'warning')
       }
       return null
@@ -1418,7 +1419,7 @@ class LotteryManager {
       limit: Math.max(1, Math.min(PREHEAT_TOP_K, Number(options.limit || PREHEAT_TOP_K)))
     })
     if (!res.ok) {
-      if (this.shouldLogPoolWarn(accountId, 'review', 3500)) {
+      if (this.shouldLogPoolWarn(accountId, 'review', 60000)) {
         this.accounts.get(accountId)?.callbacks?.onLog?.(`⚠️ 服务端复评分失败: ${this.formatPoolErrorMessage(res.error, '复评分失败')}`, 'warning')
       }
       return null
@@ -1552,9 +1553,11 @@ class LotteryManager {
     const valid = Number(payload?.validCandidates || list.length || 0)
 
     this.logger.debug(`[${accountId}] pool snapshot valid=${valid}, active=${active}, fetched=${list.length}`)
-    list.forEach((item, index) => {
+    // 只打印前 3 条，避免长列表刷屏
+    const sample = list.slice(0, 3)
+    const nowSec = Math.floor(Date.now() / 1000)
+    sample.forEach((item, index) => {
       const prob = Number(item.simpleProbability || 0) * 100
-      const nowSec = Math.floor(Date.now() / 1000)
       const remain = Math.max(0, Number(item.end_time || 0) - nowSec)
       const join = Number(item.joinTotal || 0)
       const lucky = Number(item.winningTotal || 0)
@@ -1563,6 +1566,9 @@ class LotteryManager {
         `[${accountId}] pool #${rank}: ${item.authorNickname || '未知主播'} | ${item.lotteryName || item.prize_name || '未知福袋'} | p=${prob.toFixed(2)}% | remain=${remain}s | ${lucky}/${join}`
       )
     })
+    if (list.length > 3) {
+      this.logger.debug(`[${accountId}] pool ...and ${list.length - 3} more`)
+    }
   }
 
   /**
@@ -1833,6 +1839,37 @@ class LotteryManager {
   }
 
   /**
+   * isAllScanRoomSeen 方法：判断全站扫描房间是否在 TTL 内已见过，跨轮次减少重复拉详情。
+   */
+  isAllScanRoomSeen(roomId) {
+    const expireAt = this.allScanSeenRooms.get(roomId)
+    if (!expireAt) return false
+    if (expireAt <= Date.now()) {
+      this.allScanSeenRooms.delete(roomId)
+      return false
+    }
+    return true
+  }
+
+  /**
+   * markAllScanRoomSeen 方法：标记全站扫描已见房间，带 TTL。
+   */
+  markAllScanRoomSeen(roomId, ttlMs = 30000) {
+    this.allScanSeenRooms.set(roomId, Date.now() + ttlMs)
+  }
+
+  /**
+   * pruneAllScanSeenRooms 方法：清理全站扫描已过期的已见房间。
+   */
+  pruneAllScanSeenRooms(nowMs = Date.now()) {
+    for (const [roomId, expireAt] of this.allScanSeenRooms.entries()) {
+      if (Number(expireAt || 0) <= nowMs) {
+        this.allScanSeenRooms.delete(roomId)
+      }
+    }
+  }
+
+  /**
    * claimLocalScanRooms 方法：为当前客户端短期占用一批房间，避免多个账号重复请求相同详情。
    */
   claimLocalScanRooms(accountId, roomInfoList, options = {}) {
@@ -1984,7 +2021,7 @@ class LotteryManager {
       leaseSec: POOL_TASK_LEASE_SEC
     })
     if (!res.ok || res.data?.renewed !== true) {
-      if (this.shouldLogPoolWarn(accountId, 'renew', 6000)) {
+      if (this.shouldLogPoolWarn(accountId, 'renew', 60000)) {
         this.accounts.get(accountId)?.callbacks?.onLog?.('⚠️ 服务端任务续租失败，当前福袋可能会被其他客户端接管', 'warning')
       }
       return false
@@ -2177,6 +2214,10 @@ class LotteryManager {
     const timer = setTimeout(async () => {
       this.scanCycleTimerByAccount.delete(accountId)
       if (!this.accounts.has(accountId) || this.isPaused(accountId)) return
+
+      // 每轮扫描前清理过期的本地去重缓存，防止内存缓慢膨胀
+      this.pruneLocalScanRoomLeases()
+      this.pruneAllScanSeenRooms()
 
       const plan = this.getNormalScanPlan(accountId)
       if (!plan) return
@@ -2668,6 +2709,7 @@ class LotteryManager {
     if (this.accounts.size === 0) {
       this.clientFirstRoundScanDone = false
       this.localScanRoomLeaseById.clear()
+    this.allScanSeenRooms.clear()
     }
     this.emitDispatchUpdateForAllAccounts()
   }
@@ -2703,6 +2745,7 @@ class LotteryManager {
     this.scanAssignmentCache = null
     this.scanPlanByAccount.clear()
     this.localScanRoomLeaseById.clear()
+    this.allScanSeenRooms.clear()
     this.clientFirstRoundScanDone = false
   }
 
@@ -2926,7 +2969,12 @@ class LotteryManager {
       }
 
       // 首轮只跑全站扫描，后续轮次再用分类补充池子
-      const shouldRunCategoryScan = !useSupermanFirstRound && Array.isArray(assignedCategoryList) && assignedCategoryList.length > 0
+      // 全站扫描结果充足时跳过分类，减少不必要的请求压力
+      const SKIP_CATEGORY_THRESHOLD = 15
+      const afterAllCandidateCount = this.getAccountLotteryList(accountId).length
+      const shouldRunCategoryScan = !useSupermanFirstRound &&
+        Array.isArray(assignedCategoryList) && assignedCategoryList.length > 0 &&
+        afterAllCandidateCount < SKIP_CATEGORY_THRESHOLD
       if (shouldRunCategoryScan) {
         await this.startCollectLive(accountId, scanProfile)
       }
@@ -3614,16 +3662,18 @@ class LotteryManager {
     const current = [...this.getAccountLotteryList(accountId)]
     const accountData = this.accounts.get(accountId)
     const config = accountData?.config || {}
+    const useServerFiltering = this.isPoolServerEnabled()
     const minPoolEndTime = this.getMinPoolEndTime(accountId)
 
     const existingRoomIds = new Set(current.map((item) => item.roomId))
     let addedCount = 0
     
     for (const lottery of newLotteryList) {
-      if (this.shouldFilterByJoinRequirement(lottery, config)) {
+      // 启用共享池时，扫描端只负责采集和上报，不再本地过滤参与条件。
+      if (!useServerFiltering && this.shouldFilterByJoinRequirement(lottery, config)) {
         continue
       }
-      if (!this.isPoolServerEnabled() && config.onlyPhysicalPrize?.enabled && !isPhysicalPrizeLottery(lottery)) {
+      if (!useServerFiltering && config.onlyPhysicalPrize?.enabled && !isPhysicalPrizeLottery(lottery)) {
         continue
       }
       const lotteryEndTime = Number(lottery?.end_time || 0)
@@ -4425,9 +4475,9 @@ class LotteryManager {
               return
             }
             if (reviewRes.decision === 'switch') {
-              accountData.callbacks.onLog(`🧠 服务端${reviewStage.toUpperCase()}复评分：已锁定当前房间，忽略跨房切换建议`)
+              this.logger.debug(`[${accountId}] 服务端${reviewStage.toUpperCase()}复评分：已锁定当前房间，忽略跨房切换建议`)
             } else {
-              accountData.callbacks.onLog(`🧠 服务端${reviewStage.toUpperCase()}复评分：当前目标继续保留`)
+              this.logger.debug(`[${accountId}] 服务端${reviewStage.toUpperCase()}复评分：当前目标继续保留`)
             }
           }
         }

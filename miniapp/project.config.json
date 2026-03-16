@@ -1,7 +1,7 @@
 {
   "appid": "wx91a036cbc18bfd39",
   "projectname": "dy_fudai_license_miniapp",
-  "description": "抖音福袋助手微信授权小程序",
+  "description": "抖娃福袋微信授权小程序",
   "compileType": "miniprogram",
   "setting": {
     "urlCheck": false,

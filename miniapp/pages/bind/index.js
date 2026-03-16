@@ -1,5 +1,5 @@
 const app = getApp()
-const { AD_UNIT_ID, AD_UNLOCK_DAYS } = require('../../config')
+const { SIGNIN_REWARD_DAYS, AD_UNLOCK_DAYS } = require('../../config')
 const { request, wxLogin } = require('../../utils/request')
 
 function getTopInset() {
@@ -32,6 +32,30 @@ function formatClock(ms) {
   const hh = `${date.getHours()}`.padStart(2, '0')
   const mm = `${date.getMinutes()}`.padStart(2, '0')
   return `${hh}:${mm}`
+}
+
+function isSameDay(ts) {
+  if (!ts) return false
+  const date = new Date(ts)
+  const now = new Date()
+  return (
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate()
+  )
+}
+
+function getStoredSigninAt() {
+  try {
+    const cached = wx.getStorageSync('miniappLastSigninAt')
+    return Number(cached || 0)
+  } catch (_) {
+    return 0
+  }
+}
+
+function getRewardDays(days) {
+  return Math.max(1, Number(days || SIGNIN_REWARD_DAYS || AD_UNLOCK_DAYS || 1))
 }
 
 function getRemainingParts(expireAt) {
@@ -74,6 +98,7 @@ Page({
     bindLoading: false,
     rewardLoading: false,
     bindReady: false,
+    rewardDisabled: false,
     statusTone: 'pending',
     deviceStatusText: '等待设备连接',
     statusText: '请从桌面端直接扫描小程序码进入本页',
@@ -81,9 +106,9 @@ Page({
     licenseChipClass: 'is-idle',
     licenseSubtitleText: '完成绑定后即可解锁完整功能',
     deviceHintText: '请从桌面端直接扫描小程序码进入本页',
-    adUnlockDays: AD_UNLOCK_DAYS,
-    rewardSubtitleText: `观看一段完整视频，即可获得 ${AD_UNLOCK_DAYS} 天完整授权`,
-    rewardButtonText: `观看广告（+${AD_UNLOCK_DAYS}天）`,
+    adUnlockDays: getRewardDays(AD_UNLOCK_DAYS),
+    rewardSubtitleText: `每日签到一次，可免费续签 ${getRewardDays(AD_UNLOCK_DAYS)} 天授权`,
+    rewardButtonText: `免费获取授权（+${getRewardDays(AD_UNLOCK_DAYS)}天）`,
     remainingValue: '0',
     remainingUnit: '小时',
     remainingFriendly: '0小时',
@@ -176,6 +201,7 @@ Page({
     if (!sceneCode) return
     try {
       const result = await request(`/miniapp/bind-session/status?scene=${encodeURIComponent(sceneCode)}`)
+      console.log('[miniapp-status] bind status response', result)
       this.applySessionView(result.session || {}, 'status')
     } catch (error) {
       this.setData({
@@ -220,32 +246,17 @@ Page({
     }
   },
 
-  watchRewardAd() {
+  async handleDailySignin() {
     if (!this.data.bindReady) {
       wx.showToast({ title: '请先完成客户端绑定', icon: 'none' })
       return
     }
-    if (!AD_UNIT_ID || AD_UNIT_ID === 'adunit-replace-me') {
-      wx.showToast({ title: '请先配置激励视频广告位', icon: 'none' })
+    if (this.data.rewardDisabled) {
       return
     }
-    const rewardedVideoAd = wx.createRewardedVideoAd({ adUnitId: AD_UNIT_ID })
+    if (this.data.rewardLoading) return
     this.setData({ rewardLoading: true })
-    rewardedVideoAd.onError(() => {
-      this.setData({ rewardLoading: false })
-      wx.showToast({ title: '广告加载失败', icon: 'none' })
-    })
-    rewardedVideoAd.onClose(async (res) => {
-      rewardedVideoAd.offClose()
-      rewardedVideoAd.offError()
-      if (res && res.isEnded === false) {
-        this.setData({ rewardLoading: false })
-        wx.showToast({ title: '请完整观看广告', icon: 'none' })
-        return
-      }
-      await this.grantAuthorization()
-    })
-    rewardedVideoAd.show().catch(() => rewardedVideoAd.load().then(() => rewardedVideoAd.show()))
+    await this.grantAuthorization()
   },
 
   async grantAuthorization() {
@@ -255,17 +266,33 @@ Page({
         data: {
           scene: String(this.data.sceneCode || '').trim(),
           sessionToken: String(app.globalData.sessionToken || '').trim(),
-          days: AD_UNLOCK_DAYS
+          days: getRewardDays(this.data.adUnlockDays)
         }
       })
+      const now = Date.now()
+      app.globalData.lastSigninAt = now
+      try {
+        wx.setStorageSync('miniappLastSigninAt', now)
+      } catch (_) {}
       this.applySessionView(result.session || {}, 'grant')
       wx.showToast({ title: '授权已发放', icon: 'success' })
     } catch (error) {
+      const message = this.normalizeError(error)
+      if (message === '今日已签到，请明天再来') {
+        this.setData({
+          rewardDisabled: true,
+          rewardButtonText: '签到成功',
+          rewardSubtitleText: '今日已完成签到，明天可再次领取'
+        })
+        wx.showToast({ title: '今日已签到', icon: 'none' })
+        return
+      }
+      wx.showToast({ title: message, icon: 'none' })
       this.setData({
         statusTone: 'danger',
         deviceStatusText: '授权失败',
-        statusText: `授权失败：${this.normalizeError(error)}`,
-        deviceHintText: `授权失败：${this.normalizeError(error)}`
+        statusText: `授权失败：${message}`,
+        deviceHintText: `授权失败：${message}`
       })
     } finally {
       this.setData({ rewardLoading: false })
@@ -275,6 +302,19 @@ Page({
   applySessionView(session, source) {
     const authorized = session.authorized === true
     const bindStatus = String(session.status || '')
+    const grantedAt = Number(session.grantedAt || session.grantedAtMS || 0)
+    const rewardDays = getRewardDays(session.adUnlockDays || this.data.adUnlockDays)
+    const cachedSigninAt = Number(app.globalData.lastSigninAt || getStoredSigninAt() || 0)
+    const signedToday =
+      session.signedToday === true ||
+      isSameDay(grantedAt) ||
+      isSameDay(cachedSigninAt)
+    if (signedToday && grantedAt > 0) {
+      app.globalData.lastSigninAt = grantedAt
+      try {
+        wx.setStorageSync('miniappLastSigninAt', grantedAt)
+      } catch (_) {}
+    }
     const remaining = getRemainingParts(Number(session.licenseExpireAt || 0))
     const statusText = authorized
       ? `授权已生效，截止 ${formatDateTime(Number(session.licenseExpireAt || 0)) || '未返回'}`
@@ -302,6 +342,7 @@ Page({
 
     this.setData({
       bindReady: ['scanned', 'granted', 'authorized'].includes(bindStatus),
+      rewardDisabled: signedToday,
       statusTone,
       deviceStatusText,
       statusText,
@@ -312,6 +353,12 @@ Page({
       remainingValue: remaining.value,
       remainingUnit: remaining.unit,
       remainingFriendly: remaining.friendly,
+      rewardSubtitleText: signedToday
+        ? '今日已完成签到，明天可再次领取'
+        : `每日签到一次，可免费续签 ${rewardDays} 天授权`,
+      rewardButtonText: signedToday
+        ? '签到成功'
+        : `免费获取授权（+${rewardDays}天）`,
       session: {
         status: bindStatus,
         clientLabel: String(session.clientLabel || ''),
@@ -319,7 +366,9 @@ Page({
         wechatNickname: String(session.wechatNickname || ''),
         authorized,
         licenseExpireAt: Number(session.licenseExpireAt || 0),
-        licenseExpireAtText: formatDateTime(Number(session.licenseExpireAt || 0))
+        licenseExpireAtText: formatDateTime(Number(session.licenseExpireAt || 0)),
+        signedToday,
+        adUnlockDays: rewardDays
       }
     })
 
@@ -343,19 +392,25 @@ Page({
         'grant',
         '授权生效',
         formatClock(Date.now()),
-        `+${AD_UNLOCK_DAYS}天`
+        `+${rewardDays}天`
       )
+    }
+    if (['scanned', 'granted', 'authorized'].includes(bindStatus)) {
+      this.switchToWorkbench()
     }
   },
 
   pushActivity(type, title, timeLabel, gainLabel) {
+    if (title === '等待连接桌面端') return
     const nextList = mergeActivity(this.data.recentActivities, {
       type,
       title,
       timeLabel,
       gainLabel
     })
-    this.setData({ recentActivities: nextList })
+    this.setData({
+      recentActivities: nextList
+    })
     app.globalData.recentMiniAppActivities = nextList
   },
 
@@ -363,6 +418,14 @@ Page({
     wx.redirectTo({
       url: '/pages/me/index'
     })
+  },
+
+  switchToWorkbench() {
+    try {
+      wx.switchTab({
+        url: '/pages/index/index'
+      })
+    } catch (_) {}
   },
 
   normalizeError(error) {
@@ -375,6 +438,7 @@ Page({
       miniapp_wechat_code2session_failed: '微信登录失败，请重试',
       miniapp_session_expired: '小程序登录已过期，请重新进入',
       miniapp_session_invalid: '小程序会话无效，请重新进入',
+      miniapp_signin_already_claimed: '今日已签到，请明天再来',
       bind_ref_required: '缺少绑定参数，请从桌面端扫码进入',
       bind_scene_invalid: '二维码无效，请回到桌面端刷新',
       bind_session_expired: '二维码已过期，请回到桌面刷新',

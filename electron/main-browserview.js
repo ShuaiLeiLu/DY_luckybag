@@ -59,6 +59,17 @@ function isHttpLikeUrl(url = '') {
   return /^https?:\/\//i.test(String(url || '').trim())
 }
 
+const MEDIA_EXT_REGEX = /\.(m3u8|ts|mp4|flv|f4v|webm|m4s|mpd)(\?|$)/i
+
+function isBlockedMediaRequest(details = {}) {
+  const url = String(details?.url || '').trim()
+  const type = String(details?.resourceType || '').trim().toLowerCase()
+  if (!url) return false
+  if (MEDIA_EXT_REGEX.test(url)) return true
+  if (type === 'media') return true
+  return false
+}
+
 function rememberBrowserUrl(accountId, url = '') {
   const browserData = browserViews.get(accountId)
   const normalized = String(url || '').trim()
@@ -316,6 +327,37 @@ function buildCookieSnapshot(cookies = []) {
     .filter(Boolean)
 }
 
+async function refreshTokenSnapshotFromSession(accountId, reason = 'sync') {
+  const browserData = browserViews.get(accountId)
+  if (!browserData) {
+    return { success: false, error: 'browser_not_ready' }
+  }
+  try {
+    const { cookies } = await getAccountCookiesAndString(accountId)
+    if (!Array.isArray(cookies) || cookies.length === 0) {
+      return { success: false, error: 'empty_cookies' }
+    }
+    const snapshot = buildCookieSnapshot(cookies)
+    if (snapshot.length === 0) {
+      return { success: false, error: 'snapshot_empty' }
+    }
+    const tokens = fs.existsSync(tokenStorePath) ? readTokenStore() : {}
+    const prev = tokens[accountId] || {}
+    tokens[accountId] = {
+      ...prev,
+      cookieSnapshot: snapshot,
+      cookieCount: cookies.length,
+      cookieUpdatedAt: Date.now()
+    }
+    const writeResult = writeTokenStore(tokens)
+    logger.debug(`[${accountId}] cookie 快照已更新(${reason}) size=${snapshot.length}`)
+    return { success: true, count: snapshot.length, encrypted: writeResult.encrypted }
+  } catch (error) {
+    logger.debug(`[${accountId}] cookie 快照更新失败(${reason})`, error?.message || error)
+    return { success: false, error: error?.message || 'snapshot_failed' }
+  }
+}
+
 function parseCookieString(cookieString = '') {
   const result = {}
   String(cookieString || '')
@@ -454,7 +496,7 @@ async function fetchUserInfoFromApis(cookieString) {
     commonHeaders['x-secsdk-csrf-token'] = cookieMap.passport_csrf_token
   }
 
-  // 参考“福袋助手”优先使用 creator 接口
+  // 参考旧实现，优先使用 creator 接口
   try {
     const creatorRes = await requestJson('https://creator.douyin.com/web/api/media/user/info/', {
       ...commonHeaders,
@@ -907,6 +949,11 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
           callback({ cancel: true })
           return
         }
+        if (isBlockedMediaRequest(details)) {
+          logger.debug(`[${accountId}] session 已拦截媒体资源: ${details.url}`)
+          callback({ cancel: true })
+          return
+        }
         callback({ cancel: false })
       })
     }
@@ -1281,9 +1328,24 @@ ipcMain.handle('save-token', async (event, { accountId, tokenInfo, userInfo = nu
     if (fs.existsSync(tokenStorePath)) {
       tokens = readTokenStore()
     }
-    
+
+    let normalizedTokenInfo = { ...(tokenInfo || {}) }
+    if (!Array.isArray(normalizedTokenInfo.cookieSnapshot) || normalizedTokenInfo.cookieSnapshot.length === 0) {
+      try {
+        const { cookies } = await getAccountCookiesAndString(accountId)
+        const snapshot = buildCookieSnapshot(cookies)
+        if (snapshot.length > 0) {
+          normalizedTokenInfo.cookieSnapshot = snapshot
+          normalizedTokenInfo.cookieCount = cookies.length
+          normalizedTokenInfo.cookieUpdatedAt = Date.now()
+        }
+      } catch (e) {
+        logger.debug(`[${accountId}] 保存Token时获取cookie快照失败`, e?.message || e)
+      }
+    }
+
     tokens[accountId] = {
-      ...tokenInfo,
+      ...normalizedTokenInfo,
       nickname: userInfo?.nickname || tokenInfo.nickname || `账号_${accountId}`,
       userId: userInfo?.userId || tokenInfo.userId || accountId,
       savedAt: Date.now()
@@ -1387,6 +1449,9 @@ ipcMain.handle('set-cookies', async (event, { accountId, tokenInfo }) => {
         error: '关键登录cookie写入失败'
       }
     }
+
+    // 关键 cookie 写入成功后，立即同步完整快照，避免仅保存部分字段
+    refreshTokenSnapshotFromSession(accountId, 'set-cookies').catch(() => {})
 
     return {
       success: true,
@@ -1691,40 +1756,8 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, acco
 
     const lottery_info = json.data.lottery_info
 
-    // 条件预过滤：仅保留可自动参与的基础类型（type=3+6），会员限制直接过滤。
-    // 粉丝团是否过滤由前端开关控制，因此这里不做粉丝团硬过滤，避免误杀候选。
+    // 扫描阶段不做条件过滤，所有福袋详情直接返回给上层，由服务端统一筛选。
     const conditions = Array.isArray(lottery_info.conditions) ? lottery_info.conditions : []
-    const conditionTypes = conditions.map(c => Number(c?.type)).filter(n => Number.isFinite(n))
-    const hasType3 = conditionTypes.includes(3)
-    const hasType6 = conditionTypes.includes(6)
-    const memberOnlyRe = /(会员|会员专属|会员可参与|主播会员|仅会员|vip|VIP|订阅后可参与|需订阅|member_only|subscriber|subscription)/i
-    const hasMemberRestriction = conditions.some((c) => {
-      const text = [
-        c?.content,
-        c?.desc,
-        c?.description,
-        c?.name,
-        c?.title,
-        c?.text,
-        c?.condition_desc,
-        c?.condition_text,
-        JSON.stringify(c || {})
-      ].filter(Boolean).join(' ')
-      return memberOnlyRe.test(String(text || ''))
-    })
-    const hasValidConditions = hasType3 && hasType6 && !hasMemberRestriction
-
-    if (!hasValidConditions) {
-      traceScan('filter get-lottery-detail reject', {
-        accountId: accountId || '',
-        roomId: String(roomId || ''),
-        conditionTypes,
-        hasType3,
-        hasType6,
-        hasMemberRestriction
-      })
-      return { success: false, error: `福袋条件不符合(${conditionTypes.join(',') || 'none'})` }
-    }
 
     const lotteryDetail = {
       lottery_id: lottery_info.lottery_id_str,
@@ -1749,7 +1782,7 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, acco
       lotteryId: String(lotteryDetail.lottery_id || ''),
       joinTotal: Number(lotteryDetail.joinTotal || 0),
       luckyCount: Number(lotteryDetail.winningTotal || 0),
-      conditions: conditionTypes
+      conditions: conditions.map(c => Number(c?.type)).filter(n => Number.isFinite(n))
     })
     return { success: true, lotteryDetail }
   } catch (error) {

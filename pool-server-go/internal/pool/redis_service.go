@@ -1015,7 +1015,7 @@ func (s *RedisService) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 	for _, candidate := range all {
 		candidateMap[candidate.Key] = candidate
 	}
-	scored, _, _ := selectTopCandidatesWithLease(all, profile, now, s.cfg.TopCacheMax, leaseGroups, joinedCounts, ClaimOwner{}, false, learningLookup)
+	scored, _, _ := selectTopCandidatesWithLease(all, profile, now, s.cfg.TopCacheMax, leaseGroups, joinedCounts, owner, false, learningLookup)
 	exclude := make(map[string]struct{}, len(options.ExcludeKeys))
 	for _, key := range options.ExcludeKeys {
 		if trimmed := stringsTrim(key); trimmed != "" {

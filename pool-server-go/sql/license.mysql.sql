@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS license_bind_sessions (
   wechat_union_id VARCHAR(128) NOT NULL DEFAULT '',
   wechat_nickname VARCHAR(128) NOT NULL DEFAULT '',
   license_id BIGINT UNSIGNED NULL,
-  ad_unlock_days INT NOT NULL DEFAULT 30,
+  ad_unlock_days INT NOT NULL DEFAULT 1,
   expire_at DATETIME NOT NULL,
   scanned_at DATETIME NULL,
   granted_at DATETIME NULL,
@@ -60,6 +60,18 @@ CREATE TABLE IF NOT EXISTS license_bind_sessions (
   CONSTRAINT fk_license_bind_sessions_license
     FOREIGN KEY (license_id) REFERENCES licenses(id)
     ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS miniapp_signin_records (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  client_id VARCHAR(128) NOT NULL,
+  fingerprint VARCHAR(128) NOT NULL DEFAULT '',
+  wechat_open_id VARCHAR(128) NOT NULL DEFAULT '',
+  sign_date DATE NOT NULL,
+  gain_days INT NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_miniapp_signin_device_day (client_id, fingerprint, sign_date),
+  KEY idx_miniapp_signin_openid_day (wechat_open_id, sign_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS license_settings (

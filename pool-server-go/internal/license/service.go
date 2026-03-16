@@ -87,6 +87,8 @@ type AdminLicense struct {
 	Features        map[string]any `json:"features"`
 	BindClientID    string         `json:"bindClientId"`
 	BindFingerprint string         `json:"bindFingerprint"`
+	WechatOpenID    string         `json:"wechatOpenId"`
+	WechatNickname  string         `json:"wechatNickname"`
 	ActivationCount int            `json:"activationCount"`
 	LastSeenAtMS    int64          `json:"lastSeenAt"`
 	CreatedAtMS     int64          `json:"createdAt"`
@@ -162,6 +164,8 @@ type adminLicenseRow struct {
 	FeaturesJSON    sql.NullString
 	BindClientID    string
 	BindFingerprint string
+	WechatOpenID    string
+	WechatNickname  string
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	ActivationCount int
@@ -266,6 +270,21 @@ func (s *Service) ensureSettingsSchema(ctx context.Context) error {
 			setting_value VARCHAR(255) NOT NULL,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+	`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(schemaCtx, `
+		CREATE TABLE IF NOT EXISTS miniapp_signin_records (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			client_id VARCHAR(128) NOT NULL,
+			fingerprint VARCHAR(128) NOT NULL DEFAULT '',
+			wechat_open_id VARCHAR(128) NOT NULL DEFAULT '',
+			sign_date DATE NOT NULL,
+			gain_days INT NOT NULL DEFAULT 1,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE KEY uniq_miniapp_signin_device_day (client_id, fingerprint, sign_date),
+			KEY idx_miniapp_signin_openid_day (wechat_open_id, sign_date)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 	`); err != nil {
 		return err
@@ -618,12 +637,24 @@ func (s *Service) ListAdminLicenses(ctx context.Context, q AdminListQuery) (Admi
 			l.features_json,
 			l.bind_client_id,
 			l.bind_fingerprint,
+			COALESCE(MAX(bs.wechat_open_id), '') AS wechat_open_id,
+			COALESCE(MAX(bs.wechat_nickname), '') AS wechat_nickname,
 			l.created_at,
 			l.updated_at,
 			COUNT(DISTINCT a.client_id) AS activation_count,
 			MAX(a.last_seen_at) AS last_seen_at
 		FROM licenses l
 		LEFT JOIN license_activations a ON a.license_id = l.id
+		LEFT JOIN (
+			SELECT b1.license_id, b1.wechat_open_id, b1.wechat_nickname
+			FROM license_bind_sessions b1
+			INNER JOIN (
+				SELECT license_id, MAX(updated_at) AS max_updated
+				FROM license_bind_sessions
+				WHERE license_id IS NOT NULL
+				GROUP BY license_id
+			) b2 ON b1.license_id = b2.license_id AND b1.updated_at = b2.max_updated
+		) bs ON bs.license_id = l.id
 		WHERE %s
 		GROUP BY l.id
 		ORDER BY l.updated_at DESC, l.id DESC
@@ -651,6 +682,8 @@ func (s *Service) ListAdminLicenses(ctx context.Context, q AdminListQuery) (Admi
 			&row.FeaturesJSON,
 			&row.BindClientID,
 			&row.BindFingerprint,
+			&row.WechatOpenID,
+			&row.WechatNickname,
 			&row.CreatedAt,
 			&row.UpdatedAt,
 			&row.ActivationCount,
@@ -900,6 +933,40 @@ func (s *Service) AdminUnbindLicense(ctx context.Context, id int64) (AdminLicens
 	return s.adminGetLicenseByID(ctx, id)
 }
 
+// AdminDeleteLicense 删除授权记录（含激活记录）。
+func (s *Service) AdminDeleteLicense(ctx context.Context, id int64) error {
+	if err := s.ensureAdminReady(); err != nil {
+		return err
+	}
+	if id <= 0 {
+		return fmt.Errorf("id required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err = tx.ExecContext(ctx, `DELETE FROM license_activations WHERE license_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE license_bind_sessions SET license_id = NULL WHERE license_id = ?`, id); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM licenses WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return tx.Commit()
+}
+
 func (s *Service) adminGetLicenseByID(ctx context.Context, id int64) (AdminLicense, error) {
 	query := `
 		SELECT
@@ -914,12 +981,24 @@ func (s *Service) adminGetLicenseByID(ctx context.Context, id int64) (AdminLicen
 			l.features_json,
 			l.bind_client_id,
 			l.bind_fingerprint,
+			COALESCE(MAX(bs.wechat_open_id), '') AS wechat_open_id,
+			COALESCE(MAX(bs.wechat_nickname), '') AS wechat_nickname,
 			l.created_at,
 			l.updated_at,
 			COUNT(DISTINCT a.client_id) AS activation_count,
 			MAX(a.last_seen_at) AS last_seen_at
 		FROM licenses l
 		LEFT JOIN license_activations a ON a.license_id = l.id
+		LEFT JOIN (
+			SELECT b1.license_id, b1.wechat_open_id, b1.wechat_nickname
+			FROM license_bind_sessions b1
+			INNER JOIN (
+				SELECT license_id, MAX(updated_at) AS max_updated
+				FROM license_bind_sessions
+				WHERE license_id IS NOT NULL
+				GROUP BY license_id
+			) b2 ON b1.license_id = b2.license_id AND b1.updated_at = b2.max_updated
+		) bs ON bs.license_id = l.id
 		WHERE l.id = ?
 		GROUP BY l.id
 		LIMIT 1
@@ -937,6 +1016,8 @@ func (s *Service) adminGetLicenseByID(ctx context.Context, id int64) (AdminLicen
 		&row.FeaturesJSON,
 		&row.BindClientID,
 		&row.BindFingerprint,
+		&row.WechatOpenID,
+		&row.WechatNickname,
 		&row.CreatedAt,
 		&row.UpdatedAt,
 		&row.ActivationCount,
@@ -961,6 +1042,8 @@ func adminLicenseFromRow(row adminLicenseRow) AdminLicense {
 		Features:        parseFeatures(row.FeaturesJSON.String),
 		BindClientID:    strings.TrimSpace(row.BindClientID),
 		BindFingerprint: strings.TrimSpace(row.BindFingerprint),
+		WechatOpenID:    strings.TrimSpace(row.WechatOpenID),
+		WechatNickname:  strings.TrimSpace(row.WechatNickname),
 		ActivationCount: row.ActivationCount,
 		CreatedAtMS:     row.CreatedAt.UnixMilli(),
 		UpdatedAtMS:     row.UpdatedAt.UnixMilli(),

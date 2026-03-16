@@ -275,6 +275,7 @@
 
 .btn-disabled {
   opacity: 0.72;
+  pointer-events: none;
 }
 
 .shimmer {

@@ -597,7 +597,7 @@ func main() {
 		MiniAppEnvVersion:    "release",
 	}
 	adminToken := ""
-	licenseAdUnlockDays := 30
+	licenseAdUnlockDays := 1
 	if hasFileCfg {
 		lc.Enabled = fileCfg.License.Enabled
 		lc.DefaultUnrestricted = fileCfg.License.Unrestricted
@@ -671,7 +671,7 @@ func main() {
 	adminToken = strings.TrimSpace(getenvStr("POOL_LICENSE_ADMIN_TOKEN", getenvStr("LICENSE_ADMIN_TOKEN", adminToken)))
 	licenseAdUnlockDays = getenvInt("POOL_LICENSE_AD_UNLOCK_DAYS", licenseAdUnlockDays)
 	if licenseAdUnlockDays <= 0 {
-		licenseAdUnlockDays = 30
+		licenseAdUnlockDays = 1
 	}
 
 	rc := pool.DefaultRedisConfig()
@@ -1519,6 +1519,40 @@ func main() {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item})
+	})
+
+	mux.HandleFunc("/admin/api/licenses/delete", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureAdminAuthorized(w, r, adminToken) {
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+		var req struct {
+			ID int64 `json:"id"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		if err := licenseSvc.AdminDeleteLicense(r.Context(), req.ID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "license_not_found"})
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
 	mux.HandleFunc("/filter/profile", func(w http.ResponseWriter, r *http.Request) {

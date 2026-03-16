@@ -41,7 +41,7 @@ function shouldBreakForRiskCooldown(manager, accountId, onLog) {
   const profile = manager.getAdaptiveScanProfile(accountId)
   const remainMs = Number(profile?.cooldownRemainMs || 0)
   const level = Number(profile?.level || 0)
-  // 仅在高风控等级才中断本轮，避免低等级时扫描过少
+  // 仅在高风控等级中断整轮扫描，低等级继续保留一定采集量。
   if (remainMs <= 0 || level < 2) return false
   if (typeof onLog === 'function') {
     const sec = Math.ceil(remainMs / 1000)
@@ -58,8 +58,8 @@ function shouldBreakForRiskCooldown(manager, accountId, onLog) {
  */
 function shouldLogScanProgress(roundIndex, noGrowthRounds = 0) {
   if (roundIndex <= 0) return true
-  if ((roundIndex + 1) % 5 === 0) return true
-  return noGrowthRounds >= 3
+  if ((roundIndex + 1) % 10 === 0) return true
+  return noGrowthRounds >= 5
 }
 
 /**
@@ -154,6 +154,9 @@ function buildRequestSummary(scannedList, qualifiedList, extra = {}) {
  */
 function pickDetailRooms(roomInfoList, scanProfile = null, options = {}) {
   const source = Array.isArray(roomInfoList) ? roomInfoList : []
+  if (options?.fullUploadMode === true) {
+    return source
+  }
   const supermanFirstRound = options?.supermanFirstRound === true
   const forceLotteryHintOnly = options?.forceLotteryHintOnly === true
   const hintRooms = source.filter(item => item?.hasLotteryHint === true)
@@ -195,7 +198,7 @@ function releaseLocalDetailRooms(manager, roomInfoList) {
 function logRequestDetail(manager, accountId, stage, requestIndex, scannedList, qualifiedList, extra = {}) {
   if (!isScanTraceEnabled()) return
   const summary = buildRequestSummary(scannedList, qualifiedList, extra)
-  console.log(`[scan-detail] [${accountId}] [${stage}] request=${requestIndex}`, JSON.stringify(summary))
+  traceScan(`[scan-detail] [${accountId}] [${stage}] request=${requestIndex}`, summary)
   emitScanDebug(manager, {
     accountId,
     stage,
@@ -255,26 +258,40 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
   if (!manager.ipc) throw new Error('Electron IPC 不可用')
   const config = accountData.config || {}
   const supermanFirstRound = scanProfile?.supermanFirstRound === true
-  const forceLotteryHintOnly = supermanFirstRound || scanProfile?.forceLotteryHintOnly === true
-  const defaultRounds = Math.max(1, toPositiveInt(times, supermanFirstRound ? 10 : 10))
-  const allTimes = supermanFirstRound
-    ? Math.max(1, toPositiveInt(scanProfile?.allTimes, 10))
-    : Math.max(1, toPositiveInt(scanProfile?.allTimes, defaultRounds))
-  const maxAllRounds = supermanFirstRound
-    ? allTimes
-    : Math.max(allTimes, toPositiveInt(scanProfile?.maxAllRounds, allTimes))
-  const noGrowthBreakRounds = supermanFirstRound
-    ? Number.MAX_SAFE_INTEGER
-    : Math.max(4, toPositiveInt(scanProfile?.noGrowthBreakRounds, Math.max(8, Math.ceil(allTimes / 2))))
-  const allCount = supermanFirstRound
-    ? Math.max(8, toPositiveInt(scanProfile?.allCount, 12))
-    : Math.max(8, toPositiveInt(scanProfile?.allCount, toPositiveInt(scanProfile?.countPerPage, 24)))
+  const fullUploadMode = manager?.isPoolServerEnabled?.() === true
+  const forceLotteryHintOnly = !fullUploadMode && (supermanFirstRound || scanProfile?.forceLotteryHintOnly === true)
+
+  // 统一构造扫描参数，避免 supermanFirstRound 三元判断散落各处
+  const defaultRounds = Math.max(1, toPositiveInt(times, 10))
+  const scanParams = supermanFirstRound
+    ? {
+      allTimes: Math.max(1, toPositiveInt(scanProfile?.allTimes, 10)),
+      maxAllRounds: Math.max(1, toPositiveInt(scanProfile?.allTimes, 10)),
+      noGrowthBreakRounds: Number.MAX_SAFE_INTEGER,
+      allCount: Math.max(8, toPositiveInt(scanProfile?.allCount, 12)),
+      sharedAllCursorEnabled: false,
+      mode: 'superman-first-round'
+    }
+    : {
+      allTimes: Math.max(1, toPositiveInt(scanProfile?.allTimes, defaultRounds)),
+      maxAllRounds: Math.max(
+        Math.max(1, toPositiveInt(scanProfile?.allTimes, defaultRounds)),
+        toPositiveInt(scanProfile?.maxAllRounds, Math.max(1, toPositiveInt(scanProfile?.allTimes, defaultRounds)))
+      ),
+      noGrowthBreakRounds: Math.max(4, toPositiveInt(scanProfile?.noGrowthBreakRounds, Math.max(8, Math.ceil(Math.max(1, toPositiveInt(scanProfile?.allTimes, defaultRounds)) / 2)))),
+      allCount: Math.max(8, toPositiveInt(scanProfile?.allCount, toPositiveInt(scanProfile?.countPerPage, 24))),
+      sharedAllCursorEnabled: manager?.isPoolServerEnabled?.() === true &&
+        String(scanProfile?.localScanPlan?.kind || '') === 'all',
+      mode: 'normal'
+    }
+  const { maxAllRounds, noGrowthBreakRounds, allCount, sharedAllCursorEnabled } = scanParams
+  const scanMode = scanParams.mode
+
+  // 使用 Manager 级别的跨轮次 TTL 去重（如可用），减少重复拉详情
+  const useManagerSeen = !fullUploadMode && typeof manager?.isAllScanRoomSeen === 'function'
   const seenRoomIds = new Set()
   let cursorMaxTime = null
   let noGrowthRounds = 0
-  const sharedAllCursorEnabled = !supermanFirstRound &&
-    manager?.isPoolServerEnabled?.() === true &&
-    String(scanProfile?.localScanPlan?.kind || '') === 'all'
 
   try {
     for (let i = 0; i < maxAllRounds; i++) {
@@ -283,7 +300,7 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
       if (toPositiveInt(scanProfile?.deadlineMs, 0) > 0 && Date.now() >= Number(scanProfile.deadlineMs)) break
 
       const roundSummary = {
-        mode: supermanFirstRound ? 'superman-first-round' : 'normal',
+        mode: scanMode,
         round: i + 1,
         maxRounds: maxAllRounds,
         requestOk: false,
@@ -299,7 +316,7 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
         dropMember: 0,
         dropFanClub: 0,
         poolBefore: manager.getAccountLotteryList(accountId).length,
-        poolAfter: manager.getAccountLotteryList(accountId).length,
+        poolAfter: 0, // 在 emitRoundSummary 中取最终值
         hasMore: false,
         nextCursor: null,
         noGrowthBefore: noGrowthRounds,
@@ -348,14 +365,11 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
           }
         }
 
+        const effectiveMaxTime = supermanFirstRound ? 0 : Number(sharedCursorMaxTime || cursorMaxTime || 0)
         const requestPayload = {
           accountId,
           customCount: allCount,
-          maxTime: supermanFirstRound
-            ? undefined
-            : (Number(sharedCursorMaxTime || cursorMaxTime || 0) > 0
-                ? Number(sharedCursorMaxTime || cursorMaxTime)
-                : undefined)
+          maxTime: effectiveMaxTime > 0 ? effectiveMaxTime : undefined
         }
 
         const result = await manager.ipc.invoke('search-live-by-all', {
@@ -385,6 +399,7 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
           roundSummary.error = result?.error || 'unknown'
           noGrowthRounds += 1
           if (isRiskErrorMessage(result.error)) {
+            console.warn(`[scan] [${accountId}] 全站扫描命中风控: ${result.error}`)
             manager.applyScanRiskFeedback(accountId, { hardRiskCount: 1 }, accountData.callbacks.onLog)
             if (shouldBreakForRiskCooldown(manager, accountId, accountData.callbacks.onLog)) {
               roundSummary.breakReason = 'risk_cooldown'
@@ -393,7 +408,7 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
             }
           }
           if (result.detail) {
-            console.error('[搜索失败详情]', result.detail)
+            console.warn('[scan] 搜索失败详情', result.detail)
           }
           if (noGrowthRounds >= noGrowthBreakRounds) {
             roundSummary.breakReason = 'no_growth_break'
@@ -420,7 +435,10 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
           if (forceLotteryHintOnly && item?.hasLotteryHint !== true) return false
           const roomId = String(item?.roomId || '')
           if (!roomId || seenRoomIds.has(roomId)) return false
+          // 跨轮次去重：如果 Manager 级别已见过该房间且未过期，跳过
+          if (useManagerSeen && manager.isAllScanRoomSeen(roomId)) return false
           seenRoomIds.add(roomId)
+          if (useManagerSeen) manager.markAllScanRoomSeen(roomId, 30000)
           return true
         })
         roundSummary.hintedRooms = forceLotteryHintOnly
@@ -434,7 +452,8 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
           roundSummary.poolBefore = beforeCount
           const detailRooms = pickDetailRooms(roomInfoList, scanProfile, {
             supermanFirstRound,
-            forceLotteryHintOnly
+            forceLotteryHintOnly,
+            fullUploadMode
           })
           const localClaim = claimLocalDetailRooms(manager, accountId, detailRooms, scanProfile)
           roundSummary.detailRequested = localClaim.list.length
@@ -447,6 +466,9 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
           }
           const resList = detailResult.settled
           roundSummary.detailRiskCount = Number(detailResult?.stats?.hardRiskCount || 0)
+          if (detailResult.stats.hardRiskCount > 0) {
+            console.warn(`[scan] [${accountId}] 详情请求命中风控: hardRisk=${detailResult.stats.hardRiskCount}, error=${detailResult.stats.errorCount}`)
+          }
           manager.applyScanRiskFeedback(accountId, detailResult.stats, accountData.callbacks.onLog)
           const shouldBreakByDetailRisk = detailResult.stats.hardRiskCount > 0 &&
             (!supermanFirstRound || detailResult.stats.hardRiskCount >= 2)
@@ -461,7 +483,20 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
             .map(item => item.value)
           roundSummary.detailSuccess = validLotteryInfoList.length
 
-          const { list: filteredList, stats: filterStats } = manager.filterLotteryByConditionsWithStats(validLotteryInfoList, config)
+          const skipFilterForServer = manager?.isPoolServerEnabled?.() === true
+          let filteredList = validLotteryInfoList
+          let filterStats = {
+            total: validLotteryInfoList.length,
+            kept: validLotteryInfoList.length,
+            dropType: 0,
+            dropMember: 0,
+            dropFanClub: 0
+          }
+          if (!skipFilterForServer) {
+            const res = manager.filterLotteryByConditionsWithStats(validLotteryInfoList, config)
+            filteredList = res.list
+            filterStats = res.stats
+          }
           roundSummary.kept = Number(filterStats?.kept || 0)
           roundSummary.dropType = Number(filterStats?.dropType || 0)
           roundSummary.dropMember = Number(filterStats?.dropMember || 0)
@@ -474,7 +509,7 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
             roomInfoList,
             filteredList,
             {
-              mode: supermanFirstRound ? 'superman-first-round' : 'normal',
+              mode: scanMode,
               detailSuccess: validLotteryInfoList.length,
               filterStats
             }
@@ -552,12 +587,12 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
         if (shouldLogScanProgress(i, noGrowthRounds)) {
           accountData.callbacks.onLog(`扫描异常(${i + 1}/${maxAllRounds})：${error.message}`, 'warning')
         }
-        console.error('[搜索异常]', error)
+        console.warn('[scan] 搜索异常', error)
       }
     }
   } catch (error) {
     accountData.callbacks.onLog(`全部搜索异常: ${error.message}`)
-    console.error('[全部搜索异常]', error)
+    console.warn('[scan] 全部搜索异常', error)
   }
 }
 
@@ -612,7 +647,20 @@ export async function startCollectLive(manager, accountId, scanProfile = null) {
           offsetStride: Number(category?.offsetStride || 0),
           count: Number(category?.count || scanProfile?.countPerPage || manager.scanConfig?.countPerPage || 15)
         }, (batchList) => {
-          const { list: filteredList, stats: filterStats } = manager.filterLotteryByConditionsWithStats(batchList, config)
+          const skipFilterForServer = manager?.isPoolServerEnabled?.() === true
+          let filteredList = batchList
+          let filterStats = {
+            total: batchList.length,
+            kept: batchList.length,
+            dropType: 0,
+            dropMember: 0,
+            dropFanClub: 0
+          }
+          if (!skipFilterForServer) {
+            const res = manager.filterLotteryByConditionsWithStats(batchList, config)
+            filteredList = res.list
+            filterStats = res.stats
+          }
           categoryRound.batches += 1
           categoryRound.total += Number(filterStats?.total || 0)
           categoryRound.kept += Number(filterStats?.kept || 0)
@@ -634,10 +682,12 @@ export async function startCollectLive(manager, accountId, scanProfile = null) {
           )
           manager.addLotteryInfoWithoutDuplicates(accountId, filteredList)
           manager.syncServerPoolCandidates(accountId, filteredList).catch(() => {})
-          manager.calculatePredictedProbabilities(accountId)
-          manager.sortLotteriesByProbability(accountId)
-          manager.emitLotteryListUpdate(accountData)
         }, scanProfile)
+
+        // 每个分类扫完后统一做一次概率计算/排序/UI推送，避免每批都重复计算
+        manager.calculatePredictedProbabilities(accountId)
+        manager.sortLotteriesByProbability(accountId)
+        manager.emitLotteryListUpdate(accountData)
 
         traceScan(`[${accountId}] category-round-summary`, categoryRound)
         emitScanDebug(manager, {
@@ -662,6 +712,7 @@ export async function startCollectLive(manager, accountId, scanProfile = null) {
           type: 'round-summary',
           summary: categoryRound
         })
+        console.warn(`[scan] [${accountId}] 分类采集出错: category=${category.name}`, error)
         accountData.callbacks.onLog(`【${category.name}】分类采集出错: ${error.message}`)
       }
     }
@@ -690,7 +741,8 @@ export async function searchLiveRoomCategory(
   if (!accountData) return []
   if (!manager.ipc) throw new Error('Electron IPC 不可用')
   const supermanFirstRound = scanProfile?.supermanFirstRound === true
-  const forceLotteryHintOnly = supermanFirstRound || scanProfile?.forceLotteryHintOnly === true
+  const fullUploadMode = manager?.isPoolServerEnabled?.() === true
+  const forceLotteryHintOnly = !fullUploadMode && (supermanFirstRound || scanProfile?.forceLotteryHintOnly === true)
 
   const pageNum = toNumber(page, NaN)
   const autoPaging = supermanFirstRound ? false : (!Number.isFinite(pageNum) || pageNum <= 0)
@@ -749,6 +801,7 @@ export async function searchLiveRoomCategory(
         if (!result.success || !result.roomInfoList) {
           noGrowthPages += 1
           if (!result.success && isRiskErrorMessage(result.error)) {
+            console.warn(`[scan] [${accountId}] 分类扫描命中风控: ${result.error}, category=${category_id}`)
             manager.applyScanRiskFeedback(accountId, { hardRiskCount: 1 }, accountData.callbacks.onLog)
             if (shouldBreakForRiskCooldown(manager, accountId, accountData.callbacks.onLog)) {
               break
@@ -774,7 +827,8 @@ export async function searchLiveRoomCategory(
 
         const detailRooms = pickDetailRooms(roomInfoList, scanProfile, {
           supermanFirstRound,
-          forceLotteryHintOnly
+          forceLotteryHintOnly,
+          fullUploadMode
         })
         const localClaim = claimLocalDetailRooms(manager, accountId, detailRooms, scanProfile)
         let detailResult
@@ -784,6 +838,9 @@ export async function searchLiveRoomCategory(
           releaseLocalDetailRooms(manager, localClaim.list)
         }
         const resList = detailResult.settled
+        if (detailResult.stats.hardRiskCount > 0) {
+          console.warn(`[scan] [${accountId}] 分类详情命中风控: hardRisk=${detailResult.stats.hardRiskCount}, error=${detailResult.stats.errorCount}, category=${category_id}`)
+        }
         manager.applyScanRiskFeedback(accountId, detailResult.stats, accountData.callbacks.onLog)
         const shouldBreakByDetailRisk = detailResult.stats.hardRiskCount > 0 &&
           (!supermanFirstRound || detailResult.stats.hardRiskCount >= 2)
@@ -872,6 +929,12 @@ export async function getLotteryInfo(manager, roomInfoList, accountId, scanProfi
     dedup.add(roomId)
     return true
   })
+  // 优先请求带福袋标记的房间，风控截断时保证先拿高价值目标
+  candidateList.sort((a, b) => {
+    const aHint = a?.hasLotteryHint === true ? 0 : 1
+    const bHint = b?.hasLotteryHint === true ? 0 : 1
+    return aHint - bHint
+  })
   if (candidateList.length === 0) {
     return { settled: [], stats: { successCount: 0, hardRiskCount: 0, errorCount: 0 } }
   }
@@ -930,6 +993,9 @@ export async function getLotteryInfo(manager, roomInfoList, accountId, scanProfi
       const err = new Error(result.error || '福袋信息获取失败')
       err.code = result.code || 'DETAIL_FAILED'
       err.statusCode = Number(result?.statusCode || 0)
+      if (isHardRisk) {
+        console.warn(`[scan] [${accountId}] 详情接口风控: roomId=${roomInfo.roomId}, code=${err.code}, status=${err.statusCode}`)
+      }
       throw err
     }
 
@@ -943,16 +1009,12 @@ export async function getLotteryInfo(manager, roomInfoList, accountId, scanProfi
   const concurrency = Math.min(Math.max(1, Number(scanProfile?.detailConcurrency || 2)), candidateList.length)
   const settled = new Array(candidateList.length)
   const stats = { successCount: 0, hardRiskCount: 0, errorCount: 0 }
-  let cursor = 0
 
   /**
-   * worker 方法：并发消费候选列表并汇总抓取成功/失败统计。
+   * worker 方法：预分配索引，每个 worker 按固定步长处理自己的分片，避免共享游标。
    */
-  const worker = async () => {
-    while (true) {
-      const index = cursor
-      cursor += 1
-      if (index >= candidateList.length) break
+  const worker = async (startIndex) => {
+    for (let index = startIndex; index < candidateList.length; index += concurrency) {
       if (typeof manager?.getTaskStage === 'function' && manager.getTaskStage(accountId) === 'joining') break
 
       try {
@@ -974,6 +1036,6 @@ export async function getLotteryInfo(manager, roomInfoList, accountId, scanProfi
     }
   }
 
-  await Promise.all(Array.from({ length: concurrency }, () => worker()))
+  await Promise.all(Array.from({ length: concurrency }, (_, i) => worker(i)))
   return { settled, stats }
 }

@@ -34,6 +34,50 @@ function formatExpire(expireAt) {
   return `${y}-${m}-${d} ${hh}:${mm}`
 }
 
+function formatDeviceLabel(label) {
+  const raw = String(label || '').trim()
+  if (!raw) return '未绑定'
+  if (raw.length <= 10) return raw
+  return `${raw.slice(0, 4)}...${raw.slice(-4)}`
+}
+
+function parseQueryParams(queryString) {
+  const params = {}
+  if (!queryString) return params
+  queryString
+    .replace(/^\?/, '')
+    .split('&')
+    .forEach((pair) => {
+      if (!pair) return
+      const [rawKey, rawValue] = pair.split('=')
+      const key = decodeURIComponent(String(rawKey || '').trim())
+      if (!key) return
+      const value = decodeURIComponent(String(rawValue || '').trim())
+      params[key] = value
+    })
+  return params
+}
+
+function extractSceneFromScan(scanResult) {
+  if (!scanResult) return ''
+  const path = String(scanResult.path || '').trim()
+  if (path) {
+    const [, queryString] = path.split('?')
+    const params = parseQueryParams(queryString)
+    return params.scene || params.sceneCode || params.bindToken || ''
+  }
+  const result = String(scanResult.result || '').trim()
+  if (!result) return ''
+  const queryIndex = result.indexOf('?')
+  if (queryIndex >= 0) {
+    const params = parseQueryParams(result.slice(queryIndex + 1))
+    return params.scene || params.sceneCode || params.bindToken || ''
+  }
+  const match = result.match(/(?:scene|sceneCode|bindToken)=([^&]+)/i)
+  if (match && match[1]) return decodeURIComponent(match[1])
+  return result
+}
+
 Page({
   data: {
     profileName: '微信用户',
@@ -120,13 +164,28 @@ Page({
     const authorized = session.authorized === true
     const remain = getRemainingParts(Number(session.licenseExpireAt || 0))
     const deviceCount = session.clientLabel ? 1 : 0
+    const deviceLabel = formatDeviceLabel(session.clientLabel)
     const menuItems = [
+      {
+        key: 'scan',
+        icon: '/assets/key.svg',
+        label: '扫一扫绑定',
+        value: '',
+        desc: '扫码桌面端二维码，绑定当前设备'
+      },
+      {
+        key: 'admin',
+        icon: '/assets/shield-check.svg',
+        label: '抖娃控制台',
+        value: '',
+        desc: '系统级监控与配置'
+      },
       {
         key: 'device',
         icon: '/assets/smartphone.svg',
         label: '我的设备',
-        value: `${deviceCount}台`,
-        desc: session.clientLabel || '当前尚未绑定设备'
+        value: deviceLabel,
+        desc: deviceLabel
       },
       {
         key: 'detail',
@@ -162,10 +221,24 @@ Page({
       deviceCount: 0,
       menuItems: [
         {
+          key: 'scan',
+          icon: '/assets/key.svg',
+          label: '扫一扫绑定',
+          value: '',
+          desc: '扫码桌面端二维码，绑定当前设备'
+        },
+        {
+          key: 'admin',
+          icon: '/assets/shield-check.svg',
+          label: '抖娃控制台',
+          value: '',
+          desc: '系统级监控与配置'
+        },
+        {
           key: 'device',
           icon: '/assets/smartphone.svg',
           label: '我的设备',
-          value: '0台',
+          value: '未绑定',
           desc: '请先从桌面端扫码进入授权页'
         },
         {
@@ -190,10 +263,53 @@ Page({
     const key = String(event.currentTarget.dataset.key || '')
     const item = (this.data.menuItems || []).find((entry) => entry.key === key)
     if (!item) return
+    if (key === 'scan') {
+      this.handleScanBind()
+      return
+    }
+    if (key === 'admin') {
+      wx.navigateTo({ url: '/pages/admin/index' })
+      return
+    }
+    if (key === 'device') {
+      return
+    }
+    if (key === 'privacy') {
+      wx.navigateTo({ url: '/pages/privacy/index' })
+      return
+    }
     wx.showModal({
       title: item.label,
       content: item.desc,
       showCancel: false
     })
+  },
+
+  async handleScanBind() {
+    try {
+      const scanResult = await new Promise((resolve, reject) => {
+        wx.scanCode({
+          scanType: ['qrCode'],
+          success: resolve,
+          fail: reject
+        })
+      })
+      const sceneCode = extractSceneFromScan(scanResult)
+      if (!sceneCode) {
+        wx.showToast({ title: '未识别绑定二维码', icon: 'none' })
+        return
+      }
+      app.globalData.lastSceneCode = sceneCode
+      try {
+        wx.setStorageSync('lastSceneCode', sceneCode)
+      } catch (_) {}
+      wx.navigateTo({
+        url: `/pages/bind/index?scene=${encodeURIComponent(sceneCode)}`
+      })
+    } catch (error) {
+      const message = String(error && error.errMsg ? error.errMsg : '')
+      if (message.includes('cancel')) return
+      wx.showToast({ title: '扫码失败，请重试', icon: 'none' })
+    }
   }
 })

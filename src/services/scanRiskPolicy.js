@@ -47,6 +47,7 @@ export function calcAdaptiveScanProfile(state, scanConfig) {
       maxCategoryPages: 120,
       categoryNoGrowthBreakPages: 8,
       detailConcurrency: 3,
+      detailRoomCap: 12,
       itemGapMs: 220,
       cycleDelayMinMs: 1200,
       cycleDelayMaxMs: 2200
@@ -61,6 +62,7 @@ export function calcAdaptiveScanProfile(state, scanConfig) {
       maxCategoryPages: 80,
       categoryNoGrowthBreakPages: 6,
       detailConcurrency: 2,
+      detailRoomCap: 10,
       itemGapMs: 320,
       cycleDelayMinMs: 1800,
       cycleDelayMaxMs: 3000
@@ -75,6 +77,7 @@ export function calcAdaptiveScanProfile(state, scanConfig) {
       maxCategoryPages: 48,
       categoryNoGrowthBreakPages: 5,
       detailConcurrency: 2,
+      detailRoomCap: 8,
       itemGapMs: 480,
       cycleDelayMinMs: 2800,
       cycleDelayMaxMs: 4200
@@ -89,6 +92,7 @@ export function calcAdaptiveScanProfile(state, scanConfig) {
       maxCategoryPages: 24,
       categoryNoGrowthBreakPages: 4,
       detailConcurrency: 1,
+      detailRoomCap: 6,
       itemGapMs: 700,
       cycleDelayMinMs: 4500,
       cycleDelayMaxMs: 7000
@@ -107,6 +111,7 @@ export function calcAdaptiveScanProfile(state, scanConfig) {
     maxCategoryPages: profile.maxCategoryPages,
     categoryNoGrowthBreakPages: profile.categoryNoGrowthBreakPages,
     detailConcurrency: profile.detailConcurrency,
+    detailRoomCap: profile.detailRoomCap,
     itemGapMs: profile.itemGapMs,
     cycleDelayMinMs: profile.cycleDelayMinMs,
     cycleDelayMaxMs: profile.cycleDelayMaxMs,
@@ -125,6 +130,7 @@ export function updateScanRiskState(state, stats) {
   const hardRiskCount = Number(stats?.hardRiskCount || 0)
   const successCount = Number(stats?.successCount || 0)
   const prevLevel = next.level
+  const now = Date.now()
 
   if (hardRiskCount > 0) {
     next.riskScore += hardRiskCount
@@ -139,8 +145,17 @@ export function updateScanRiskState(state, stats) {
   if (next.riskScore >= upThreshold && next.level < 3) {
     next.level += 1
     next.riskScore = 0
+    next.stableScore = 0 // 升级时同步重置，防止累积的 stableScore 导致立即触发降级
     cooldownMs = [0, 25000, 45000, 70000][next.level] || (next.level * 25000)
-    next.cooldownUntil = Date.now() + cooldownMs
+    next.cooldownUntil = now + cooldownMs
+  }
+
+  if (hardRiskCount > 0) {
+    const baseCooldown = 15000
+    if (next.cooldownUntil < now + baseCooldown) {
+      next.cooldownUntil = now + baseCooldown
+      cooldownMs = Math.max(cooldownMs, baseCooldown)
+    }
   }
 
   const downThreshold = 14 + next.level * 8

@@ -3,10 +3,12 @@
     "pages/index/index",
     "pages/profile/profile",
     "pages/bind/index",
-    "pages/me/index"
+    "pages/me/index",
+    "pages/privacy/index",
+    "pages/admin/index"
   ],
   "window": {
-    "navigationBarTitleText": "抖音福袋助手",
+    "navigationBarTitleText": "抖娃福袋",
     "navigationBarBackgroundColor": "#f8fafc",
     "navigationBarTextStyle": "black",
     "backgroundColor": "#f8fafc",

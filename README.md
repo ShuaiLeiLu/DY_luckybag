@@ -1,4 +1,4 @@
-# 抖音福袋助手
+# 抖娃福袋
 
 基于 `Electron + Vue 3 + Naive UI` 的桌面端多账号抖音福袋工具，支持本地扫码登录、自动扫描福袋、分布式候选池、服务端统一筛选与调度、自动参与、红包尝试、随机互动、统计展示，以及 Go 高并发筛选服务。
 
@@ -793,7 +793,7 @@ dist-electron/
 
 常见产物：
 
-- `抖音福袋助手 Setup <version>.exe`
+- `抖娃福袋 Setup <version>.exe`
 - `win-unpacked/`
 
 ### 18.2 macOS

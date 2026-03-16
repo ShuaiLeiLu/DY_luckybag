@@ -35,8 +35,6 @@
           <span>红包总中奖: <b>{{ summary.totalRedPacketWinning }}</b></span>
           <span v-if="dispatch.enabled">服务端池: <b>{{ dispatch.validCandidates }}</b></span>
           <span v-if="dispatch.enabled">可分配: <b>{{ dispatch.availableCandidates }}</b></span>
-          <span v-if="dispatch.enabled">已租约: <b>{{ dispatch.leaseCount }}</b></span>
-          <span v-if="dispatch.enabled">本端任务: <b>{{ dispatch.clientLeaseCount }}</b></span>
         </div>
       </template>
     </div>
@@ -78,9 +76,7 @@ const props = defineProps({
     default: () => ({
       enabled: false,
       validCandidates: 0,
-      availableCandidates: 0,
-      leaseCount: 0,
-      clientLeaseCount: 0
+      availableCandidates: 0
     })
   }
 })

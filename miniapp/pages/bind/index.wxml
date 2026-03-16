@@ -17,7 +17,7 @@
       <view class="license-icon">礼</view>
       <view class="license-meta">
         <view class="license-meta__row">
-          <view class="license-name">抖音福袋助手</view>
+          <view class="license-name">抖娃福袋</view>
           <view class="license-chip {{ licenseChipClass }}">
             {{ licenseChipText }}
           </view>
@@ -41,15 +41,12 @@
     <view class="reward-card__title-row">
       <view class="reward-icon">免</view>
       <view>
-        <view class="reward-title">免费观看广告获取时长</view>
+        <view class="reward-title">延长授权时长</view>
         <view class="reward-subtitle">{{ rewardSubtitleText }}</view>
       </view>
     </view>
-    <button class="reward-button" bindtap="watchRewardAd" loading="{{ rewardLoading }}" disabled="{{ !bindReady }}">
+    <button class="reward-button" bindtap="handleDailySignin" loading="{{ rewardLoading }}" disabled="{{ !bindReady || rewardLoading || rewardDisabled }}">
       {{ rewardButtonText }}
-    </button>
-    <button class="assist-button" bindtap="ensureSession" loading="{{ sessionLoading || bindLoading }}">
-      重新连接设备
     </button>
   </view>
 
@@ -68,19 +65,8 @@
         <view class="timeline-gain" wx:if="{{ item.gainLabel }}">{{ item.gainLabel }}</view>
       </view>
     </view>
-    <view class="timeline-empty" wx:else>等待首次绑定或广告解锁记录</view>
+    <view class="timeline-empty" wx:else>等待首次绑定或授权记录</view>
   </view>
 
   <view class="footer-spacer"></view>
-
-  <view class="bottom-nav">
-    <view class="nav-item active">
-      <view class="nav-icon">工</view>
-      <view class="nav-label">工作台</view>
-    </view>
-    <view class="nav-item" bindtap="goMe">
-      <view class="nav-icon">我</view>
-      <view class="nav-label">我的</view>
-    </view>
-  </view>
 </view>

@@ -36,6 +36,7 @@ type BindSession struct {
 	ScannedAtMS    int64   `json:"scannedAt"`
 	GrantedAtMS    int64   `json:"grantedAt"`
 	Authorized     bool    `json:"authorized"`
+	SignedToday    bool    `json:"signedToday"`
 	License        *Status `json:"license,omitempty"`
 }
 
@@ -55,7 +56,7 @@ type BindSessionScanRequest struct {
 	Nickname  string
 }
 
-// BindSessionGrantRequest 描述广告观看完成后的授权发放请求。
+// BindSessionGrantRequest 描述每日签到后的授权续期请求。
 type BindSessionGrantRequest struct {
 	BindToken string
 	Days      int
@@ -216,7 +217,7 @@ func (s *Service) MarkBindSessionScanned(ctx context.Context, req BindSessionSca
 	return s.buildBindSession(ctx, updated, now)
 }
 
-// GrantBindSession 在广告观看完成后直接为当前客户端写入授权并标记已激活。
+// GrantBindSession 在小程序签到完成后为当前客户端续期授权；同一设备每天仅允许成功一次。
 func (s *Service) GrantBindSession(ctx context.Context, req BindSessionGrantRequest) (BindSession, error) {
 	if err := s.ensureAdminReady(); err != nil {
 		return BindSession{}, err
@@ -225,7 +226,7 @@ func (s *Service) GrantBindSession(ctx context.Context, req BindSessionGrantRequ
 	if token == "" {
 		return BindSession{}, fmt.Errorf("bindToken required")
 	}
-	days := normalizeAdUnlockDays(req.Days)
+	days := normalizeSignInDays(req.Days)
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -247,50 +248,20 @@ func (s *Service) GrantBindSession(ctx context.Context, req BindSessionGrantRequ
 		}
 		return BindSession{}, fmt.Errorf("bind_session_expired")
 	}
-	if row.GrantedAt.Valid && row.LicenseID.Valid {
-		if err := tx.Commit(); err != nil {
-			return BindSession{}, err
-		}
-		updated, getErr := s.findBindSessionByToken(ctx, token)
-		if getErr != nil {
-			return BindSession{}, getErr
-		}
-		return s.buildBindSession(ctx, updated, now)
-	}
 	if strings.TrimSpace(row.WechatOpenID) == "" {
 		return BindSession{}, fmt.Errorf("bind_session_not_scanned")
 	}
 	if strings.TrimSpace(req.OpenID) != "" && strings.TrimSpace(row.WechatOpenID) != strings.TrimSpace(req.OpenID) {
 		return BindSession{}, fmt.Errorf("bind_session_claimed_by_other_user")
 	}
-
-	licenseKey, err := generateLicenseKey()
-	if err != nil {
+	if err := s.recordMiniAppDailySigninTx(ctx, tx, row.ClientID, row.Fingerprint, row.WechatOpenID, days, now); err != nil {
+		if isDuplicateLicenseKeyErr(err) {
+			return BindSession{}, fmt.Errorf("miniapp_signin_already_claimed")
+		}
 		return BindSession{}, err
 	}
-	featuresJSON := "{}"
-	features := defaultFullFeatures(days)
-	features["source"] = "rewarded_ad"
-	features["wechatOpenId"] = strings.TrimSpace(row.WechatOpenID)
-	if strings.TrimSpace(row.WechatUnionID) != "" {
-		features["wechatUnionId"] = strings.TrimSpace(row.WechatUnionID)
-	}
-	if strings.TrimSpace(row.WechatNickname) != "" {
-		features["wechatNickname"] = strings.TrimSpace(row.WechatNickname)
-	}
-	if b, marshalErr := json.Marshal(features); marshalErr == nil {
-		featuresJSON = string(b)
-	}
 
-	res, err := tx.ExecContext(ctx, `
-		INSERT INTO licenses (
-			license_key, customer_name, plan_name, status, expire_at, max_clients, max_accounts, features_json, bind_client_id, bind_fingerprint
-		) VALUES (?, ?, ?, 'used', ?, ?, ?, ?, ?, ?)
-	`, licenseKey, strings.TrimSpace(row.WechatNickname), "rewarded_ad", now.Add(time.Duration(days)*24*time.Hour), 1, 999, featuresJSON, row.ClientID, row.Fingerprint)
-	if err != nil {
-		return BindSession{}, err
-	}
-	licenseID, err := res.LastInsertId()
+	licenseID, err := s.grantOrExtendMiniAppLicenseTx(ctx, tx, row, days, now)
 	if err != nil {
 		return BindSession{}, err
 	}
@@ -318,14 +289,182 @@ func (s *Service) GrantBindSession(ctx context.Context, req BindSessionGrantRequ
 	return s.buildBindSession(ctx, updated, now)
 }
 
+func normalizeSignInDays(days int) int {
+	if days <= 0 {
+		return 1
+	}
+	if days > 30 {
+		return 30
+	}
+	return days
+}
+
 func normalizeAdUnlockDays(days int) int {
 	if days <= 0 {
-		return 30
+		return 1
 	}
 	if days > 3650 {
 		return 3650
 	}
 	return days
+}
+
+func (s *Service) recordMiniAppDailySigninTx(ctx context.Context, tx *sql.Tx, clientID, fingerprint, openID string, days int, now time.Time) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO miniapp_signin_records (
+			client_id,
+			fingerprint,
+			wechat_open_id,
+			sign_date,
+			gain_days,
+			created_at
+		) VALUES (?, ?, ?, ?, ?, NOW())
+	`, strings.TrimSpace(clientID), strings.TrimSpace(fingerprint), strings.TrimSpace(openID), now.Format("2006-01-02"), normalizeSignInDays(days))
+	return err
+}
+
+func (s *Service) grantOrExtendMiniAppLicenseTx(ctx context.Context, tx *sql.Tx, row bindSessionRow, days int, now time.Time) (int64, error) {
+	licenseRow, found, err := s.findGrantedLicenseTx(ctx, tx, row)
+	if err != nil {
+		return 0, err
+	}
+	if found {
+		baseTime := now
+		if licenseRow.ExpireAt.After(now) {
+			baseTime = licenseRow.ExpireAt
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE licenses
+			SET expire_at = ?,
+			    status = 'used',
+			    updated_at = NOW()
+			WHERE id = ?
+		`, baseTime.Add(time.Duration(days)*24*time.Hour), licenseRow.ID); err != nil {
+			return 0, err
+		}
+		return licenseRow.ID, nil
+	}
+
+	licenseKey, err := generateLicenseKey()
+	if err != nil {
+		return 0, err
+	}
+	featuresJSON := "{}"
+	features := defaultFullFeatures(days)
+	features["source"] = "daily_signin"
+	features["wechatOpenId"] = strings.TrimSpace(row.WechatOpenID)
+	if strings.TrimSpace(row.WechatUnionID) != "" {
+		features["wechatUnionId"] = strings.TrimSpace(row.WechatUnionID)
+	}
+	if strings.TrimSpace(row.WechatNickname) != "" {
+		features["wechatNickname"] = strings.TrimSpace(row.WechatNickname)
+	}
+	if b, marshalErr := json.Marshal(features); marshalErr == nil {
+		featuresJSON = string(b)
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO licenses (
+			license_key, customer_name, plan_name, status, expire_at, max_clients, max_accounts, features_json, bind_client_id, bind_fingerprint
+		) VALUES (?, ?, ?, 'used', ?, ?, ?, ?, ?, ?)
+	`, licenseKey, strings.TrimSpace(row.WechatNickname), "daily_signin", now.Add(time.Duration(days)*24*time.Hour), 1, 999, featuresJSON, row.ClientID, row.Fingerprint)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (s *Service) findGrantedLicenseTx(ctx context.Context, tx *sql.Tx, row bindSessionRow) (licenseRow, bool, error) {
+	if row.LicenseID.Valid && row.LicenseID.Int64 > 0 {
+		foundRow, err := s.findLicenseByIDTx(ctx, tx, row.LicenseID.Int64)
+		if err == nil {
+			return foundRow, true, nil
+		}
+		if err != sql.ErrNoRows {
+			return licenseRow{}, false, err
+		}
+	}
+
+	foundRow, err := s.findLicenseByClientTx(ctx, tx, row.ClientID, row.Fingerprint)
+	if err == nil {
+		return foundRow, true, nil
+	}
+	if err == sql.ErrNoRows {
+		return licenseRow{}, false, nil
+	}
+	return licenseRow{}, false, err
+}
+
+func (s *Service) findLicenseByIDTx(ctx context.Context, tx *sql.Tx, id int64) (licenseRow, error) {
+	row := licenseRow{}
+	err := tx.QueryRowContext(ctx, `
+		SELECT
+			id,
+			license_key,
+			customer_name,
+			plan_name,
+			status,
+			expire_at,
+			max_clients,
+			max_accounts,
+			features_json,
+			bind_client_id,
+			bind_fingerprint
+		FROM licenses
+		WHERE id = ?
+		LIMIT 1
+		FOR UPDATE
+	`, id).Scan(
+		&row.ID,
+		&row.LicenseKey,
+		&row.CustomerName,
+		&row.PlanName,
+		&row.Status,
+		&row.ExpireAt,
+		&row.MaxClients,
+		&row.MaxAccounts,
+		&row.FeaturesJSON,
+		&row.BindClientID,
+		&row.BindFingerprint,
+	)
+	return row, err
+}
+
+func (s *Service) findLicenseByClientTx(ctx context.Context, tx *sql.Tx, clientID, fingerprint string) (licenseRow, error) {
+	row := licenseRow{}
+	err := tx.QueryRowContext(ctx, `
+		SELECT
+			id,
+			license_key,
+			customer_name,
+			plan_name,
+			status,
+			expire_at,
+			max_clients,
+			max_accounts,
+			features_json,
+			bind_client_id,
+			bind_fingerprint
+		FROM licenses
+		WHERE bind_client_id = ?
+		  AND (? = '' OR bind_fingerprint = '' OR bind_fingerprint = ?)
+		ORDER BY id DESC
+		LIMIT 1
+		FOR UPDATE
+	`, strings.TrimSpace(clientID), strings.TrimSpace(fingerprint), strings.TrimSpace(fingerprint)).Scan(
+		&row.ID,
+		&row.LicenseKey,
+		&row.CustomerName,
+		&row.PlanName,
+		&row.Status,
+		&row.ExpireAt,
+		&row.MaxClients,
+		&row.MaxAccounts,
+		&row.FeaturesJSON,
+		&row.BindClientID,
+		&row.BindFingerprint,
+	)
+	return row, err
 }
 
 func generateBindToken() (string, error) {
@@ -454,6 +593,10 @@ func (s *Service) buildBindSession(ctx context.Context, row bindSessionRow, now 
 		session.GrantedAtMS = row.GrantedAt.Time.UnixMilli()
 	}
 
+	if signedToday, err := s.hasMiniAppSigninToday(ctx, row.ClientID, row.Fingerprint, row.WechatOpenID, now); err == nil {
+		session.SignedToday = signedToday
+	}
+
 	if isBindSessionExpired(row, now) && !row.GrantedAt.Valid {
 		session.Status = "expired"
 		session.Message = "小程序码已过期，请刷新后重试"
@@ -461,14 +604,15 @@ func (s *Service) buildBindSession(ctx context.Context, row bindSessionRow, now 
 	}
 	switch session.Status {
 	case "granted":
-		session.Message = "广告授权已发放，等待客户端同步"
+		session.SignedToday = true
+		session.Message = "今日签到已完成，等待客户端同步"
 	case "scanned":
-		session.Message = "已扫码登录，等待广告观看完成"
+		session.Message = "已绑定当前设备，可执行今日签到"
 	case "authorized":
 		session.Message = "当前客户端已授权"
 	default:
 		session.Status = "pending"
-		session.Message = "请使用微信直接扫描小程序码，进入小程序后完成激励视频"
+		session.Message = "请使用微信直接扫描小程序码，进入小程序后完成每日签到"
 	}
 
 	licenseStatus, err := s.Status(ctx, session.ClientID, session.Fingerprint)
@@ -484,6 +628,46 @@ func (s *Service) buildBindSession(ctx context.Context, row bindSessionRow, now 
 		}
 	}
 	return session, nil
+}
+
+func (s *Service) hasMiniAppSigninToday(ctx context.Context, clientID, fingerprint, openID string, now time.Time) (bool, error) {
+	if strings.TrimSpace(clientID) == "" || strings.TrimSpace(fingerprint) == "" {
+		return false, nil
+	}
+	signDate := now.Format("2006-01-02")
+	openID = strings.TrimSpace(openID)
+	if openID != "" {
+		var hit int
+		err := s.db.QueryRowContext(ctx, `
+			SELECT 1
+			FROM miniapp_signin_records
+			WHERE sign_date = ?
+			  AND (wechat_open_id = ? OR (client_id = ? AND fingerprint = ?))
+			LIMIT 1
+		`, signDate, openID, strings.TrimSpace(clientID), strings.TrimSpace(fingerprint)).Scan(&hit)
+		if err == nil {
+			return true, nil
+		}
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	var hit int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT 1
+		FROM miniapp_signin_records
+		WHERE sign_date = ?
+		  AND client_id = ? AND fingerprint = ?
+		LIMIT 1
+	`, signDate, strings.TrimSpace(clientID), strings.TrimSpace(fingerprint)).Scan(&hit)
+	if err == nil {
+		return true, nil
+	}
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return false, err
 }
 
 func (s *Service) buildBindSceneCode(id int64, bindToken string) string {

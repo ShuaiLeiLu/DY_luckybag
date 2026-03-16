@@ -79,18 +79,18 @@
           <div class="license-dialog__bind-card">
             <div class="license-dialog__qr-wrap">
               <img
-                v-if="licenseBindImageUrl"
+                v-if="licenseBindScanQrUrl || licenseBindImageUrl"
                 class="license-dialog__qr"
-                :src="licenseBindImageUrl"
-                alt="微信小程序码"
+                :src="licenseBindScanQrUrl || licenseBindImageUrl"
+                alt="绑定二维码"
               />
               <div v-else class="license-dialog__qr-placeholder">
-                {{ licenseBindLoading ? '小程序码生成中...' : '当前客户端已授权' }}
+                {{ licenseBindLoading ? '二维码生成中...' : '当前客户端已授权' }}
               </div>
             </div>
 
             <div class="license-dialog__bind-content">
-              <div class="license-dialog__bind-title">微信扫码解锁完整授权</div>
+              <div class="license-dialog__bind-title">小程序内扫一扫绑定</div>
               <div class="license-dialog__bind-desc">{{ licenseBindSummaryText }}</div>
 
               <div class="license-dialog__bind-extra" v-if="licenseBindSession.wechatNickname">
@@ -155,6 +155,7 @@ import {
   NButton, NTag, NConfigProvider, NIcon, NModal, NInput
 } from 'naive-ui'
 import SettingsOutline from '@vicons/ionicons5/es/SettingsOutline'
+import QRCode from 'qrcode'
 
 // 导入提取的组件
 import ConfigPanel from './components/ConfigPanel.vue'
@@ -195,7 +196,7 @@ const runningCount = computed(() => accounts.value.filter(a => a.state === 'runn
 const totalParticipation = computed(() => accounts.value.reduce((sum, a) => sum + a.participationCount, 0))
 const totalWinning = computed(() => accounts.value.reduce((sum, a) => sum + Number(a.todayLotteryWinCount || 0), 0))
 const totalDiamonds = computed(() => accounts.value.reduce((sum, a) => {
-  return sum + Number(a.todayLotteryWonDiamonds || 0) + Number(a.todayRedPacketWonDiamonds || 0)
+  return sum + Number(a.todayEarnedDiamonds || 0)
 }, 0))
 const headerSuccessRate = computed(() => {
   const joined = Number(totalParticipation.value || 0)
@@ -323,9 +324,6 @@ function createEmptyPoolDispatchSummary(overrides = {}) {
     activeCandidates: 0,
     validCandidates: 0,
     availableCandidates: 0,
-    leaseCount: 0,
-    clientLeaseCount: 0,
-    accountLeaseCount: 0,
     updatedAt: 0,
     error: '',
     ...overrides
@@ -503,20 +501,63 @@ const licenseBindImageUrl = computed(() => {
   return `${normalizedBase}/license/bind-session/miniapp-code?${params.toString()}`
 })
 
+const licenseBindScanPayload = computed(() => {
+  const session = licenseBindSession.value || {}
+  const bindToken = String(session.bindToken || '').trim()
+  const sceneCode = String(session.sceneCode || '').trim()
+  if (session.authorized === true) return ''
+  if (bindToken) return `dyf://bind?bindToken=${encodeURIComponent(bindToken)}`
+  if (sceneCode) return `dyf://bind?scene=${encodeURIComponent(sceneCode)}`
+  return ''
+})
+
+const licenseBindScanQrUrl = ref('')
+let licenseBindScanQrToken = 0
+
+watch(
+  [licenseBindScanPayload, () => licenseBindSession.value?.authorized],
+  async ([payload, authorized]) => {
+    const token = ++licenseBindScanQrToken
+    if (!payload || authorized) {
+      licenseBindScanQrUrl.value = ''
+      return
+    }
+    try {
+      const dataUrl = await QRCode.toDataURL(payload, {
+        width: 176,
+        margin: 1,
+        errorCorrectionLevel: 'M'
+      })
+      if (token === licenseBindScanQrToken) {
+        licenseBindScanQrUrl.value = dataUrl
+      }
+    } catch (_) {
+      if (token === licenseBindScanQrToken) {
+        licenseBindScanQrUrl.value = ''
+      }
+    }
+  },
+  { immediate: true }
+)
+
 const licenseBindSummaryText = computed(() => {
   const session = licenseBindSession.value || {}
   if (session.authorized === true) return '当前客户端已授权，完整功能已解锁'
-  if (session.status === 'scanned') return '已进入小程序并完成绑定，观看激励视频后将自动授权'
+  if (session.status === 'scanned') return '已进入小程序并完成绑定，请在小程序完成签到授权'
   if (session.status === 'granted') return '授权已发放，客户端正在同步状态'
   if (session.status === 'expired') return '小程序码已过期，请点击刷新生成新的二维码'
   if (licenseBindLoading.value) return '正在生成小程序码，请稍候...'
-  return String(session.message || '请使用微信直接扫描小程序码，进入小程序后自动绑定并完成授权')
+  return String(session.message || '请在小程序“我的”里点击“扫一扫绑定”，对准二维码完成绑定')
 })
 
 const licenseBindCountdownToneClass = computed(() => {
   const session = licenseBindSession.value || {}
+  const status = String(session.status || '')
   const remain = Number(session.remainingSec || 0)
   if (!session.bindToken || session.authorized === true) {
+    return 'license-dialog__bind-countdown--success'
+  }
+  if (['scanned', 'granted'].includes(status)) {
     return 'license-dialog__bind-countdown--success'
   }
   if (remain <= 0 || session.status === 'expired') return 'license-dialog__bind-countdown--danger'
@@ -526,8 +567,11 @@ const licenseBindCountdownToneClass = computed(() => {
 
 const licenseBindCountdownText = computed(() => {
   const session = licenseBindSession.value || {}
+  const status = String(session.status || '')
   if (session.authorized === true) return '授权已生效'
   if (!session.bindToken) return '当前无需扫码'
+  if (status === 'scanned') return '已绑定，等待签到'
+  if (status === 'granted') return '授权发放中'
   const remain = Number(session.remainingSec || 0)
   if (remain <= 0 || session.status === 'expired') return '小程序码已过期'
   return `${remain} 秒后过期`
@@ -833,6 +877,7 @@ const ipcUnsubscribers = []
 const resolvedLotteryResultKeys = new Set()
 const countedLotteryWinKeys = new Set()
 const creditedLotteryRewardByKey = new Map()
+const lotteryOutcomeKeyAlias = new Map()
 
 // 监听串口大小
 const handleResize = () => {
@@ -1079,9 +1124,6 @@ async function refreshPoolDispatchSummary() {
       activeCandidates: Number(summary.activeCandidates || 0),
       validCandidates: Number(summary.validCandidates || 0),
       availableCandidates: Number(summary.availableCandidates || 0),
-      leaseCount: Number(summary.leaseCount || 0),
-      clientLeaseCount: Number(summary.clientLeaseCount || 0),
-      accountLeaseCount: Number(summary.accountLeaseCount || 0),
       updatedAt: Number(summary.generatedAt || Date.now())
     })
   } finally {
@@ -1429,10 +1471,17 @@ function normalizeNickname(name) {
 /**
  * makeLotteryOutcomeKey 方法：生成福袋开奖结果键。
  */
-function makeLotteryOutcomeKey(accountId, lotteryId) {
+function makeLotteryOutcomeBaseKey(accountId, lotteryId) {
   const id = String(lotteryId || '').trim()
   if (!id) return ''
   return `${accountId}:${id}`
+}
+
+function makeLotteryOutcomeKey(accountId, lotteryId) {
+  const baseKey = makeLotteryOutcomeBaseKey(accountId, lotteryId)
+  if (!baseKey) return ''
+  const alias = lotteryOutcomeKeyAlias.get(baseKey)
+  return alias || baseKey
 }
 
 /**
@@ -1448,6 +1497,9 @@ function clearLotteryOutcomeCacheByAccount(accountId) {
   }
   for (const key of Array.from(creditedLotteryRewardByKey.keys())) {
     if (key.startsWith(prefix)) creditedLotteryRewardByKey.delete(key)
+  }
+  for (const key of Array.from(lotteryOutcomeKeyAlias.keys())) {
+    if (key.startsWith(prefix)) lotteryOutcomeKeyAlias.delete(key)
   }
 }
 
@@ -1672,7 +1724,14 @@ function updateLotteryHistoryOutcome(accountId, outcome) {
     lotteryId: current.lotteryId || targetLotteryId,
     resultStatus: nextStatus,
     resultReason: nextReason,
-    rewardAmount: nextRewardAmount
+    rewardAmount: nextRewardAmount,
+    statsKey: current.statsKey
+  }
+  if (nextRecord.statsKey) {
+    const baseKey = makeLotteryOutcomeBaseKey(accountId, nextRecord.lotteryId)
+    if (baseKey && lotteryOutcomeKeyAlias.get(baseKey) !== nextRecord.statsKey) {
+      lotteryOutcomeKeyAlias.set(baseKey, nextRecord.statsKey)
+    }
   }
   lotteryHistory.value[index] = nextRecord
   return { updated: true, record: nextRecord }
@@ -1736,9 +1795,16 @@ function applyWalletWinFallback(accountId, account, rewardDelta) {
     ...record,
     resultStatus: 'won',
     resultReason: '中奖',
-    rewardAmount: Math.max(Number(record.rewardAmount || 0), reward)
+    rewardAmount: Math.max(Number(record.rewardAmount || 0), reward),
+    statsKey: record.statsKey || fallbackKey
   }
   lotteryHistory.value[matched.index] = nextRecord
+  if (lotteryId) {
+    const baseKey = makeLotteryOutcomeBaseKey(accountId, lotteryId)
+    if (baseKey && lotteryOutcomeKeyAlias.get(baseKey) !== nextRecord.statsKey) {
+      lotteryOutcomeKeyAlias.set(baseKey, nextRecord.statsKey)
+    }
+  }
   const statsResult = applyLotteryWinStats(account, accountId, lotteryId, nextRecord.rewardAmount, {
     fallbackKey,
     countWin: String(record.resultStatus || 'pending') !== 'won'
@@ -1884,12 +1950,12 @@ const responsiveColumns = computed(() => {
       }
     },
     {
-      title: '中奖钻石',
+      title: '今日收益',
       key: 'winDiamonds',
       width: compact ? 82 : 94,
       align: 'right',
       render: (row) => {
-        const totalWin = Number(row.todayLotteryWonDiamonds || 0) + Number(row.todayRedPacketWonDiamonds || 0)
+        const totalWin = Number(row.todayEarnedDiamonds || 0)
         return h('span', { class: 'metric-cell metric-win' }, formatMetric(totalWin))
       }
     },

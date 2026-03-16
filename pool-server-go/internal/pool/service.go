@@ -493,6 +493,7 @@ func selectTopCandidatesWithLease(
 		return []ScoredCandidate{}, 0, 0
 	}
 
+	clientRoomLeases := buildClientRoomLeaseMap(leaseGroups)
 	h := &scoreMinHeap{}
 	heap.Init(h)
 	validCount := 0
@@ -533,6 +534,10 @@ func selectTopCandidatesWithLease(
 			}
 		}
 
+		if owner.ClientID != "" && candidateBlockedByClientRoomLease(clientRoomLeases, owner, c.RoomID, c.Key) {
+			continue
+		}
+
 		if sc.AvailableSlots <= 0 {
 			if ownerLease == nil {
 				continue
@@ -566,6 +571,55 @@ func selectTopCandidatesWithLease(
 		return out[i].Score > out[j].Score
 	})
 	return out, validCount, availableCount
+}
+
+func buildClientRoomLeaseMap(leaseGroups map[string][]LeaseInfo) map[string]map[string][]LeaseInfo {
+	if len(leaseGroups) == 0 {
+		return map[string]map[string][]LeaseInfo{}
+	}
+	out := make(map[string]map[string][]LeaseInfo)
+	for _, leases := range leaseGroups {
+		for _, lease := range leases {
+			clientID := stringsTrim(lease.ClientID)
+			roomID := stringsTrim(lease.RoomID)
+			if clientID == "" || roomID == "" {
+				continue
+			}
+			roomMap := out[clientID]
+			if roomMap == nil {
+				roomMap = make(map[string][]LeaseInfo)
+				out[clientID] = roomMap
+			}
+			roomMap[roomID] = append(roomMap[roomID], lease)
+		}
+	}
+	return out
+}
+
+func candidateBlockedByClientRoomLease(clientRoomLeases map[string]map[string][]LeaseInfo, owner ClaimOwner, roomID string, candidateKey string) bool {
+	clientID := stringsTrim(owner.ClientID)
+	safeRoomID := stringsTrim(roomID)
+	safeCandidateKey := stringsTrim(candidateKey)
+	if clientID == "" || safeRoomID == "" {
+		return false
+	}
+	roomMap := clientRoomLeases[clientID]
+	if len(roomMap) == 0 {
+		return false
+	}
+	leases := roomMap[safeRoomID]
+	if len(leases) == 0 {
+		return false
+	}
+	for _, lease := range leases {
+		if stringsTrim(lease.CandidateKey) == safeCandidateKey && ownerMatches(lease, owner) {
+			return false
+		}
+		if !ownerMatches(lease, owner) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildLeaseGroupMap 方法：按 candidateKey 聚合活跃租约。
@@ -1062,7 +1116,7 @@ func (s *Service) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 		s.cfg.TopCacheMax,
 		leaseGroups,
 		joinedCounts,
-		ClaimOwner{},
+		owner,
 		false,
 		learningSnapshot.lookup,
 		options.PreferKeys,

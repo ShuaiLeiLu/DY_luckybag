@@ -1,3 +1,9 @@
 {
-  "rules": []
+  "desc": "抖娃福袋小程序 sitemap",
+  "rules": [
+    {
+      "action": "allow",
+      "page": "*"
+    }
+  ]
 }

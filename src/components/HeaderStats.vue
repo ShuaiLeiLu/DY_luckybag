@@ -32,8 +32,6 @@
         </span>
         <span class="dispatch-pill">池 {{ dispatchSummary.validCandidates }}</span>
         <span class="dispatch-pill">可分配 {{ dispatchSummary.availableCandidates }}</span>
-        <span class="dispatch-pill">已租约 {{ dispatchSummary.leaseCount }}</span>
-        <span class="dispatch-pill">本端 {{ dispatchSummary.clientLeaseCount }}</span>
       </div>
       <div class="tool-group">
         <button class="license-button" :class="licenseButtonClass" @click="$emit('open-license')">
@@ -75,9 +73,7 @@ const props = defineProps({
       enabled: false,
       connected: false,
       validCandidates: 0,
-      availableCandidates: 0,
-      leaseCount: 0,
-      clientLeaseCount: 0
+      availableCandidates: 0
     })
   },
   licenseStatus: {

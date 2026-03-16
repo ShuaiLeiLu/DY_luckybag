@@ -1,6 +1,6 @@
 {
   "name": "douyin-lottery-assistant",
-  "version": "1.2.0",
+  "version": "2.1.1",
   "description": "抖音福袋自动参与助手",
   "main": "electron/main-browserview.js",
   "engines": {
@@ -17,12 +17,13 @@
     "pool:db:init:dry": "node ./scripts/init-license-db.mjs --dry-run",
     "pool:dump": "node ./scripts/pool-dump.mjs",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
-    "electron:build:win": "vite build && electron-builder --win portable --x64 && mv \"dist-electron/抖音福袋助手 ${npm_package_version}.exe\" \"dist-electron/抖音福袋助手 ${npm_package_version}-x64.exe\" && electron-builder --win portable --arm64 && mv \"dist-electron/抖音福袋助手 ${npm_package_version}.exe\" \"dist-electron/抖音福袋助手 ${npm_package_version}-arm64.exe\""
+    "electron:build:win": "vite build && electron-builder --win portable --x64 && mv \"dist-electron/抖娃福袋 ${npm_package_version}.exe\" \"dist-electron/抖娃福袋 ${npm_package_version}-x64.exe\" && electron-builder --win portable --arm64 && mv \"dist-electron/抖娃福袋 ${npm_package_version}.exe\" \"dist-electron/抖娃福袋 ${npm_package_version}-arm64.exe\""
   },
   "dependencies": {
     "@vicons/ionicons5": "^0.13.0",
     "axios": "^1.6.0",
     "naive-ui": "^2.38.0",
+    "qrcode": "^1.5.3",
     "vue": "^3.4.0"
   },
   "devDependencies": {
@@ -36,7 +37,7 @@
   },
   "build": {
     "appId": "com.douyin.lottery.assistant",
-    "productName": "抖音福袋助手",
+    "productName": "抖娃福袋",
     "directories": {
       "output": "dist-electron"
     },

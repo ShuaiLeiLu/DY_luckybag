@@ -16,7 +16,7 @@
     "enabled": false,
     "unrestricted": false,
     "adminToken": "CHANGE_ME_ADMIN_TOKEN",
-    "adUnlockDays": 30,
+    "adUnlockDays": 1,
     "miniAppEnabled": false,
     "miniAppAppId": "wx_replace_me",
     "miniAppAppSecret": "replace_me",

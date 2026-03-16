@@ -31,6 +31,13 @@ function formatExpire(expireAt) {
   return `${y}-${m}-${d} ${hh}:${mm}`
 }
 
+function formatDeviceLabel(label) {
+  const raw = String(label || '').trim()
+  if (!raw) return '未绑定'
+  if (raw.length <= 10) return raw
+  return `${raw.slice(0, 4)}...${raw.slice(-4)}`
+}
+
 Page({
   data: {
     topInset: 20,
@@ -92,13 +99,14 @@ Page({
     const authorized = session.authorized === true
     const remainHours = getRemainingHours(Number(session.licenseExpireAt || 0))
     const deviceCount = session.clientLabel ? 1 : 0
+    const deviceLabel = formatDeviceLabel(session.clientLabel)
     const menuItems = [
       {
         key: 'device',
         icon: '设',
         title: '我的设备',
-        trailing: `${deviceCount}台`,
-        desc: session.clientLabel || '当前尚未绑定设备'
+        trailing: deviceLabel,
+        desc: deviceLabel
       },
       {
         key: 'license',
@@ -139,7 +147,7 @@ Page({
           key: 'device',
           icon: '设',
           title: '我的设备',
-          trailing: '0台',
+          trailing: '未绑定',
           desc: '请先从桌面端扫码进入授权页'
         },
         {
@@ -164,6 +172,13 @@ Page({
     const key = String(event.currentTarget.dataset.key || '')
     const item = (this.data.menuItems || []).find((entry) => entry.key === key)
     if (!item) return
+    if (key === 'device') {
+      return
+    }
+    if (key === 'privacy') {
+      wx.navigateTo({ url: '/pages/privacy/index' })
+      return
+    }
     wx.showModal({
       title: item.title,
       content: item.desc,
