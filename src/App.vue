@@ -301,9 +301,7 @@ const LOG_WIN_RE = /(中奖|恭喜|🎉|🧧.*成功|领取红包成功|中得)/
 const LOG_FAIL_RE = /(失败|错误|异常|超时|未中奖|放弃)/i
 const LOG_WARN_RE = /(风控|告警|警告|降速|冷却)/i
 const FRONTEND_LOG_SUPPRESS_PATTERNS = [
-  /^⏳ 已锁定当前直播间，约\d+秒后复核当前福袋，并持续补扫候选\.\.\.$/,
-  /^🧠 服务端T(?:30|20)复评分：当前目标继续保留$/,
-  /^🧠 服务端T(?:30|20)复评分：已锁定当前房间，忽略跨房切换建议$/
+  /^⏳ 已锁定当前直播间，约\d+秒后复核当前福袋，并持续补扫候选\.\.\.$/
 ]
 
 const pendingAccountUpdates = new Map()
@@ -443,7 +441,7 @@ const licenseBindLoading = ref(false)
 const licenseFormKey = ref('')
 const licenseFormMessage = ref('')
 const licenseBindSession = ref(createEmptyLicenseBindSession())
-const APP_VERSION = 'v2.0'
+const APP_VERSION = 'v2.1'
 let licenseBindPollTimer = null
 let licenseBindStatusInflight = false
 

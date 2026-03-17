@@ -260,6 +260,8 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
   const supermanFirstRound = scanProfile?.supermanFirstRound === true
   const fullUploadMode = manager?.isPoolServerEnabled?.() === true
   const forceLotteryHintOnly = !fullUploadMode && (supermanFirstRound || scanProfile?.forceLotteryHintOnly === true)
+  const useCursorPagingInFirstRound = supermanFirstRound && scanProfile?.firstRoundUseCursorPaging === true
+  const allowCursorPaging = !supermanFirstRound || useCursorPagingInFirstRound
 
   // 统一构造扫描参数，避免 supermanFirstRound 三元判断散落各处
   const defaultRounds = Math.max(1, toPositiveInt(times, 10))
@@ -365,7 +367,7 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
           }
         }
 
-        const effectiveMaxTime = supermanFirstRound ? 0 : Number(sharedCursorMaxTime || cursorMaxTime || 0)
+        const effectiveMaxTime = allowCursorPaging ? Number(sharedCursorMaxTime || cursorMaxTime || 0) : 0
         const requestPayload = {
           accountId,
           customCount: allCount,
@@ -515,7 +517,7 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
             }
           )
           manager.addLotteryInfoWithoutDuplicates(accountId, filteredList)
-          await manager.syncServerPoolCandidates(accountId, filteredList)
+          manager.enqueuePoolCandidatesUpload(accountId, filteredList).catch(() => {})
           manager.calculatePredictedProbabilities(accountId)
           manager.sortLotteriesByProbability(accountId)
           manager.emitLotteryListUpdate(accountData)
@@ -528,11 +530,11 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
           }
         }
 
-        const nextMaxTime = supermanFirstRound ? 0 : toPositiveInt(result?.nextMaxTime, 0)
-        const hasMore = !supermanFirstRound && result?.hasMore === true && nextMaxTime > 0
+        const nextMaxTime = allowCursorPaging ? toPositiveInt(result?.nextMaxTime, 0) : 0
+        const hasMore = allowCursorPaging && result?.hasMore === true && nextMaxTime > 0
         roundSummary.hasMore = hasMore
         roundSummary.nextCursor = hasMore ? nextMaxTime : null
-        if (!supermanFirstRound) {
+        if (allowCursorPaging) {
           if (!sharedAllCursorEnabled && hasMore && nextMaxTime !== Number(cursorMaxTime || 0)) {
             cursorMaxTime = nextMaxTime
           } else if (!sharedAllCursorEnabled && !hasMore) {
@@ -558,7 +560,10 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
         }
 
         // 没有更多分页且本轮无新增，提前结束
-        if (!supermanFirstRound && !hasMore && noGrowthRounds >= Math.max(3, Math.floor(noGrowthBreakRounds / 2))) {
+        const noMoreBreakRounds = supermanFirstRound
+          ? Math.max(3, toPositiveInt(scanProfile?.firstRoundNoMoreBreakRounds, 4))
+          : Math.max(3, Math.floor(noGrowthBreakRounds / 2))
+        if (!hasMore && noGrowthRounds >= noMoreBreakRounds) {
           roundSummary.breakReason = 'no_more_and_no_growth'
           emitRoundSummary()
           break
@@ -681,7 +686,7 @@ export async function startCollectLive(manager, accountId, scanProfile = null) {
             }
           )
           manager.addLotteryInfoWithoutDuplicates(accountId, filteredList)
-          manager.syncServerPoolCandidates(accountId, filteredList).catch(() => {})
+          manager.enqueuePoolCandidatesUpload(accountId, filteredList).catch(() => {})
         }, scanProfile)
 
         // 每个分类扫完后统一做一次概率计算/排序/UI推送，避免每批都重复计算

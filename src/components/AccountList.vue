@@ -33,7 +33,7 @@
           <span>福袋总中奖次数: <b>{{ summary.totalLotteryWinCount }}</b></span>
           <span>福袋总中奖钻石: <b>{{ summary.totalLotteryWonDiamonds }}</b></span>
           <span>红包总中奖: <b>{{ summary.totalRedPacketWinning }}</b></span>
-          <span v-if="dispatch.enabled">服务端池: <b>{{ dispatch.validCandidates }}</b></span>
+          <span v-if="dispatch.enabled">服务端池: <b>{{ dispatch.activeCandidates }}</b></span>
           <span v-if="dispatch.enabled">可分配: <b>{{ dispatch.availableCandidates }}</b></span>
         </div>
       </template>
@@ -75,6 +75,7 @@ const props = defineProps({
     type: Object,
     default: () => ({
       enabled: false,
+      activeCandidates: 0,
       validCandidates: 0,
       availableCandidates: 0
     })

@@ -30,14 +30,14 @@
         <span class="dispatch-pill" :class="{ offline: !dispatchSummary.connected }">
           {{ dispatchSummary.connected ? '服务端在线' : '服务端离线' }}
         </span>
-        <span class="dispatch-pill">池 {{ dispatchSummary.validCandidates }}</span>
+        <span class="dispatch-pill">池 {{ dispatchSummary.activeCandidates }}</span>
         <span class="dispatch-pill">可分配 {{ dispatchSummary.availableCandidates }}</span>
       </div>
       <div class="tool-group">
         <button class="license-button" :class="licenseButtonClass" @click="$emit('open-license')">
           {{ licenseButtonText }}
         </button>
-        <n-tag :bordered="false" round size="small" type="success" class="version-tag">v2.0</n-tag>
+        <n-tag :bordered="false" round size="small" type="success" class="version-tag">v2.1</n-tag>
       </div>
     </div>
   </header>
@@ -72,6 +72,7 @@ const props = defineProps({
     default: () => ({
       enabled: false,
       connected: false,
+      activeCandidates: 0,
       validCandidates: 0,
       availableCandidates: 0
     })
