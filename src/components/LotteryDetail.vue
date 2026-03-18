@@ -72,6 +72,7 @@ import { computed, h, ref } from 'vue'
 import { NCard, NIcon, NDataTable, NTag } from 'naive-ui'
 import GiftOutline from '@vicons/ionicons5/es/GiftOutline'
 import SearchOutline from '@vicons/ionicons5/es/SearchOutline'
+import { hasFanClubJoinRequirement, hasMemberJoinRequirement } from '../utils/lotteryRules'
 
 const props = defineProps({
   lotteries: {
@@ -161,9 +162,11 @@ function getLotteryMeta(row) {
 function renderLotteryContentCell(row) {
   const title = row?.lotteryName || row?.prize_name || prizeNameFromInfo(row) || '福袋'
   const meta = getLotteryMeta(row)
+  const requirements = getConditionLabels(row)
+  const requirementText = requirements.length ? `要求 ${requirements.join(' / ')}` : ''
   const fullText = meta && meta !== '内容待补充'
-    ? `${title} · ${meta}`
-    : title
+    ? `${title} · ${meta}${requirementText ? ` · ${requirementText}` : ''}`
+    : `${title}${requirementText ? ` · ${requirementText}` : ''}`
   return h(
     'div',
     { class: 'lottery-content-cell', title: fullText },
@@ -171,9 +174,60 @@ function renderLotteryContentCell(row) {
       h('span', { class: 'lottery-content-title' }, title),
       meta && meta !== '内容待补充'
         ? h('span', { class: 'lottery-content-meta' }, `· ${meta}`)
+        : null,
+      requirementText
+        ? h('span', { class: 'lottery-content-req' }, `· ${requirementText}`)
         : null
     ].filter(Boolean)
   )
+}
+
+function extractConditionText(condition) {
+  return String([
+    condition?.content,
+    condition?.desc,
+    condition?.description,
+    condition?.name,
+    condition?.title,
+    condition?.text
+  ].filter(Boolean).join(' ')).trim()
+}
+
+function getConditionLabels(row) {
+  const conditions = Array.isArray(row?.conditions) ? row.conditions : []
+  const labels = []
+  const add = (label) => {
+    if (!label) return
+    if (!labels.includes(label)) labels.push(label)
+  }
+  const typeLabelMap = {
+    1: '关注',
+    2: '粉丝牌',
+    3: '口令',
+    4: '分享',
+    5: '观看时长',
+    6: '手动参与',
+    7: '点赞',
+    8: '评论'
+  }
+
+  for (const condition of conditions) {
+    const typeNum = Number(condition?.type)
+    if (typeLabelMap[typeNum]) add(typeLabelMap[typeNum])
+    const text = extractConditionText(condition)
+    if (!text) continue
+    if (/评论/.test(text)) add('评论')
+    if (/点赞/.test(text)) add('点赞')
+    if (/分享/.test(text)) add('分享')
+    if (/口令|关键词/.test(text)) add('口令')
+    if (/会员|VIP|订阅|subscriber|member/i.test(text)) add('会员')
+    if (/粉丝团|粉丝牌|铁粉|加团/i.test(text)) add('粉丝牌')
+  }
+
+  if (hasMemberJoinRequirement(row)) add('会员')
+  if (hasFanClubJoinRequirement(row)) add('粉丝牌')
+
+  return labels
 }
 
 function prizeNameFromInfo(row) {
@@ -464,6 +518,16 @@ const historyColumns = computed(() => [
   text-overflow: ellipsis;
   white-space: nowrap;
   color: #72839a;
+  font-size: 12px;
+}
+
+.lottery-content-req {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #4f6380;
   font-size: 12px;
 }
 

@@ -3913,7 +3913,16 @@ class LotteryManager {
       accountData.callbacks.onLog('   实物筛选: 已开启')
     }
     if (config.preferBigRedPacket?.enabled) {
-      if (lotteryAverageInfo?.known) {
+      if (isPhysicalPrizeLottery(lotteryInfo)) {
+        const physicalName = String(
+          lotteryInfo?.lotteryName ||
+          lotteryInfo?.prize_name ||
+          lotteryInfo?.prizeInfo?.name ||
+          lotteryInfo?.prize_info?.name ||
+          '实物奖品'
+        ).trim()
+        accountData.callbacks.onLog(`   福袋均值: ${physicalName}（实物）`)
+      } else if (lotteryAverageInfo?.known) {
         accountData.callbacks.onLog(`   福袋均值: ${lotteryAverageInfo.avgPerWinner.toFixed(2)} (阈值${threshold})`)
       } else {
         accountData.callbacks.onLog(`   福袋均值: 未知 (阈值${threshold})`)

@@ -981,14 +981,11 @@ func (s *Service) buildScanPoolSummary(nowMS int64) scanPoolSummary {
 	profile, _ := s.Profile()
 	learningSnapshot := s.learningSnapshot()
 	all := s.store.snapshot()
-	leases := s.activeLeases(nowMS)
-	leaseGroups := buildLeaseGroupMap(leases)
-	joinedCounts := s.activeJoinedCounts(nowMS)
-	_, validCount, availableCount := selectTopCandidatesWithLease(all, profile, nowMS, maxInt(len(all), 1), leaseGroups, joinedCounts, ClaimOwner{}, false, learningSnapshot.lookup)
+	_, validCount, availableCount := selectTopCandidatesWithLease(all, profile, nowMS, maxInt(len(all), 1), nil, nil, ClaimOwner{}, false, learningSnapshot.lookup)
 	return scanPoolSummary{
 		ValidCandidates:     validCount,
 		AvailableCandidates: availableCount,
-		LeaseCount:          len(leases),
+		LeaseCount:          0,
 	}
 }
 
@@ -1010,10 +1007,8 @@ func (s *Service) TopAvailable(limit int, profile FilterProfile, owner ClaimOwne
 	now := time.Now().UnixMilli()
 	s.SweepExpired(now)
 	all := s.store.snapshot()
-	leaseGroups := s.activeLeaseGroups(now)
-	joinedCounts := s.activeJoinedCounts(now)
 	learningSnapshot := s.learningSnapshot()
-	out, validCount, _ := selectTopCandidatesWithLease(all, profile, now, limit, leaseGroups, joinedCounts, normalizeClaimOwner(owner), includeClaimedSelf, learningSnapshot.lookup)
+	out, validCount, _ := selectTopCandidatesWithLease(all, profile, now, limit, nil, nil, normalizeClaimOwner(owner), includeClaimedSelf, learningSnapshot.lookup)
 	_, pv := s.Profile()
 	return out, TopMeta{
 		BuiltAtMS:   now,
@@ -1106,16 +1101,17 @@ func (s *Service) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 	profile := options.Profile
 	_, pv := s.Profile()
 	all := s.store.snapshot()
-	leaseGroups := s.activeLeaseGroups(now)
-	joinedCounts := s.activeJoinedCounts(now)
+	profileAll := profile
+	profileAll.MinRemainingSec = 0
+	profileAll.MaxRemainingSec = math.MaxInt64
 	learningSnapshot := s.learningSnapshot()
 	ordered, _ := buildOrderedTaskCandidates(
 		all,
-		profile,
+		profileAll,
 		now,
 		s.cfg.TopCacheMax,
-		leaseGroups,
-		joinedCounts,
+		nil,
+		nil,
 		owner,
 		false,
 		learningSnapshot.lookup,
@@ -1129,48 +1125,68 @@ func (s *Service) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 		}
 	}
 
-	for _, item := range ordered {
+	windowMin := maxInt64(0, profile.MinRemainingSec)
+	windowMax := profile.MaxRemainingSec
+	if windowMax <= 0 {
+		windowMax = math.MaxInt64
+	}
+
+	var selected *ScoredCandidate
+	choose := func(item ScoredCandidate, inWindowOnly bool) bool {
 		key := scoredCandidateKey(item)
 		if key == "" {
-			continue
+			return false
 		}
 		if _, blocked := exclude[key]; blocked {
-			continue
+			return false
 		}
-
-		s.leaseMu.Lock()
-		s.sweepExpiredLeasesLocked(now)
-		leaseCount, ownerAlreadyClaimed := s.countCandidateLeasesLocked(key, owner, now)
-		joinedCount := maxInt(s.joined[key], 0)
-		if ownerAlreadyClaimed || leaseCount+joinedCount >= item.MaxLeaseSlots {
-			s.leaseMu.Unlock()
-			continue
+		if inWindowOnly {
+			remain := item.RemainingSec
+			if remain < windowMin || remain > windowMax {
+				return false
+			}
 		}
+		copyItem := item
+		selected = &copyItem
+		return true
+	}
 
-		leaseID := "lease-" + strconv.FormatInt(s.seq.Add(1), 10)
+	for _, item := range ordered {
+		if choose(item, true) {
+			break
+		}
+	}
+	if selected == nil {
+		for _, item := range ordered {
+			if choose(item, false) {
+				break
+			}
+		}
+	}
+
+	if selected != nil {
+		key := scoredCandidateKey(*selected)
 		lease := &LeaseInfo{
-			LeaseID:      leaseID,
+			LeaseID:      buildNoLockLeaseID(key, s.seq.Add(1)),
 			CandidateKey: key,
-			RoomID:       item.RoomID,
-			LotteryID:    item.LotteryID,
+			RoomID:       selected.RoomID,
+			LotteryID:    selected.LotteryID,
 			ClientID:     owner.ClientID,
 			AccountID:    owner.AccountID,
-			SlotLimit:    item.MaxLeaseSlots,
+			SlotLimit:    maxInt(selected.MaxLeaseSlots, 1),
 			ClaimedAtMS:  now,
 			UpdatedAtMS:  now,
 			ExpiresAtMS:  now + leaseSec*1000,
+			Reason:       "nolock",
 		}
-		s.leases[leaseID] = lease
-		s.leaseMu.Unlock()
-
-		item.Claimed = true
-		item.Lease = cloneLeaseInfo(lease)
-		item.LeaseCount = leaseCount + 1
-		item.JoinedCount = joinedCount
-		item.AvailableSlots = maxInt(item.MaxLeaseSlots-item.LeaseCount-item.JoinedCount, 0)
+		selected.Claimed = false
+		selected.Lease = cloneLeaseInfo(lease)
+		selected.LeaseCount = 0
+		selected.JoinedCount = 0
+		selected.AvailableSlots = maxInt(selected.MaxLeaseSlots, 1)
 		return ClaimResult{
 			Claimed:        true,
-			Item:           &item,
+			Item:           selected,
 			Lease:          cloneLeaseInfo(lease),
 			ProfileVersion: pv,
 			GeneratedAtMS:  now,
@@ -1193,8 +1209,6 @@ func (s *Service) ReviewTask(options ReviewOptions) (ReviewResult, error) {
 	stage := normalizeReviewStage(options.Stage, 0)
 	_, pv := s.Profile()
 	all := s.store.snapshot()
-	leaseGroups := s.activeLeaseGroups(now)
-	joinedCounts := s.activeJoinedCounts(now)
 	learningSnapshot := s.learningSnapshot()
 	limit := normalizeTopLimit(options.Limit, 24)
 
@@ -1203,8 +1217,8 @@ func (s *Service) ReviewTask(options ReviewOptions) (ReviewResult, error) {
 		options.Profile,
 		now,
 		s.cfg.TopCacheMax,
-		leaseGroups,
-		joinedCounts,
+		nil,
+		nil,
 		owner,
 		true,
 		learningSnapshot.lookup,
@@ -1260,64 +1274,46 @@ func (s *Service) RenewTaskLease(owner ClaimOwner, leaseID string, leaseSec int6
 	now := time.Now().UnixMilli()
 	owner = normalizeClaimOwner(owner)
 	leaseSec = normalizeLeaseSec(leaseSec)
-
-	s.leaseMu.Lock()
-	defer s.leaseMu.Unlock()
-	s.sweepExpiredLeasesLocked(now)
-
-	lease, ok := s.leases[stringsTrim(leaseID)]
-	if !ok || lease == nil {
+	candidateKey, ok := parseNoLockLeaseIDCandidateKey(leaseID)
+	if !ok {
 		return nil, false, nil
 	}
-	if !ownerMatches(*lease, owner) {
-		return nil, false, nil
+	lease := &LeaseInfo{
+		LeaseID:      stringsTrim(leaseID),
+		CandidateKey: candidateKey,
+		ClientID:     owner.ClientID,
+		AccountID:    owner.AccountID,
+		ClaimedAtMS:  now,
+		UpdatedAtMS:  now,
+		ExpiresAtMS:  now + leaseSec*1000,
+		Reason:       "nolock",
 	}
-	lease.UpdatedAtMS = now
-	lease.ExpiresAtMS = now + leaseSec*1000
-	return cloneLeaseInfo(lease), true, nil
+	return lease, true, nil
 }
 
 // ReleaseTaskLease 方法：主动释放当前任务租约，使候选回到服务端池中。
 func (s *Service) ReleaseTaskLease(owner ClaimOwner, leaseID string, reason string) (bool, error) {
-	now := time.Now().UnixMilli()
-	owner = normalizeClaimOwner(owner)
-
-	s.leaseMu.Lock()
-	defer s.leaseMu.Unlock()
-	s.sweepExpiredLeasesLocked(now)
-
-	lease, ok := s.leases[stringsTrim(leaseID)]
-	if !ok || lease == nil || !ownerMatches(*lease, owner) {
+	_ = normalizeClaimOwner(owner)
+	if stringsTrim(leaseID) == "" {
 		return false, nil
 	}
-	lease.Reason = reason
-	delete(s.leases, lease.LeaseID)
+	_ = reason
 	return true, nil
 }
 
 // FinishTaskLease 方法：标记任务已执行完成，并按需要从候选池移除。
 func (s *Service) FinishTaskLease(owner ClaimOwner, leaseID string, result string, removeCandidate bool) (bool, error) {
-	now := time.Now().UnixMilli()
-	owner = normalizeClaimOwner(owner)
-
-	s.leaseMu.Lock()
-	defer s.leaseMu.Unlock()
-	s.sweepExpiredLeasesLocked(now)
-
-	lease, ok := s.leases[stringsTrim(leaseID)]
-	if !ok || lease == nil || !ownerMatches(*lease, owner) {
+	_ = normalizeClaimOwner(owner)
+	_ = result
+	candidateKey, ok := parseNoLockLeaseIDCandidateKey(leaseID)
+	if !ok {
 		return false, nil
 	}
-	lease.Result = result
-	delete(s.leases, lease.LeaseID)
-	joinedCount := maxInt(s.joined[lease.CandidateKey], 0)
-	if result == "join_success" && lease.CandidateKey != "" {
-		joinedCount += 1
-		s.joined[lease.CandidateKey] = joinedCount
-	}
-	if removeCandidate && (maxInt(lease.SlotLimit, 1) <= 1 || joinedCount >= maxInt(lease.SlotLimit, 1)) {
-		s.store.delete(lease.CandidateKey)
-		delete(s.joined, lease.CandidateKey)
+	if removeCandidate {
+		s.store.delete(candidateKey)
+		s.leaseMu.Lock()
+		delete(s.joined, candidateKey)
+		s.leaseMu.Unlock()
 		s.dirty.Store(true)
 	}
 	return true, nil
@@ -1388,9 +1384,9 @@ func (s *Service) TaskDebug(profile FilterProfile, owner ClaimOwner, leaseLimit 
 	now := time.Now().UnixMilli()
 	s.SweepExpired(now)
 	all := s.store.snapshot()
-	leases := s.activeLeases(now)
-	leaseGroups := buildLeaseGroupMap(leases)
-	joinedCounts := s.activeJoinedCounts(now)
+	leases := []LeaseInfo{}
+	leaseGroups := map[string][]LeaseInfo{}
+	joinedCounts := map[string]int{}
 	learningSnapshot := s.learningSnapshot()
 	_, pv := s.Profile()
 	return buildTaskDebugSnapshot(all, profile, now, normalizeClaimOwner(owner), leaseGroups, joinedCounts, leases, learningSnapshot.lookup, leaseLimit), pv
@@ -1411,8 +1407,7 @@ func (s *Service) RefreshTop(force bool) {
 		capSize = 2500
 	}
 	learningSnapshot := s.learningSnapshot()
-	joinedCounts := s.activeJoinedCounts(now)
-	out, validCount, _ := selectTopCandidatesWithLease(all, profile, now, capSize, nil, joinedCounts, ClaimOwner{}, false, learningSnapshot.lookup)
+	out, validCount, _ := selectTopCandidatesWithLease(all, profile, now, capSize, nil, nil, ClaimOwner{}, false, learningSnapshot.lookup)
 
 	s.topMu.Lock()
 	s.topCache = out
@@ -1448,8 +1443,7 @@ func (s *Service) TopWithProfile(limit int, profile FilterProfile) (items []Scor
 	s.SweepExpired(now)
 	all := s.store.snapshot()
 	learningSnapshot := s.learningSnapshot()
-	joinedCounts := s.activeJoinedCounts(now)
-	out, validCount, _ := selectTopCandidatesWithLease(all, profile, now, limit, nil, joinedCounts, ClaimOwner{}, false, learningSnapshot.lookup)
+	out, validCount, _ := selectTopCandidatesWithLease(all, profile, now, limit, nil, nil, ClaimOwner{}, false, learningSnapshot.lookup)
 	_, pv := s.Profile()
 	return out, TopMeta{
 		BuiltAtMS:   now,
@@ -1600,14 +1594,6 @@ func parseConditions(v any) []Condition {
 
 // passFilter 方法：处理过滤条件。
 func passFilter(c Candidate, p FilterProfile, nowMS int64) (bool, string) {
-	remainingSec := (c.EndTimeMS - nowMS) / 1000
-	if remainingSec < p.MinRemainingSec {
-		return false, "remaining_too_short"
-	}
-	if remainingSec > p.MaxRemainingSec {
-		return false, "remaining_too_long"
-	}
-
 	if p.RequireType3And6 {
 		has3 := false
 		has6 := false

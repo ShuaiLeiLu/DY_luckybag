@@ -1,5 +1,10 @@
 package pool
 
+import (
+	"strconv"
+	"strings"
+)
+
 type ClaimOwner struct {
 	ClientID  string `json:"clientId"`
 	AccountID string `json:"accountId"`
@@ -243,4 +248,28 @@ func buildOwnerCandidateLeaseKey(owner ClaimOwner, candidateKey string) string {
 		return ""
 	}
 	return normalized.ClientID + "|" + normalized.AccountID + "|" + key
+}
+
+func buildNoLockLeaseID(candidateKey string, seq int64) string {
+	key := stringsTrim(candidateKey)
+	if key == "" {
+		return ""
+	}
+	return "nolock|" + key + "|" + strconv.FormatInt(seq, 10)
+}
+
+func parseNoLockLeaseIDCandidateKey(leaseID string) (string, bool) {
+	raw := stringsTrim(leaseID)
+	if raw == "" || !strings.HasPrefix(raw, "nolock|") {
+		return "", false
+	}
+	parts := strings.SplitN(raw, "|", 3)
+	if len(parts) < 3 {
+		return "", false
+	}
+	key := stringsTrim(parts[1])
+	if key == "" {
+		return "", false
+	}
+	return key, true
 }

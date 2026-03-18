@@ -254,7 +254,7 @@ const config = ref({
   minProbability: 0.01,
   stayDuration: 20,
   enableRedPacket: true,
-  hitRate: { enabled: true, value: 0.1 },
+  hitRate: { enabled: false, value: 0.1 },
   filterFanClub: { enabled: true },
   onlyPhysicalPrize: { enabled: false },
   preferBigRedPacket: { enabled: true, threshold: 40 },

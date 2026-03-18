@@ -184,6 +184,8 @@ function firstFinite(...vals) {
 function extractLotteryTotalValue(lottery) {
   const prizeInfo = lottery?.prizeInfo || lottery?.prize_info || {}
   const total = firstFinite(
+    lottery?.lotteryTotal,
+    lottery?.lottery_total,
     lottery?.prizeTotalAmount,
     lottery?.rewardAmount,
     lottery?.total_amount,

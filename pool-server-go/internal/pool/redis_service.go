@@ -907,12 +907,11 @@ func (s *RedisService) RefreshTop(force bool) {
 	}
 	profile, _ := s.Profile()
 	learningLookup := s.fetchLearningLookup(ctx)
-	joinedCounts := s.fetchCandidateJoinedCounts(ctx)
 	capSize := s.cfg.TopCacheMax
 	if capSize <= 0 {
 		capSize = 2500
 	}
-	out, validCount, _ := selectTopCandidatesWithLease(all, profile, now, capSize, nil, joinedCounts, ClaimOwner{}, false, learningLookup)
+	out, validCount, _ := selectTopCandidatesWithLease(all, profile, now, capSize, nil, nil, ClaimOwner{}, false, learningLookup)
 
 	s.topMu.Lock()
 	s.topCache = out
@@ -955,8 +954,7 @@ func (s *RedisService) TopWithProfile(limit int, profile FilterProfile) (items [
 		return []ScoredCandidate{}, TopMeta{BuiltAtMS: now}, pv
 	}
 	learningLookup := s.fetchLearningLookup(ctx)
-	joinedCounts := s.fetchCandidateJoinedCounts(ctx)
-	out, validCount, _ := selectTopCandidatesWithLease(all, profile, now, limit, nil, joinedCounts, ClaimOwner{}, false, learningLookup)
+	out, validCount, _ := selectTopCandidatesWithLease(all, profile, now, limit, nil, nil, ClaimOwner{}, false, learningLookup)
 	_, pv := s.Profile()
 	return out, TopMeta{
 		BuiltAtMS:   now,
@@ -979,10 +977,8 @@ func (s *RedisService) TopAvailable(limit int, profile FilterProfile, owner Clai
 		_, pv := s.Profile()
 		return []ScoredCandidate{}, TopMeta{BuiltAtMS: now}, pv
 	}
-	leaseGroups := s.fetchActiveLeaseGroups(ctx, now)
 	learningLookup := s.fetchLearningLookup(ctx)
-	joinedCounts := s.fetchCandidateJoinedCounts(ctx)
-	out, validCount, _ := selectTopCandidatesWithLease(all, profile, now, limit, leaseGroups, joinedCounts, normalizeClaimOwner(owner), includeClaimedSelf, learningLookup)
+	out, validCount, _ := selectTopCandidatesWithLease(all, profile, now, limit, nil, nil, normalizeClaimOwner(owner), includeClaimedSelf, learningLookup)
 	_, pv := s.Profile()
 	return out, TopMeta{
 		BuiltAtMS:   now,
@@ -991,7 +987,7 @@ func (s *RedisService) TopAvailable(limit int, profile FilterProfile, owner Clai
 	}, pv
 }
 
-// ClaimTask 方法：从 Redis 共享池中领取一个任务，并写入租约记录。
+// ClaimTask 方法：从 Redis 共享池中领取一个任务（无租约锁，仅返回兼容 leaseId）。
 func (s *RedisService) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 	now := time.Now().UnixMilli()
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
@@ -1002,20 +998,21 @@ func (s *RedisService) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 	owner := normalizeClaimOwner(options.Owner)
 	leaseSec := normalizeLeaseSec(options.LeaseSec)
 	profile := options.Profile
+	profileAll := profile
+	profileAll.MinRemainingSec = 0
+	profileAll.MaxRemainingSec = math.MaxInt64
 	_, pv := s.Profile()
 
 	all, err := s.fetchAllCandidates(ctx)
 	if err != nil {
 		return ClaimResult{Claimed: false, Reason: err.Error(), ProfileVersion: pv, GeneratedAtMS: now}, err
 	}
-	leaseGroups := s.fetchActiveLeaseGroups(ctx, now)
-	joinedCounts := s.fetchCandidateJoinedCounts(ctx)
 	learningLookup := s.fetchLearningLookup(ctx)
 	candidateMap := make(map[string]Candidate, len(all))
 	for _, candidate := range all {
 		candidateMap[candidate.Key] = candidate
 	}
-	scored, _, _ := selectTopCandidatesWithLease(all, profile, now, s.cfg.TopCacheMax, leaseGroups, joinedCounts, owner, false, learningLookup)
+	scored, _, _ := selectTopCandidatesWithLease(all, profileAll, now, s.cfg.TopCacheMax, nil, nil, owner, false, learningLookup)
 	exclude := make(map[string]struct{}, len(options.ExcludeKeys))
 	for _, key := range options.ExcludeKeys {
 		if trimmed := stringsTrim(key); trimmed != "" {
@@ -1059,53 +1056,69 @@ func (s *RedisService) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 	regularItems = rankClaimCandidates(regularItems, candidateMap, now, 24)
 	ordered = append(preferredItems, regularItems...)
 
-	for _, item := range ordered {
+	windowMin := maxInt64(0, profile.MinRemainingSec)
+	windowMax := profile.MaxRemainingSec
+	if windowMax <= 0 {
+		windowMax = math.MaxInt64
+	}
+
+	var selected *ScoredCandidate
+	choose := func(item ScoredCandidate, inWindowOnly bool) bool {
 		key := scoredCandidateKey(item)
 		if key == "" {
-			continue
+			return false
 		}
 		if _, blocked := exclude[key]; blocked {
-			continue
+			return false
 		}
+		if inWindowOnly {
+			remain := item.RemainingSec
+			if remain < windowMin || remain > windowMax {
+				return false
+			}
+		}
+		copyItem := item
+		selected = &copyItem
+		return true
+	}
 
-		leaseID := "lease-" + strconv.FormatInt(s.seq.Add(1), 10)
-		lease := LeaseInfo{
-			LeaseID:      leaseID,
+	for _, item := range ordered {
+		if choose(item, true) {
+			break
+		}
+	}
+	if selected == nil {
+		for _, item := range ordered {
+			if choose(item, false) {
+				break
+			}
+		}
+	}
+
+	if selected != nil {
+		key := scoredCandidateKey(*selected)
+		lease := &LeaseInfo{
+			LeaseID:      buildNoLockLeaseID(key, s.seq.Add(1)),
 			CandidateKey: key,
-			RoomID:       item.RoomID,
-			LotteryID:    item.LotteryID,
+			RoomID:       selected.RoomID,
+			LotteryID:    selected.LotteryID,
 			ClientID:     owner.ClientID,
 			AccountID:    owner.AccountID,
-			SlotLimit:    item.MaxLeaseSlots,
+			SlotLimit:    maxInt(selected.MaxLeaseSlots, 1),
 			ClaimedAtMS:  now,
 			UpdatedAtMS:  now,
 			ExpiresAtMS:  now + leaseSec*1000,
+			Reason:       "nolock",
 		}
-		payload, err := json.Marshal(lease)
-		if err != nil {
-			continue
-		}
-
-		ok, err := s.claimScript.Run(ctx, s.rdb,
-			[]string{s.keyCandidateLeaseCount(), s.keyCandidateJoinedCount(), s.keyOwnerCandidateLease(), s.keyLeases(), s.keyLeaseExpire()},
-			key, leaseID, now, lease.ExpiresAtMS, item.MaxLeaseSlots, string(payload), buildOwnerCandidateLeaseKey(owner, key),
-		).Int()
-		if err != nil {
-			continue
-		}
-		if ok != 1 {
-			continue
-		}
-
-		item.Claimed = true
-		item.Lease = &lease
-		item.LeaseCount++
-		item.JoinedCount = maxInt(joinedCounts[key], 0)
-		item.AvailableSlots = maxInt(item.MaxLeaseSlots-item.LeaseCount-item.JoinedCount, 0)
+		selected.Claimed = false
+		selected.Lease = cloneLeaseInfo(lease)
+		selected.LeaseCount = 0
+		selected.JoinedCount = 0
+		selected.AvailableSlots = maxInt(selected.MaxLeaseSlots, 1)
 		return ClaimResult{
 			Claimed:        true,
-			Item:           &item,
-			Lease:          &lease,
+			Item:           selected,
+			Lease:          cloneLeaseInfo(lease),
 			ProfileVersion: pv,
 			GeneratedAtMS:  now,
 		}, nil
@@ -1119,69 +1132,60 @@ func (s *RedisService) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 	}, nil
 }
 
-// RenewTaskLease 方法：续租共享任务，避免预热期间被其他客户端接管。
+// RenewTaskLease 方法：无租约锁模式下仅刷新兼容 leaseId 续期信息。
 func (s *RedisService) RenewTaskLease(owner ClaimOwner, leaseID string, leaseSec int64) (*LeaseInfo, bool, error) {
 	now := time.Now().UnixMilli()
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
-	s.sweepExpiredLeases(ctx, now)
-
 	owner = normalizeClaimOwner(owner)
 	leaseSec = normalizeLeaseSec(leaseSec)
-	expireAt := now + leaseSec*1000
-
-	raw, err := s.renewScript.Run(ctx, s.rdb,
-		[]string{s.keyLeases(), s.keyLeaseExpire(), s.keyCandidateLeaseCount(), s.keyOwnerCandidateLease()},
-		stringsTrim(leaseID), owner.ClientID, owner.AccountID, now, expireAt,
-	).Text()
-	if err != nil {
-		return nil, false, err
-	}
-	if stringsTrim(raw) == "" {
+	candidateKey, ok := parseNoLockLeaseIDCandidateKey(leaseID)
+	if !ok {
 		return nil, false, nil
 	}
-	var lease LeaseInfo
-	if err := json.Unmarshal([]byte(raw), &lease); err != nil {
-		return nil, false, err
+	lease := &LeaseInfo{
+		LeaseID:      stringsTrim(leaseID),
+		CandidateKey: candidateKey,
+		ClientID:     owner.ClientID,
+		AccountID:    owner.AccountID,
+		ClaimedAtMS:  now,
+		UpdatedAtMS:  now,
+		ExpiresAtMS:  now + leaseSec*1000,
+		Reason:       "nolock",
 	}
-	return &lease, true, nil
+	return lease, true, nil
 }
 
-// ReleaseTaskLease 方法：主动释放共享任务租约。
+// ReleaseTaskLease 方法：无租约锁模式下为兼容接口保留的空实现。
 func (s *RedisService) ReleaseTaskLease(owner ClaimOwner, leaseID string, reason string) (bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
-	owner = normalizeClaimOwner(owner)
-	res, err := s.releaseScript.Run(ctx, s.rdb,
-		[]string{s.keyLeases(), s.keyLeaseExpire(), s.keyCandidateLeaseCount(), s.keyOwnerCandidateLease()},
-		stringsTrim(leaseID), owner.ClientID, owner.AccountID, reason,
-	).Int()
-	if err != nil {
-		return false, err
+	_ = normalizeClaimOwner(owner)
+	_ = reason
+	if stringsTrim(leaseID) == "" {
+		return false, nil
 	}
-	return res == 1, nil
+	return true, nil
 }
 
-// FinishTaskLease 方法：结束共享任务租约，并在需要时将候选从池中移除。
+// FinishTaskLease 方法：无租约锁模式下按需从候选池移除该候选。
 func (s *RedisService) FinishTaskLease(owner ClaimOwner, leaseID string, result string, removeCandidate bool) (bool, error) {
+	_ = normalizeClaimOwner(owner)
+	_ = result
+	candidateKey, ok := parseNoLockLeaseIDCandidateKey(leaseID)
+	if !ok {
+		return false, nil
+	}
+	if !removeCandidate {
+		return true, nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
-	owner = normalizeClaimOwner(owner)
-	removeFlag := "0"
-	if removeCandidate {
-		removeFlag = "1"
-	}
-	res, err := s.finishScript.Run(ctx, s.rdb,
-		[]string{s.keyLeases(), s.keyLeaseExpire(), s.keyCandidateLeaseCount(), s.keyCandidateJoinedCount(), s.keyOwnerCandidateLease(), s.keyCandidates(), s.keyExpire()},
-		stringsTrim(leaseID), owner.ClientID, owner.AccountID, removeFlag, result,
-	).Int()
-	if err != nil {
+	pipe := s.rdb.Pipeline()
+	pipe.HDel(ctx, s.keyCandidates(), candidateKey)
+	pipe.ZRem(ctx, s.keyExpire(), candidateKey)
+	pipe.HDel(ctx, s.keyCandidateJoinedCount(), candidateKey)
+	if _, err := pipe.Exec(ctx); err != nil {
 		return false, err
 	}
-	if res == 1 {
-		s.dirty.Store(true)
-	}
-	return res == 1, nil
+	s.dirty.Store(true)
+	return true, nil
 }
 
 // RecordTaskFeedback 方法：将执行端反馈写入 Redis 学习桶。
@@ -1224,15 +1228,12 @@ func (s *RedisService) buildScanPoolSummary(ctx context.Context, nowMS int64) sc
 		return scanPoolSummary{}
 	}
 	profile, _ := s.Profile()
-	leaseGroups := s.fetchActiveLeaseGroups(ctx, nowMS)
-	joinedCounts := s.fetchCandidateJoinedCounts(ctx)
 	learningLookup := s.fetchLearningLookup(ctx)
-	_, validCount, availableCount := selectTopCandidatesWithLease(all, profile, nowMS, maxInt(len(all), 1), leaseGroups, joinedCounts, ClaimOwner{}, false, learningLookup)
-	leaseCount := len(s.fetchActiveLeases(ctx, nowMS))
+	_, validCount, availableCount := selectTopCandidatesWithLease(all, profile, nowMS, maxInt(len(all), 1), nil, nil, ClaimOwner{}, false, learningLookup)
 	return scanPoolSummary{
 		ValidCandidates:     validCount,
 		AvailableCandidates: availableCount,
-		LeaseCount:          leaseCount,
+		LeaseCount:          0,
 	}
 }
 
@@ -1367,9 +1368,9 @@ func (s *RedisService) TaskDebug(profile FilterProfile, owner ClaimOwner, leaseL
 			Leases: []LeaseInfo{},
 		}, pv
 	}
-	leases := s.fetchActiveLeases(ctx, now)
-	leaseGroups := buildLeaseGroupMap(leases)
-	joinedCounts := s.fetchCandidateJoinedCounts(ctx)
+	leases := []LeaseInfo{}
+	leaseGroups := map[string][]LeaseInfo{}
+	joinedCounts := map[string]int{}
 	learningLookup := s.fetchLearningLookup(ctx)
 	_, pv := s.Profile()
 	return buildTaskDebugSnapshot(all, profile, now, normalizeClaimOwner(owner), leaseGroups, joinedCounts, leases, learningLookup, leaseLimit), pv
@@ -1398,16 +1399,14 @@ func (s *RedisService) ReviewTask(options ReviewOptions) (ReviewResult, error) {
 			Alternatives:   []ScoredCandidate{},
 		}, nil
 	}
-	leaseGroups := s.fetchActiveLeaseGroups(ctx, now)
-	joinedCounts := s.fetchCandidateJoinedCounts(ctx)
 	learningLookup := s.fetchLearningLookup(ctx)
 	ordered, candidateMap := buildOrderedTaskCandidates(
 		all,
 		options.Profile,
 		now,
 		s.cfg.TopCacheMax,
-		leaseGroups,
-		joinedCounts,
+		nil,
+		nil,
 		owner,
 		true,
 		learningLookup,
