@@ -6,6 +6,7 @@ const INVOKE_CHANNELS = new Set([
   'load-all-tokens',
   'check-browser-exists',
   'launch-browser',
+  'set-live-stream-blocking',
   'navigate-to',
   'execute-script',
   'close-browser',

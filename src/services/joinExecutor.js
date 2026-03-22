@@ -17,7 +17,7 @@ function isBrowserGoneResult(result) {
  * @param {string} script 页面脚本
  * @returns {Promise<object>}
  */
-async function executeScriptSafely(manager, accountId, script) {
+async function executeScriptSafely(manager, accountId, script, timeoutMs = 4500) {
   if (!manager?.accounts?.has(accountId) || manager.isPaused(accountId)) {
     return { success: false, error: '账号已停止', code: 'ACCOUNT_STOPPED' }
   }
@@ -25,7 +25,7 @@ async function executeScriptSafely(manager, accountId, script) {
     const result = await manager.ipc.invoke('execute-script', {
       accountId,
       script,
-      timeoutMs: 4500
+      timeoutMs: Math.max(1200, Number(timeoutMs || 4500))
     })
     if (isBrowserGoneResult(result)) {
       return { success: false, error: '浏览器实例不存在', code: 'BROWSER_NOT_FOUND' }
@@ -40,6 +40,224 @@ async function executeScriptSafely(manager, accountId, script) {
       return { success: false, error: '执行脚本超时', code: 'EXECUTE_TIMEOUT' }
     }
     return { success: false, error: message, code: error?.code || 'EXECUTE_SCRIPT_FAILED' }
+  }
+}
+
+function formatPercent(value) {
+  const num = Number(value || 0)
+  if (!Number.isFinite(num)) return '0.00%'
+  return `${(num * 100).toFixed(2)}%`
+}
+
+/**
+ * buildWaitForVisibleSelectorScript 方法：在页面内等待 selector 对应元素可见。
+ * @param {string} selector CSS 选择器
+ * @param {number} timeoutMs 超时时间
+ * @returns {string}
+ */
+function buildWaitForVisibleSelectorScript(selector, timeoutMs = 20000) {
+  return `
+    (() => new Promise((resolve) => {
+      const selector = ${JSON.stringify(String(selector || ''))};
+      const timeoutMs = ${Math.max(1200, Number(timeoutMs || 20000))};
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const isVisible = (el) => {
+        if (!el || typeof el.getBoundingClientRect !== 'function') return false;
+        const style = window.getComputedStyle(el);
+        if (!style || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || '1') <= 0.02) {
+          return false;
+        }
+        const rect = el.getBoundingClientRect();
+        return rect.width >= 8 && rect.height >= 8;
+      };
+      const describe = (el) => ({
+        text: normalize(el?.innerText || el?.textContent || '').slice(0, 80),
+        tag: String(el?.tagName || '').toLowerCase(),
+        id: String(el?.id || ''),
+        className: String(el?.className || '').slice(0, 120)
+      });
+      const start = Date.now();
+      const tick = () => {
+        const el = document.querySelector(selector);
+        if (el && isVisible(el)) {
+          resolve({
+            ok: true,
+            selector,
+            node: describe(el)
+          });
+          return;
+        }
+        if (Date.now() - start >= timeoutMs) {
+          resolve({
+            ok: false,
+            selector,
+            sample: normalize(document.body?.innerText || '').slice(0, 160)
+          });
+          return;
+        }
+        setTimeout(tick, 200);
+      };
+      tick();
+    }))()
+  `
+}
+
+/**
+ * buildClickVisibleSelectorScript 方法：等待 selector 可见后执行点击。
+ * @param {string} selector CSS 选择器
+ * @param {number} timeoutMs 超时时间
+ * @returns {string}
+ */
+function buildClickVisibleSelectorScript(selector, timeoutMs = 10000) {
+  return `
+    (() => new Promise((resolve) => {
+      const selector = ${JSON.stringify(String(selector || ''))};
+      const timeoutMs = ${Math.max(1200, Number(timeoutMs || 10000))};
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const isVisible = (el) => {
+        if (!el || typeof el.getBoundingClientRect !== 'function') return false;
+        const style = window.getComputedStyle(el);
+        if (!style || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || '1') <= 0.02) {
+          return false;
+        }
+        const rect = el.getBoundingClientRect();
+        return rect.width >= 8 && rect.height >= 8;
+      };
+      const describe = (el) => ({
+        text: normalize(el?.innerText || el?.textContent || '').slice(0, 80),
+        tag: String(el?.tagName || '').toLowerCase(),
+        id: String(el?.id || ''),
+        className: String(el?.className || '').slice(0, 120)
+      });
+      const start = Date.now();
+      const tick = () => {
+        const el = document.querySelector(selector);
+        if (el && isVisible(el) && typeof el.click === 'function') {
+          el.click();
+          resolve({
+            ok: true,
+            selector,
+            node: describe(el)
+          });
+          return;
+        }
+        if (Date.now() - start >= timeoutMs) {
+          resolve({
+            ok: false,
+            selector,
+            sample: normalize(document.body?.innerText || '').slice(0, 180)
+          });
+          return;
+        }
+        setTimeout(tick, 200);
+      };
+      tick();
+    }))()
+  `
+}
+
+async function readLotteryJoinedState(manager, accountId, timeoutMs = 5000) {
+  const res = await executeScriptSafely(manager, accountId, `
+    (() => {
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const text = normalize((document.querySelector('#lottery_close_cotainer') || document.body)?.innerText || '');
+      return {
+        joined: /(已参与|等待开奖|参与成功|已成功参与|已报名)/.test(text),
+        sample: text.slice(0, 180)
+      };
+    })()
+  `, timeoutMs)
+  if (isBrowserGoneResult(res)) {
+    return { success: false, error: '浏览器已关闭，停止参与', code: 'BROWSER_NOT_FOUND' }
+  }
+  if (res?.code === 'EXECUTE_TIMEOUT') {
+    return { success: false, error: '页面脚本超时', code: 'EXECUTE_TIMEOUT' }
+  }
+  if (!res?.success || !res?.result || typeof res.result !== 'object') {
+    return { success: false, error: '读取福袋面板状态失败', code: 'READ_PANEL_FAILED' }
+  }
+  return { success: true, ...res.result }
+}
+
+async function waitForVisibleSelector(manager, accountId, selector, timeoutMs) {
+  const res = await executeScriptSafely(manager, accountId, buildWaitForVisibleSelectorScript(selector, timeoutMs), timeoutMs + 1500)
+  if (isBrowserGoneResult(res)) {
+    return { success: false, error: '浏览器已关闭，停止参与', code: 'BROWSER_NOT_FOUND' }
+  }
+  if (res?.code === 'EXECUTE_TIMEOUT') {
+    return { success: false, error: '页面脚本超时', code: 'EXECUTE_TIMEOUT' }
+  }
+  if (!res?.success || !res?.result || typeof res.result !== 'object') {
+    return { success: false, error: '执行脚本失败', code: 'WAIT_SELECTOR_FAILED' }
+  }
+  if (res.result.ok !== true) {
+    return {
+      success: false,
+      error: '福袋元素未找到',
+      code: 'SELECTOR_NOT_FOUND',
+      sample: String(res.result.sample || '')
+    }
+  }
+  return { success: true, ...res.result }
+}
+
+async function clickVisibleSelector(manager, accountId, selector, timeoutMs) {
+  const res = await executeScriptSafely(manager, accountId, buildClickVisibleSelectorScript(selector, timeoutMs), timeoutMs + 1500)
+  if (isBrowserGoneResult(res)) {
+    return { success: false, error: '浏览器已关闭，停止参与', code: 'BROWSER_NOT_FOUND' }
+  }
+  if (res?.code === 'EXECUTE_TIMEOUT') {
+    return { success: false, error: '页面脚本超时', code: 'EXECUTE_TIMEOUT' }
+  }
+  if (!res?.success || !res?.result || typeof res.result !== 'object') {
+    return { success: false, error: '执行脚本失败', code: 'CLICK_SELECTOR_FAILED' }
+  }
+  if (res.result.ok !== true) {
+    return {
+      success: false,
+      error: '点击参与福袋失败',
+      code: 'SELECTOR_CLICK_FAILED',
+      sample: String(res.result.sample || '')
+    }
+  }
+  return { success: true, ...res.result }
+}
+
+async function runSecondInspect(manager, accountId, lotteryInfo, config = {}) {
+  if (config?.secondInspect?.enabled !== true || !lotteryInfo) {
+    return { passed: true }
+  }
+
+  const threshold = Number(config?.secondInspect?.value || 0)
+  if (!Number.isFinite(threshold) || threshold <= 0) {
+    return { passed: true }
+  }
+
+  const log = manager.accounts.get(accountId)?.callbacks?.onLog
+  log?.(`🧮 等待最新参与人数后执行二次检查（阈值 ${formatPercent(threshold)}）`)
+  await manager.sleep(2000)
+
+  try {
+    const snapshot = manager.getLiveLotterySnapshot(accountId, lotteryInfo) || lotteryInfo
+    const joinTotal = Number(snapshot?.joinTotal || 0)
+    const winningTotal = Number(snapshot?.winningTotal || snapshot?.luckyCount || 0)
+    const probability = winningTotal / joinTotal
+    if (probability >= threshold) {
+      log?.(`✅ 二次检查通过：${formatPercent(probability)}`)
+      return { passed: true, snapshot }
+    }
+    return {
+      passed: false,
+      error: '二次检查概率不满足',
+      code: 'SECOND_INSPECT_REJECT',
+      snapshot
+    }
+  } catch (_) {
+    return {
+      passed: false,
+      error: '检查二次概率失败',
+      code: 'SECOND_INSPECT_REJECT'
+    }
   }
 }
 
@@ -67,8 +285,9 @@ export async function waitForLiveRoomReady(manager, accountId, timeoutMs = 10000
         const text = String(body?.innerText || '').replace(/\\s+/g, '');
         const elementCount = document.querySelectorAll('body *').length;
         const interactiveCount = document.querySelectorAll('button, a, input, textarea, [role="button"]').length;
+        const errorLike = /(服务器开小差了|点击刷新重试|加载失败|刷新重试|请稍后重试|网络错误|页面走丢了|服务异常)/.test(text);
         const liveMarker = /(直播|福袋|关注|聊天|弹幕|在线|说点什么)/.test(text);
-        const ready = hrefOk && stateOk && visible && (
+        const ready = hrefOk && stateOk && visible && !errorLike && (
           liveMarker ||
           text.length >= 80 ||
           (elementCount >= 40 && interactiveCount >= 3)
@@ -77,7 +296,9 @@ export async function waitForLiveRoomReady(manager, accountId, timeoutMs = 10000
         return {
           ready,
           blankLike,
+          errorLike,
           href,
+          sample: text.slice(0, 120),
           textLength: text.length,
           elementCount,
           interactiveCount
@@ -97,12 +318,17 @@ export async function waitForLiveRoomReady(manager, accountId, timeoutMs = 10000
 
     if (
       !reloadedOnce &&
-      snapshot?.blankLike === true &&
+      (snapshot?.blankLike === true || snapshot?.errorLike === true) &&
       Date.now() - start >= Math.min(3500, Math.floor(timeoutMs * 0.35))
     ) {
       reloadedOnce = true
       try {
-        manager.accounts.get(accountId)?.callbacks?.onLog?.('⚠️ 直播页疑似白板，自动重载一次...', 'warning')
+        manager.accounts.get(accountId)?.callbacks?.onLog?.(
+          snapshot?.errorLike === true
+            ? '⚠️ 直播页加载异常，自动重载一次...'
+            : '⚠️ 直播页疑似白板，自动重载一次...',
+          'warning'
+        )
       } catch (_) {
         // ignore
       }
@@ -118,42 +344,9 @@ export async function waitForLiveRoomReady(manager, accountId, timeoutMs = 10000
       continue
     }
 
-    await manager.sleep(snapshot?.blankLike ? 520 : 350)
+    await manager.sleep(snapshot?.blankLike || snapshot?.errorLike ? 520 : 350)
   }
   return false
-}
-
-/**
- * 预热福袋入口：提前点击可能的入口，降低后续参与按钮找不到的概率。
- * @param {object} manager LotteryManager 实例
- * @param {string} accountId 账号ID
- */
-export async function warmupLotteryEntry(manager, accountId) {
-  try {
-    const result = await executeScriptSafely(manager, accountId, `
-      (() => {
-        const selectors = [
-          '#lottery_close_cotainer div[role="button"]',
-          '[data-e2e*="lottery"]',
-          '[class*="lottery"] [role="button"]',
-          '[class*="benefit"] [role="button"]'
-        ];
-        for (const s of selectors) {
-          const el = document.querySelector(s);
-          if (el && typeof el.click === 'function') {
-            el.click();
-            return { clicked: true, selector: s };
-          }
-        }
-        return { clicked: false };
-      })()
-    `)
-    if (isBrowserGoneResult(result)) {
-      return
-    }
-  } catch (_) {
-    // ignore
-  }
 }
 
 /**
@@ -163,32 +356,17 @@ export async function warmupLotteryEntry(manager, accountId) {
  * @returns {Promise<object>}
  */
 export async function closeLiveStreamRendering(manager, accountId) {
-  try {
-    const res = await executeScriptSafely(manager, accountId, `
-      (() => {
-        try {
-          const medias = document.querySelectorAll('video, audio');
-          medias.forEach(m => {
-            try {
-              m.muted = true;
-              m.volume = 0;
-              if (typeof m.pause === 'function') m.pause();
-            } catch (_) {}
-          });
-          const anyVideo = !!document.querySelector('video, canvas[class*="video"], canvas[id*="video"]');
-          return { ok: true, anyVideo, clicked: false };
-        } catch (e) {
-          return { ok: false, error: e.message };
-        }
-      })()
-    `)
-    if (isBrowserGoneResult(res)) {
-      return { ok: false, aborted: true }
-    }
-    return res?.success ? res.result : { ok: false }
-  } catch (_) {
-    return { ok: false }
-  }
+  return { ok: true, disabled: true }
+}
+
+/**
+ * 恢复直播画面渲染，重新请求播放当前页面里的媒体元素。
+ * @param {object} manager LotteryManager 实例
+ * @param {string} accountId 账号ID
+ * @returns {Promise<object>}
+ */
+export async function openLiveStreamRendering(manager, accountId) {
+  return { ok: true, disabled: true }
 }
 
 /**
@@ -198,18 +376,7 @@ export async function closeLiveStreamRendering(manager, accountId) {
  * @returns {Promise<boolean>}
  */
 export async function ensureCloseLiveStreamRendering(manager, accountId) {
-  for (let i = 0; i < 3; i++) {
-    if (!manager.accounts.has(accountId) || manager.isPaused(accountId)) return false
-    const r = await closeLiveStreamRendering(manager, accountId)
-    if (r?.aborted) {
-      return false
-    }
-    if (r?.ok) {
-      return true
-    }
-    await manager.sleep(450)
-  }
-  return false
+  return true
 }
 
 /**
@@ -219,95 +386,60 @@ export async function ensureCloseLiveStreamRendering(manager, accountId) {
  * @param {number} remainingTime 剩余开奖时间（秒）
  * @returns {Promise<{success:boolean, confirmed?:boolean, error?:string, code?:string}>}
  */
-export async function joinLotteryByUI(manager, accountId, remainingTime = 30) {
-  const maxEntryWaitMs = Math.max(4000, Math.min(20000, (Number(remainingTime) - 6) * 1000))
-  const waitEntryStart = Date.now()
-  while (Date.now() - waitEntryStart < maxEntryWaitMs) {
-    if (!manager.accounts.has(accountId) || manager.isPaused(accountId)) {
-      return { success: false, error: '账号已停止', code: 'ACCOUNT_STOPPED' }
+export async function joinLotteryByUI(manager, accountId, remainingTime = 30, options = {}) {
+  const waitEntryResult = await waitForVisibleSelector(manager, accountId, '.dVxrjT_h', 20000)
+  if (!waitEntryResult?.success) {
+    if (waitEntryResult?.code === 'ACCOUNT_STOPPED' || waitEntryResult?.code === 'BROWSER_NOT_FOUND') {
+      return { success: false, error: waitEntryResult.error, code: waitEntryResult.code }
     }
-    const res = await executeScriptSafely(manager, accountId, `
-      (() => {
-        const selectors = [
-          '.dVxrjT_h',
-          '[data-e2e*="lottery"]',
-          '#lottery_close_cotainer',
-          '[class*="lottery"]'
-        ];
-        let entry = null;
-        let selector = '';
-        for (const s of selectors) {
-          const el = document.querySelector(s);
-          if (el) {
-            entry = el;
-            selector = s;
-            break;
-          }
-        }
-        if (!entry) return { ok: false, step: 'wait-entry' };
-        if (typeof entry.click === 'function') entry.click();
-        return { ok: true, step: 'entry-ready', selector };
-      })()
-    `)
-    if (isBrowserGoneResult(res)) {
-      return { success: false, error: '浏览器已关闭，停止参与', code: 'BROWSER_NOT_FOUND' }
+    const suffix = waitEntryResult?.sample ? `（面板采样: ${String(waitEntryResult.sample).slice(0, 80)}）` : ''
+    return {
+      success: false,
+      error: `${waitEntryResult.error || '等待福袋出现失败'}${suffix}`,
+      code: 'LOTTERY_ENTRY_NOT_FOUND'
     }
-    if (res?.code === 'EXECUTE_TIMEOUT') {
-      return { success: false, error: '页面脚本超时，跳过UI参与', code: 'EXECUTE_TIMEOUT' }
+  }
+  const clickEntryResult = await clickVisibleSelector(manager, accountId, '.dVxrjT_h', 10000)
+  if (!clickEntryResult?.success) {
+    if (clickEntryResult?.code === 'ACCOUNT_STOPPED' || clickEntryResult?.code === 'BROWSER_NOT_FOUND') {
+      return { success: false, error: clickEntryResult.error, code: clickEntryResult.code }
     }
-    if (res?.success && res?.result?.ok) break
-    await manager.sleep(500)
+    const suffix = clickEntryResult?.sample ? `（面板采样: ${String(clickEntryResult.sample).slice(0, 80)}）` : ''
+    return {
+      success: false,
+      error: `${clickEntryResult.error || '等待福袋出现失败'}${suffix}`,
+      code: 'LOTTERY_ENTRY_CLICK_FAILED'
+    }
   }
 
-  await manager.sleep(1600)
-
-  const waitJoinStart = Date.now()
-  while (Date.now() - waitJoinStart < 10000) {
-    if (!manager.accounts.has(accountId) || manager.isPaused(accountId)) {
-      return { success: false, error: '账号已停止', code: 'ACCOUNT_STOPPED' }
+  const secondInspect = await runSecondInspect(
+    manager,
+    accountId,
+    options?.lotteryInfo || null,
+    options?.config || {}
+  )
+  if (!secondInspect?.passed) {
+    return {
+      success: false,
+      error: secondInspect.error || '二次检查未通过',
+      code: secondInspect.code || 'SECOND_INSPECT_REJECT'
     }
-    const joinRes = await executeScriptSafely(manager, accountId, `
-      (() => {
-        const btn = document.querySelector('#lottery_close_cotainer div[role="button"]');
-        if (!btn) return { ok: false, step: 'wait-join-btn', text: '' };
-        const text = (btn.innerText || btn.textContent || '').trim();
-        if (typeof btn.click === 'function') {
-          btn.click();
-          return { ok: true, step: 'clicked-join-btn', text };
-        }
-        return { ok: false, step: 'join-btn-not-clickable', text };
-      })()
-    `)
-    if (isBrowserGoneResult(joinRes)) {
-      return { success: false, error: '浏览器已关闭，停止参与', code: 'BROWSER_NOT_FOUND' }
-    }
-    if (joinRes?.code === 'EXECUTE_TIMEOUT') {
-      return { success: false, error: '页面脚本超时，跳过UI参与', code: 'EXECUTE_TIMEOUT' }
-    }
-    if (joinRes?.success && joinRes?.result?.ok) {
-      await manager.sleep(800)
-      const confirmRes = await executeScriptSafely(manager, accountId, `
-        (() => {
-          const panel = document.querySelector('#lottery_close_cotainer') || document.body;
-          const txt = (panel?.innerText || '').replace(/\\s+/g, ' ');
-          const joined = /已参与|等待开奖|参与成功|已成功参与/.test(txt);
-          return { joined, sample: txt.slice(0, 160) };
-        })()
-      `)
-      if (isBrowserGoneResult(confirmRes)) {
-        return { success: false, error: '浏览器已关闭，停止参与', code: 'BROWSER_NOT_FOUND' }
-      }
-      if (confirmRes?.code === 'EXECUTE_TIMEOUT') {
-        return { success: false, error: '页面脚本超时，跳过UI参与', code: 'EXECUTE_TIMEOUT' }
-      }
-      if (confirmRes?.success && confirmRes?.result?.joined) {
-        return { success: true, confirmed: true }
-      }
-      return { success: false, error: '已点击参与按钮但未检测到已参与状态' }
-    }
-    await manager.sleep(400)
   }
-  return { success: false, error: '未找到或无法点击参与按钮' }
+
+  const clickJoinResult = await clickVisibleSelector(manager, accountId, '#lottery_close_cotainer div[role="button"]', 10000)
+  if (!clickJoinResult?.success) {
+    const suffix = clickJoinResult?.sample ? `（面板采样: ${String(clickJoinResult.sample).slice(0, 80)}）` : ''
+    return {
+      success: false,
+      error: `点击参与福袋失败${suffix}`,
+      code: clickJoinResult.code || 'JOIN_BUTTON_NOT_FOUND'
+    }
+  }
+  return {
+    success: true,
+    confirmed: false,
+    lotteryId: String(secondInspect?.snapshot?.lottery_id || secondInspect?.snapshot?.lotteryId || options?.lotteryInfo?.lottery_id || '')
+  }
 }
 
 /**
@@ -349,15 +481,21 @@ export async function attendLotteryWithRetry(manager, accountId, accountData, lo
     }
 
     if (!manager.accounts.has(accountId) || manager.isPaused(accountId)) break
-    if (i > 0) {
-      const retryDetail = await manager.ipc.invoke('get-lottery-detail', {
-        roomId: lotteryInfo.roomId,
-        webRid: lotteryInfo.webRid,
-        accountId
-      })
-      if (retryDetail?.success && retryDetail?.lotteryDetail?.lottery_id) {
-        currentLotteryId = retryDetail.lotteryDetail.lottery_id
+    const waitEntryResult = await waitForVisibleSelector(manager, accountId, '.dVxrjT_h', 1800)
+    if (waitEntryResult?.success) {
+      const joinedState = await readLotteryJoinedState(manager, accountId, 3000)
+      if (joinedState?.success && joinedState?.joined) {
+        return { success: true, message: '🎁 UI参与成功（面板已确认）', raw: joinedState, lotteryId: currentLotteryId }
       }
+    }
+
+    const retryDetail = await manager.ipc.invoke('get-lottery-detail', {
+      roomId: lotteryInfo.roomId,
+      webRid: lotteryInfo.webRid,
+      accountId
+    })
+    if (retryDetail?.success && retryDetail?.lotteryDetail?.lottery_id) {
+      currentLotteryId = retryDetail.lotteryDetail.lottery_id
     }
 
     const result = await manager.ipc.invoke('attend-lottery', {
@@ -370,7 +508,7 @@ export async function attendLotteryWithRetry(manager, accountId, accountData, lo
 
     if (isAttendSuccessLike(result)) {
       const msg = i === 0 ? '🎁 接口参与成功' : `🎁 接口重试后参与成功(第${i + 1}次)`
-      return { success: true, message: msg, raw: result }
+      return { success: true, message: msg, raw: result, lotteryId: currentLotteryId }
     }
 
     if (Number(result?.statusCode) === 10001) {
@@ -378,7 +516,9 @@ export async function attendLotteryWithRetry(manager, accountId, accountData, lo
     }
   }
 
-  return lastResult || { success: false, error: '参与失败' }
+  return lastResult
+    ? { ...lastResult, lotteryId: currentLotteryId }
+    : { success: false, error: '参与失败', lotteryId: currentLotteryId }
 }
 
 /**

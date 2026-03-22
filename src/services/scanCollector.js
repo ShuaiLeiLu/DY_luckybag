@@ -485,19 +485,13 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
             .map(item => item.value)
           roundSummary.detailSuccess = validLotteryInfoList.length
 
-          const skipFilterForServer = manager?.isPoolServerEnabled?.() === true
-          let filteredList = validLotteryInfoList
-          let filterStats = {
+          const filteredList = validLotteryInfoList
+          const filterStats = {
             total: validLotteryInfoList.length,
             kept: validLotteryInfoList.length,
             dropType: 0,
             dropMember: 0,
             dropFanClub: 0
-          }
-          if (!skipFilterForServer) {
-            const res = manager.filterLotteryByConditionsWithStats(validLotteryInfoList, config)
-            filteredList = res.list
-            filterStats = res.stats
           }
           roundSummary.kept = Number(filterStats?.kept || 0)
           roundSummary.dropType = Number(filterStats?.dropType || 0)
@@ -652,19 +646,13 @@ export async function startCollectLive(manager, accountId, scanProfile = null) {
           offsetStride: Number(category?.offsetStride || 0),
           count: Number(category?.count || scanProfile?.countPerPage || manager.scanConfig?.countPerPage || 15)
         }, (batchList) => {
-          const skipFilterForServer = manager?.isPoolServerEnabled?.() === true
-          let filteredList = batchList
-          let filterStats = {
+          const filteredList = batchList
+          const filterStats = {
             total: batchList.length,
             kept: batchList.length,
             dropType: 0,
             dropMember: 0,
             dropFanClub: 0
-          }
-          if (!skipFilterForServer) {
-            const res = manager.filterLotteryByConditionsWithStats(batchList, config)
-            filteredList = res.list
-            filterStats = res.stats
           }
           categoryRound.batches += 1
           categoryRound.total += Number(filterStats?.total || 0)

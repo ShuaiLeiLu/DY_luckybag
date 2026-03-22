@@ -84,7 +84,7 @@ const props = defineProps({
       available: false,
       authorized: false,
       state: 'disabled',
-      message: '未启用授权',
+      message: '服务端未配置',
       expireAt: 0
     })
   }
@@ -100,7 +100,7 @@ const successRate = computed(() => {
 
 const licenseText = computed(() => {
   const info = props.licenseStatus || {}
-  if (info.enabled !== true) return '未启用授权'
+  if (info.enabled !== true) return info.message || '服务端未配置'
   if (info.available === false) return info.message || '授权服务不可用'
   if (info.unrestricted === true || info.state === 'unrestricted') return '服务端免授权'
   if (info.authorized !== true) {

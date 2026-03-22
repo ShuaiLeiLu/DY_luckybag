@@ -46,6 +46,13 @@ type ActivateRequest struct {
 	CurrentAccts int
 }
 
+// TrialRequest 描述试用激活请求。
+type TrialRequest struct {
+	ClientID    string
+	Fingerprint string
+	AppVersion  string
+}
+
 // Status 描述授权状态返回。
 type Status struct {
 	Enabled      bool           `json:"enabled"`
@@ -62,6 +69,13 @@ type Status struct {
 	MaxClients   int            `json:"maxClients"`
 	MaxAccounts  int            `json:"maxAccounts"`
 	Features     map[string]any `json:"features"`
+	FeatureFlags map[string]bool `json:"featureFlags"`
+	AccessMode   string         `json:"accessMode"`
+	TrialState   string         `json:"trialState"`
+	TrialExpireAtMS int64       `json:"trialExpireAt"`
+	TrialRemainingSec int64     `json:"trialRemainingSec"`
+	RequiresActivation bool     `json:"requiresActivation"`
+	LicensePlan string          `json:"licensePlan"`
 	BoundClient  string         `json:"boundClientId"`
 	CheckedAtMS  int64          `json:"checkedAt"`
 }
@@ -289,6 +303,25 @@ func (s *Service) ensureSettingsSchema(ctx context.Context) error {
 	`); err != nil {
 		return err
 	}
+	if _, err := s.db.ExecContext(schemaCtx, `
+		CREATE TABLE IF NOT EXISTS license_trials (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			fingerprint VARCHAR(128) NOT NULL,
+			client_id VARCHAR(128) NOT NULL DEFAULT '',
+			app_version VARCHAR(32) NOT NULL DEFAULT '',
+			status VARCHAR(24) NOT NULL DEFAULT 'active',
+			started_at DATETIME NOT NULL,
+			expire_at DATETIME NOT NULL,
+			activated_at DATETIME NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+			UNIQUE KEY uniq_trial_fingerprint (fingerprint),
+			KEY idx_trial_client_id (client_id),
+			KEY idx_trial_expire_at (expire_at)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+	`); err != nil {
+		return err
+	}
 	defaultValue := "0"
 	if s.cfg.DefaultUnrestricted {
 		defaultValue = "1"
@@ -379,10 +412,16 @@ func unrestrictedFeatures() map[string]any {
 		"fullAccess":         true,
 		"all":                true,
 		"serverUnrestricted": true,
+		"dashboard":          true,
+		"dispatch":           true,
+		"multiAccount":       true,
+		"scanner":            true,
+		"executor":           true,
 	}
 }
 
 func (s *Service) buildUnrestrictedStatus(now time.Time) Status {
+	features := unrestrictedFeatures()
 	return Status{
 		Enabled:      true,
 		Available:    true,
@@ -390,7 +429,11 @@ func (s *Service) buildUnrestrictedStatus(now time.Time) Status {
 		Unrestricted: true,
 		State:        "unrestricted",
 		Message:      "服务端已开启免授权",
-		Features:     unrestrictedFeatures(),
+		Features:     features,
+		FeatureFlags: normalizeFeatureFlags(features),
+		AccessMode:   "unrestricted",
+		RequiresActivation: false,
+		LicensePlan:  "server-unrestricted",
 		CheckedAtMS:  now.UnixMilli(),
 	}
 }
@@ -407,6 +450,10 @@ func (s *Service) Status(ctx context.Context, clientID, fingerprint string) (Sta
 		Message:      "未启用授权",
 		CheckedAtMS:  now.UnixMilli(),
 		Features:     map[string]any{},
+		FeatureFlags: map[string]bool{},
+		AccessMode:   "disabled",
+		TrialState:   "none",
+		RequiresActivation: false,
 	}
 	if s == nil || !s.cfg.Enabled {
 		return base, nil
@@ -421,29 +468,52 @@ func (s *Service) Status(ctx context.Context, clientID, fingerprint string) (Sta
 	} else if err != nil {
 		base.State = "query_failed"
 		base.Message = "授权查询失败"
+		base.AccessMode = "locked"
+		base.RequiresActivation = true
 		return base, err
 	}
-	if strings.TrimSpace(clientID) == "" {
+	trimmedClientID := strings.TrimSpace(clientID)
+	trimmedFingerprint := strings.TrimSpace(fingerprint)
+	if trimmedClientID == "" && trimmedFingerprint == "" {
 		base.State = "invalid_client"
-		base.Message = "clientId 不能为空"
+		base.Message = "clientId 或 fingerprint 不能为空"
+		base.AccessMode = "locked"
+		base.RequiresActivation = true
 		return base, nil
 	}
 
-	row, err := s.findByClient(ctx, clientID)
+	row, err := s.findByClient(ctx, trimmedClientID)
 	if err == sql.ErrNoRows {
+		if trimmedFingerprint != "" {
+			trial, trialErr := s.findTrialByFingerprint(ctx, trimmedFingerprint)
+			if trialErr == nil {
+				return s.buildTrialStatus(trial, now), nil
+			}
+			if trialErr != sql.ErrNoRows {
+				base.State = "query_failed"
+				base.Message = "授权查询失败"
+				base.AccessMode = "locked"
+				base.RequiresActivation = true
+				return base, trialErr
+			}
+		}
 		base.State = "unlicensed"
-		base.Message = "当前客户端未授权"
+		base.Message = "当前设备未授权，请开始试用或激活授权"
+		base.AccessMode = "locked"
+		base.RequiresActivation = true
 		return base, nil
 	}
 	if err != nil {
 		base.State = "query_failed"
 		base.Message = "授权查询失败"
+		base.AccessMode = "locked"
+		base.RequiresActivation = true
 		return base, err
 	}
 
-	status := s.buildStatus(row, clientID, fingerprint, now)
+	status := s.buildStatus(row, trimmedClientID, trimmedFingerprint, now)
 	if status.Authorized {
-		_ = s.touchActivation(ctx, row.ID, clientID, fingerprint, 0, "")
+		_ = s.touchActivation(ctx, row.ID, trimmedClientID, trimmedFingerprint, 0, "")
 	}
 	return status, nil
 }
@@ -460,6 +530,10 @@ func (s *Service) Activate(ctx context.Context, req ActivateRequest) (Status, er
 		Message:      "未启用授权",
 		CheckedAtMS:  now.UnixMilli(),
 		Features:     map[string]any{},
+		FeatureFlags: map[string]bool{},
+		AccessMode:   "disabled",
+		TrialState:   "none",
+		RequiresActivation: false,
 	}
 	if s == nil || !s.cfg.Enabled {
 		return base, nil
@@ -474,11 +548,15 @@ func (s *Service) Activate(ctx context.Context, req ActivateRequest) (Status, er
 	} else if err != nil {
 		base.State = "query_failed"
 		base.Message = "授权查询失败"
+		base.AccessMode = "locked"
+		base.RequiresActivation = true
 		return base, err
 	}
 	if strings.TrimSpace(req.ClientID) == "" || strings.TrimSpace(req.LicenseKey) == "" {
 		base.State = "invalid_request"
 		base.Message = "licenseKey 和 clientId 不能为空"
+		base.AccessMode = "locked"
+		base.RequiresActivation = true
 		return base, nil
 	}
 
@@ -496,11 +574,15 @@ func (s *Service) Activate(ctx context.Context, req ActivateRequest) (Status, er
 	if err == sql.ErrNoRows {
 		base.State = "invalid_license"
 		base.Message = "授权码不存在"
+		base.AccessMode = "locked"
+		base.RequiresActivation = true
 		return base, nil
 	}
 	if err != nil {
 		base.State = "query_failed"
 		base.Message = "授权查询失败"
+		base.AccessMode = "locked"
+		base.RequiresActivation = true
 		return base, err
 	}
 
@@ -515,6 +597,7 @@ func (s *Service) Activate(ctx context.Context, req ActivateRequest) (Status, er
 		status.Authorized = false
 		status.State = "license_used"
 		status.Message = "授权码已使用（一次性）"
+		status.RequiresActivation = true
 		return status, nil
 	}
 	if stateLower != "active" {
@@ -534,18 +617,31 @@ func (s *Service) Activate(ctx context.Context, req ActivateRequest) (Status, er
 	`, clientID, fingerprint, row.ID); err != nil {
 		base.State = "bind_failed"
 		base.Message = "授权绑定失败"
+		base.AccessMode = "locked"
+		base.RequiresActivation = true
 		return base, err
 	}
 
 	if err := s.touchActivationTx(ctx, tx, row.ID, clientID, fingerprint, req.CurrentAccts, req.AppVersion); err != nil {
 		base.State = "activation_failed"
 		base.Message = "授权激活失败"
+		base.AccessMode = "locked"
+		base.RequiresActivation = true
+		return base, err
+	}
+	if err := s.markTrialActivatedTx(ctx, tx, fingerprint); err != nil {
+		base.State = "activation_failed"
+		base.Message = "试用状态更新失败"
+		base.AccessMode = "locked"
+		base.RequiresActivation = true
 		return base, err
 	}
 
 	if err := tx.Commit(); err != nil {
 		base.State = "commit_failed"
 		base.Message = "授权提交失败"
+		base.AccessMode = "locked"
+		base.RequiresActivation = true
 		return base, err
 	}
 	return s.Status(ctx, clientID, fingerprint)
@@ -1219,6 +1315,7 @@ func (s *Service) buildStatus(row licenseRow, clientID, fingerprint string, now 
 		}
 	}
 
+	features := parseFeatures(row.FeaturesJSON.String)
 	return Status{
 		Enabled:      true,
 		Available:    true,
@@ -1230,10 +1327,15 @@ func (s *Service) buildStatus(row licenseRow, clientID, fingerprint string, now 
 		LicenseKey:   maskLicenseKey(row.LicenseKey),
 		CustomerName: row.CustomerName,
 		Plan:         row.PlanName,
+		LicensePlan:  row.PlanName,
 		ExpireAtMS:   row.ExpireAt.UnixMilli(),
 		MaxClients:   row.MaxClients,
 		MaxAccounts:  row.MaxAccounts,
-		Features:     parseFeatures(row.FeaturesJSON.String),
+		Features:     features,
+		FeatureFlags: normalizeFeatureFlags(features),
+		AccessMode:   "licensed",
+		TrialState:   "none",
+		RequiresActivation: !authorized,
 		BoundClient:  strings.TrimSpace(row.BindClientID.String),
 		CheckedAtMS:  now.UnixMilli(),
 	}

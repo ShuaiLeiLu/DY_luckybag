@@ -96,21 +96,6 @@ export function resolvePoolServerUrl() {
 }
 
 /**
- * 解析当前客户端应使用的筛选服务是否启用（代码配置文件 > env > 默认启用）。
- * @returns {boolean}
- */
-export function resolvePoolServerEnabled() {
-  if (typeof APP_CONFIG?.poolServer?.enabled === 'boolean') {
-    return APP_CONFIG.poolServer.enabled
-  }
-  const envValue = String(import.meta?.env?.VITE_POOL_SERVER_ENABLED || '').trim().toLowerCase()
-  if (!envValue) return true
-  if (['0', 'false', 'off', 'no'].includes(envValue)) return false
-  if (['1', 'true', 'on', 'yes'].includes(envValue)) return true
-  return true
-}
-
-/**
  * 持久化筛选服务地址到 localStorage。
  * @param {string} url 服务地址
  * @returns {string} 规范化后的地址

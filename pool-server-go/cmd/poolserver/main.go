@@ -233,9 +233,6 @@ func ensureLicenseAuthorized(w http.ResponseWriter, r *http.Request, licenseSvc 
 	if licenseSvc == nil {
 		return true
 	}
-	if currentAccounts, ok := extractCurrentAccountsHint(r); ok && currentAccounts <= 1 {
-		return true
-	}
 	if unrestricted, err := licenseSvc.IsUnrestricted(r.Context()); err == nil && unrestricted {
 		return true
 	} else if err != nil {
@@ -874,6 +871,61 @@ func main() {
 			Fingerprint:  req.Fingerprint,
 			AppVersion:   req.AppVersion,
 			CurrentAccts: req.CurrentAccts,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error(), "license": status})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "license": status})
+	})
+
+	mux.HandleFunc("/license/trial/start", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":    false,
+				"error": "license_disabled",
+				"license": map[string]any{
+					"enabled":            false,
+					"available":          false,
+					"authorized":         false,
+					"state":              "disabled",
+					"message":            "未启用授权",
+					"checkedAt":          time.Now().UnixMilli(),
+					"features":           map[string]any{},
+					"featureFlags":       map[string]bool{},
+					"accessMode":         "disabled",
+					"trialState":         "none",
+					"trialExpireAt":      int64(0),
+					"trialRemainingSec":  int64(0),
+					"requiresActivation": false,
+					"licensePlan":        "",
+				},
+			})
+			return
+		}
+
+		var req struct {
+			ClientID    string `json:"clientId"`
+			Fingerprint string `json:"fingerprint"`
+			AppVersion  string `json:"appVersion"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+
+		status, err := licenseSvc.StartTrial(r.Context(), licensepkg.TrialRequest{
+			ClientID:    req.ClientID,
+			Fingerprint: req.Fingerprint,
+			AppVersion:  req.AppVersion,
 		})
 		if err != nil {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error(), "license": status})

@@ -20,6 +20,10 @@ const tokenStorePath = isDev
   ? path.join(__dirname, '..', 'tokens.json')  // 开发环境：项目根目录
   : path.join(path.dirname(app.getPath('exe')), 'tokens.json')  // 生产环境：exe所在目录
 const protocolGuardPartitions = new Set()
+const DOUYIN_DESKTOP_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+const DOUYIN_SEC_CH_UA = '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"'
+const DOUYIN_ACCEPT_LANGUAGE = 'zh-CN,zh;q=0.9,en;q=0.8'
 
 /**
  * 判断扫描追踪日志是否启用（环境变量 DY_SCAN_TRACE，默认关闭）。
@@ -70,6 +74,11 @@ function isBlockedMediaRequest(details = {}) {
   return false
 }
 
+function shouldBlockMediaForAccount(accountId) {
+  const browserData = browserViews.get(accountId)
+  return browserData?.blockMediaRequests === true
+}
+
 function rememberBrowserUrl(accountId, url = '') {
   const browserData = browserViews.get(accountId)
   const normalized = String(url || '').trim()
@@ -107,6 +116,7 @@ try {
   app.commandLine.appendSwitch('disable-background-timer-throttling')
   app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
   app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
+  app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 } catch (e) {
   logger.debug('追加后台节流禁用参数失败', e)
 }
@@ -659,6 +669,13 @@ function ensureKeepAwake() {
 }
 
 app.whenReady().then(ensureKeepAwake)
+app.whenReady().then(() => {
+  try {
+    app.setAccessibilitySupportEnabled(false)
+  } catch (e) {
+    logger.debug('关闭无障碍支持失败', e)
+  }
+})
 // 全局静音兜底（多账号场景避免偶发出声）
 try {
   app.commandLine.appendSwitch('mute-audio')
@@ -879,11 +896,12 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
     
     // 创建新窗口用于显示抖音页面
     const browserWindow = new BrowserWindow({
-      width: 1200,
-      height: 800,
+      width: 833,
+      height: 544,
       webPreferences: {
         nodeIntegration: false,
-        contextIsolation: true,
+        contextIsolation: false,
+        preload: path.join(__dirname, 'browser-preload.js'),
         partition: partition, // 独立的session，每个账号互不干扰
         backgroundThrottling: false
       }
@@ -892,10 +910,11 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
     // 获取该账号的独立 session
     const accountSession = browserWindow.webContents.session
 
-    // 清除该账号的所有缓存和数据（确保是全新的）
-    await accountSession.clearStorageData({
-      storages: ['cookies', 'localstorage', 'sessionstorage', 'cachestorage', 'indexdb']
-    })
+    try {
+      browserWindow.webContents.setUserAgent(DOUYIN_DESKTOP_UA)
+    } catch (e) {
+      logger.debug(`[${accountId}] 设置浏览器 UA 失败`, e)
+    }
 
     logger.info(`[${accountId}] 已创建独立session: ${partition}`)
 
@@ -910,6 +929,7 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
       window: browserWindow,
       session: accountSession,
       partition: partition,
+      blockMediaRequests: false,
       instanceId,
       lastUrl: 'https://www.douyin.com',
       lastRecoverAt: 0,
@@ -949,12 +969,26 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
           callback({ cancel: true })
           return
         }
-        if (isBlockedMediaRequest(details)) {
+        if (shouldBlockMediaForAccount(accountId) && isBlockedMediaRequest(details)) {
           logger.debug(`[${accountId}] session 已拦截媒体资源: ${details.url}`)
           callback({ cancel: true })
           return
         }
         callback({ cancel: false })
+      })
+      accountSession.webRequest.onBeforeSendHeaders({ urls: ['https://*.douyin.com/*'] }, (details, callback) => {
+        const headers = { ...(details.requestHeaders || {}) }
+        headers['User-Agent'] = DOUYIN_DESKTOP_UA
+        headers['user-agent'] = DOUYIN_DESKTOP_UA
+        headers['Accept-Language'] = DOUYIN_ACCEPT_LANGUAGE
+        headers['accept-language'] = DOUYIN_ACCEPT_LANGUAGE
+        headers['sec-ch-ua'] = DOUYIN_SEC_CH_UA
+        headers['Sec-CH-UA'] = DOUYIN_SEC_CH_UA
+        headers['sec-ch-ua-mobile'] = '?0'
+        headers['Sec-CH-UA-Mobile'] = '?0'
+        headers['sec-ch-ua-platform'] = '"Windows"'
+        headers['Sec-CH-UA-Platform'] = '"Windows"'
+        callback({ requestHeaders: headers })
       })
     }
 
@@ -1127,6 +1161,21 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
   }
 })
 
+ipcMain.handle('set-live-stream-blocking', async (event, { accountId, enabled }) => {
+  try {
+    const browserData = browserViews.get(accountId)
+    if (!browserData || !browserData.window || browserData.window.isDestroyed()) {
+      return { success: false, error: '浏览器实例不存在', code: 'BROWSER_NOT_FOUND' }
+    }
+    browserData.blockMediaRequests = false
+    logger.info(`[${accountId}] 直播流拦截功能已临时停用，保持关闭状态`)
+    return { success: true, enabled: browserData.blockMediaRequests }
+  } catch (error) {
+    logger.error('设置直播流拦截失败:', error)
+    return { success: false, error: error.message }
+  }
+})
+
 ipcMain.handle('navigate-to', async (event, { accountId, url }) => {
   try {
     const browserData = browserViews.get(accountId)
@@ -1152,7 +1201,7 @@ ipcMain.handle('execute-script', async (event, { accountId, script, timeoutMs = 
       throw new Error('浏览器实例不存在')
     }
 
-    const safeTimeoutMs = Math.max(1200, Math.min(12000, Number(timeoutMs || 4500)))
+    const safeTimeoutMs = Math.max(1200, Math.min(30000, Number(timeoutMs || 4500)))
     const result = await Promise.race([
       browserData.window.webContents.executeJavaScript(script),
       new Promise((_, reject) => {

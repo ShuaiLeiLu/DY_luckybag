@@ -19,6 +19,44 @@
           />
         </div>
         <div class="config-item">
+          <div class="item-header">
+            <div class="item-info">
+              <span class="item-label">命中率过滤</span>
+              <span class="item-desc">只抢预测概率大于该值的福袋（0.1 = 10%）</span>
+            </div>
+            <n-switch v-model:value="config.hitRate.enabled" size="small" />
+          </div>
+          <n-input-number
+            v-model:value="config.hitRate.value"
+            :min="0"
+            :max="1"
+            :step="0.01"
+            :disabled="!config.hitRate.enabled"
+            size="small"
+          >
+            <template #suffix><span class="input-prefix">概率值</span></template>
+          </n-input-number>
+        </div>
+        <div class="config-item">
+          <div class="item-header">
+            <div class="item-info">
+              <span class="item-label">二次检查</span>
+              <span class="item-desc">进房后按最新参与人数复核，低于阈值就放弃（0.05 = 5%）</span>
+            </div>
+            <n-switch v-model:value="config.secondInspect.enabled" size="small" />
+          </div>
+          <n-input-number
+            v-model:value="config.secondInspect.value"
+            :min="0"
+            :max="1"
+            :step="0.01"
+            :disabled="!config.secondInspect.enabled"
+            size="small"
+          >
+            <template #suffix><span class="input-prefix">概率值</span></template>
+          </n-input-number>
+        </div>
+        <div class="config-item">
           <div class="item-header card-style">
             <div class="item-info">
               <span class="item-label">过滤粉丝团</span>
@@ -132,6 +170,18 @@
             <n-switch v-model:value="config.randomInteraction.enabled" size="small" />
           </div>
         </div>
+        <div class="config-item">
+          <div class="item-header card-style">
+            <div style="display: flex; align-items: center; gap: 8px">
+              <n-icon color="#64748b" size="18"><videocam-outline /></n-icon>
+              <div class="item-info">
+                <span class="item-label">关闭直播画面</span>
+                <span class="item-desc">该功能已临时停用，当前不会再暂停视频渲染</span>
+              </div>
+            </div>
+            <n-switch v-model:value="config.closeLiveStream.enabled" size="small" :disabled="true" />
+          </div>
+        </div>
       </div>
     </div>
   </n-scrollbar>
@@ -143,6 +193,7 @@ import TimeOutline from '@vicons/ionicons5/es/TimeOutline'
 import ChatboxEllipsesOutline from '@vicons/ionicons5/es/ChatboxEllipsesOutline'
 import GiftOutline from '@vicons/ionicons5/es/GiftOutline'
 import CubeOutline from '@vicons/ionicons5/es/CubeOutline'
+import VideocamOutline from '@vicons/ionicons5/es/VideocamOutline'
 import WalletOutline from '@vicons/ionicons5/es/WalletOutline'
 
 const props = defineProps({

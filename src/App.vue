@@ -251,10 +251,10 @@ const stableLicenseFingerprint = resolveLicenseFingerprint()
 const POOL_CURRENT_ACCOUNTS_KEY = 'DY_CURRENT_ACCOUNTS'
 
 const config = ref({
-  minProbability: 0.01,
   stayDuration: 20,
   enableRedPacket: true,
-  hitRate: { enabled: false, value: 0.1 },
+  hitRate: { enabled: true, value: 0.1 },
+  secondInspect: { enabled: true, value: 0.05 },
   filterFanClub: { enabled: true },
   onlyPhysicalPrize: { enabled: false },
   preferBigRedPacket: { enabled: true, threshold: 40 },
@@ -262,9 +262,8 @@ const config = ref({
   singleAccountDuration: { enabled: false, value: 3 },
   filterOnline: { enabled: false, value: 1000 },
   randomInteraction: { enabled: true },
-  closeLiveStream: { enabled: true },
+  closeLiveStream: { enabled: false },
   poolServer: {
-    enabled: initialPoolServerConfig.enabled !== false,
     url: initialPoolServerConfig.url || ''
   }
 })
@@ -300,9 +299,7 @@ const LOG_MERGE_WINDOW_MS = 2000
 const LOG_WIN_RE = /(中奖|恭喜|🎉|🧧.*成功|领取红包成功|中得)/i
 const LOG_FAIL_RE = /(失败|错误|异常|超时|未中奖|放弃)/i
 const LOG_WARN_RE = /(风控|告警|警告|降速|冷却)/i
-const FRONTEND_LOG_SUPPRESS_PATTERNS = [
-  /^⏳ 已锁定当前直播间，约\d+秒后复核当前福袋，并持续补扫候选\.\.\.$/
-]
+const FRONTEND_LOG_SUPPRESS_PATTERNS = []
 
 const pendingAccountUpdates = new Map()
 const pendingLotteryListUpdates = new Map()
@@ -329,7 +326,7 @@ function createEmptyPoolDispatchSummary(overrides = {}) {
 }
 
 const poolDispatchSummary = ref(createEmptyPoolDispatchSummary({
-  enabled: config.value.poolServer?.enabled !== false
+  enabled: Boolean(config.value.poolServer?.url)
 }))
 
 /**
@@ -341,7 +338,7 @@ function createEmptyLicenseStatus(overrides = {}) {
     available: false,
     authorized: false,
     state: 'disabled',
-    message: '未启用授权',
+    message: '服务端未配置',
     customerName: '',
     plan: '',
     expireAt: 0,
@@ -447,7 +444,7 @@ let licenseBindStatusInflight = false
 
 const licenseSummaryText = computed(() => {
   const info = poolLicenseStatus.value || {}
-  if (info.enabled !== true) return '未启用授权'
+  if (info.enabled !== true) return info.message || '服务端未配置'
   if (info.available === false) return info.message || '授权服务不可用'
   if (info.unrestricted === true || info.state === 'unrestricted') return '服务端已开启免授权'
   if (info.authorized !== true) return info.message || '未授权'
@@ -898,7 +895,7 @@ onMounted(async () => {
   window.addEventListener('resize', handleResize)
   window.addEventListener('beforeunload', handleBeforeUnload)
   lotteryManager.setScanConfig({ countPerPage: 15, pagesPerCategory: 12, allCount: 24 })
-  lotteryManager.setPoolServerConfig(config.value.poolServer, { silent: true })
+  lotteryManager.setPoolServerConfig({ url: config.value.poolServer?.url || '' }, { silent: true })
   await loadAllAccounts()
   persistCurrentAccountCount()
   restartPoolDispatchPolling()
@@ -934,6 +931,7 @@ onMounted(async () => {
       if (!account) return
       ensureDailyStats(account)
       if (type === 'lottery') {
+        lotteryManager.applyLiveLotteryUpdate(accountId, data)
         const outcome = parseLotteryOutcome(data)
         if (outcome) {
           const outcomeKey = makeLotteryOutcomeKey(accountId, outcome.lotteryId)
@@ -1028,10 +1026,9 @@ onUnmounted(() => {
 })
 
 watch(
-  () => [config.value.poolServer?.enabled, config.value.poolServer?.url],
-  ([enabled, url]) => {
+  () => config.value.poolServer?.url,
+  (url) => {
     lotteryManager.setPoolServerConfig({
-      enabled: enabled !== false,
       url: url || ''
     }, { silent: true })
     restartPoolDispatchPolling()
@@ -1074,6 +1071,26 @@ watch(
   }
 )
 
+watch(
+  () => config.value.closeLiveStream?.enabled,
+  async () => {
+    ipcRenderer = getIpcRenderer()
+    if (!ipcRenderer) return
+    const accountIds = [...new Set(accounts.value.map(item => String(item?.id || '').trim()).filter(Boolean))]
+    await Promise.allSettled(accountIds.map(async (accountId) => {
+      try {
+        await ipcRenderer.invoke('set-live-stream-blocking', {
+          accountId,
+          enabled: false
+        })
+      } catch (_) {
+        // ignore
+      }
+      await lotteryManager.openLiveStreamRendering(accountId)
+    }))
+  }
+)
+
 /**
  * stopPoolDispatchPolling 方法：停止服务端调度摘要轮询。
  */
@@ -1097,7 +1114,7 @@ function stopPoolDispatchPolling() {
  */
 async function refreshPoolDispatchSummary() {
   if (poolDispatchInflight) return
-  const enabled = config.value.poolServer?.enabled !== false && Boolean(config.value.poolServer?.url)
+  const enabled = Boolean(config.value.poolServer?.url)
   if (!enabled) {
     poolDispatchSummary.value = createEmptyPoolDispatchSummary({ enabled: false })
     return
@@ -1134,9 +1151,9 @@ async function refreshPoolDispatchSummary() {
  */
 async function refreshPoolLicenseStatus() {
   if (poolLicenseInflight) return
-  const enabled = config.value.poolServer?.enabled !== false && Boolean(config.value.poolServer?.url)
+  const enabled = Boolean(config.value.poolServer?.url)
   if (!enabled) {
-    poolLicenseStatus.value = createEmptyLicenseStatus({ enabled: false, message: '未启用授权' })
+    poolLicenseStatus.value = createEmptyLicenseStatus({ enabled: false, message: '未配置服务端' })
     return
   }
 
@@ -1313,7 +1330,7 @@ async function pollLicenseBindSessionStatus() {
  */
 async function refreshPoolLearningDebug() {
   if (poolLearningInflight) return
-  const enabled = config.value.poolServer?.enabled !== false && Boolean(config.value.poolServer?.url)
+  const enabled = Boolean(config.value.poolServer?.url)
   if (!enabled) {
     poolLearningDebug.value = {
       connected: false,
@@ -1357,7 +1374,7 @@ function restartPoolDispatchPolling() {
   refreshPoolDispatchSummary()
   refreshPoolLearningDebug()
   refreshPoolLicenseStatus()
-  if (config.value.poolServer?.enabled === false || !config.value.poolServer?.url) {
+  if (!config.value.poolServer?.url) {
     return
   }
   poolDispatchTimer = setInterval(() => {
@@ -1823,7 +1840,6 @@ function applyWalletWinFallback(accountId, account, rewardDelta) {
  * getPoolFeedbackServerUrl 方法：获取当前可用的服务端反馈地址。
  */
 function getPoolFeedbackServerUrl() {
-  if (config.value.poolServer?.enabled === false) return ''
   return normalizePoolServerUrl(config.value.poolServer?.url || '')
 }
 
@@ -1899,7 +1915,6 @@ const responsiveColumns = computed(() => {
    */
   const getTaskStageText = (stage) => ({
     claimed: '待参与',
-    preheating: '预热中',
     joining: '参与中',
     waiting_draw: '等开奖',
     post_draw_stay: '停留中'
@@ -2172,7 +2187,7 @@ async function startAccountWithLogin(account, options = {}) {
       return addLog(`启动失败: ${res.error}`, 'error')
     }
     account.state = 'opened'
-    await ipcRenderer.invoke('navigate-to', { accountId: account.id, url: 'https://www.douyin.com' })
+    await ipcRenderer.invoke('navigate-to', { accountId: account.id, url: 'https://live.douyin.com/' })
     timer = setInterval(async () => {
       if (!pendingCreateAccountIds.has(account.id)) {
         clearLoginWatchers()
@@ -2286,7 +2301,7 @@ async function startAccountScanning(account, options = {}) {
         restartAccountWithLogin(account, `Token 写入失败: ${setRes?.error || '关键登录 cookie 未写入成功'}`)
         return
       }
-      await ipcRenderer.invoke('navigate-to', { accountId: account.id, url: 'https://www.douyin.com' })
+      await ipcRenderer.invoke('navigate-to', { accountId: account.id, url: 'https://live.douyin.com/' })
     }
     account.actionActive = true
     account.state = 'running'

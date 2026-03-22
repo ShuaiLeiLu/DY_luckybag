@@ -62,6 +62,22 @@ CREATE TABLE IF NOT EXISTS license_bind_sessions (
     ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS license_trials (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  fingerprint VARCHAR(128) NOT NULL,
+  client_id VARCHAR(128) NOT NULL DEFAULT '',
+  app_version VARCHAR(32) NOT NULL DEFAULT '',
+  status VARCHAR(24) NOT NULL DEFAULT 'active',
+  started_at DATETIME NOT NULL,
+  expire_at DATETIME NOT NULL,
+  activated_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_trial_fingerprint (fingerprint),
+  KEY idx_trial_client_id (client_id),
+  KEY idx_trial_expire_at (expire_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS miniapp_signin_records (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   client_id VARCHAR(128) NOT NULL,
