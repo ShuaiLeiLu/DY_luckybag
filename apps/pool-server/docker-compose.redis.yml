@@ -1,0 +1,24 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: dy-pool-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ./redis-data:/data
+
+  pool-server:
+    image: ${POOL_IMAGE:-dy-pool-server:latest}
+    container_name: dy-pool-server
+    restart: unless-stopped
+    depends_on:
+      - redis
+    ports:
+      - "${POOL_PORT:-9090}:9090"
+    environment:
+      POOL_CONFIG_FILE: /app/config.json
+      POOL_REDIS_ENABLED: "true"
+      REDIS_ADDR: "redis:6379"
+      REDIS_DB: "0"
+    volumes:
+      - ./config.json:/app/config.json:ro

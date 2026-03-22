@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>抖娃控制台</title>
+  <style>
+    :root {
+      color-scheme: light;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: #f4f7fb;
+      color: #1f2937;
+    }
+    .wrap { max-width: 1200px; margin: 18px auto; padding: 0 16px 32px; }
+    .card {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 14px;
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
+      margin-bottom: 14px;
+    }
+    .hd { padding: 12px 16px; border-bottom: 1px solid #eef2f7; font-weight: 700; display:flex; align-items:center; justify-content:space-between; }
+    .bd { padding: 16px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+    input, select, button, textarea {
+      height: 34px;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      padding: 0 10px;
+      font-size: 14px;
+    }
+    textarea { height: 80px; padding: 8px 10px; resize: vertical; min-width: 280px; }
+    input, select, textarea { background: #fff; }
+    .w120 { width: 120px; } .w160 { width: 160px; } .w220 { width: 220px; } .w320 { width: 320px; }
+    button { cursor: pointer; background: #10b981; color: #fff; border-color: #10b981; }
+    button.secondary { background: #fff; color: #374151; border-color: #cbd5e1; }
+    button.warn { background: #f59e0b; border-color: #f59e0b; }
+    button.danger { background: #ef4444; border-color: #ef4444; }
+    .msg { padding: 8px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 12px; display: none; }
+    .msg.ok { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; display: block; }
+    .msg.err { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; display: block; }
+
+    .topbar {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .topbar__title {
+      font-size: 18px;
+      font-weight: 800;
+      color: #0f172a;
+      letter-spacing: .5px;
+    }
+    .topbar__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+    .tabs {
+      display: flex;
+      gap: 12px;
+      margin: 14px 0 10px;
+    }
+    .tab-btn {
+      border: none;
+      background: #e2e8f0;
+      color: #475569;
+      font-weight: 700;
+      padding: 8px 16px;
+      border-radius: 999px;
+      cursor: pointer;
+    }
+    .tab-btn.active {
+      background: #1e293b;
+      color: #fff;
+    }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .stat-card {
+      background: #fff;
+      border: 1px solid #eef2f7;
+      border-radius: 14px;
+      padding: 14px 16px;
+      box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+    }
+    .stat-label { font-size: 12px; color: #64748b; margin-bottom: 8px; }
+    .stat-value { font-size: 22px; font-weight: 800; color: #0f172a; }
+    .stat-note { font-size: 11px; color: #94a3b8; margin-top: 6px; }
+
+    .pill { display: inline-flex; align-items: center; height: 30px; padding: 0 12px; border-radius: 999px; font-size: 13px; font-weight: 700; }
+    .pill.ok { background: #dcfce7; color: #166534; }
+    .pill.off { background: #fee2e2; color: #991b1b; }
+    .pill.info { background: #e0f2fe; color: #0369a1; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid #eef2f7; text-align: left; padding: 10px 8px; vertical-align: top; }
+    th { color: #475569; font-weight: 700; background: #f8fafc; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .status { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+    .status.active { background: #dcfce7; color: #166534; }
+    .status.disabled { background: #fee2e2; color: #991b1b; }
+    .actions button { margin-right: 6px; margin-bottom: 6px; height: 28px; font-size: 12px; padding: 0 8px; }
+
+    @media (max-width: 980px) {
+      .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 640px) {
+      .stats-grid { grid-template-columns: 1fr; }
+      .topbar__actions { flex-direction: column; align-items: stretch; }
+      input.w320 { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="bd topbar">
+        <div class="topbar__title">抖娃控制台</div>
+        <div id="msg" class="msg"></div>
+        <div class="topbar__actions">
+          <input id="token" class="w320" placeholder="请输入后台管理 Token（POOL_LICENSE_ADMIN_TOKEN）" />
+          <button class="secondary" onclick="saveToken()">保存Token</button>
+          <button onclick="refreshAll()">刷新数据</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="overview">系统概览</button>
+      <button class="tab-btn" data-tab="config">系统配置</button>
+      <button class="tab-btn" data-tab="licenses">授权池</button>
+    </div>
+
+    <section id="tab-overview" class="tab-panel active">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">授权码总量</div>
+          <div id="metric_total" class="stat-value">0</div>
+          <div id="metric_note" class="stat-note"></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">有效授权数量</div>
+          <div id="metric_active" class="stat-value">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">已绑定设备数</div>
+          <div id="metric_bound" class="stat-value">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">已绑定微信数</div>
+          <div id="metric_wechat" class="stat-value">0</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hd">系统状态</div>
+        <div class="bd">
+          <div class="row">
+            <span id="svc_license" class="pill info">授权服务：未知</span>
+            <span id="svc_unrestricted" class="pill off">免授权：未知</span>
+            <span class="pill info">数据源：MySQL</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-config" class="tab-panel">
+      <div class="card">
+        <div class="hd">授权系统配置</div>
+        <div class="bd">
+          <div class="row">
+            <span>授权不限制：</span>
+            <span id="unrestricted_status" class="pill off">读取中</span>
+            <button id="unrestricted_toggle" class="warn" onclick="toggleUnrestricted()">切换</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hd">新增授权</div>
+        <div class="bd">
+          <div class="row">
+            <input id="create_days" class="w120" type="number" min="1" max="3650" value="30" placeholder="授权天数" />
+            <input id="create_quantity" class="w120" type="number" min="1" max="500" value="1" placeholder="授权码数量" />
+            <button onclick="createLicense()">创建授权</button>
+          </div>
+          <div class="row">
+            <textarea id="created_keys" style="width:100%; min-height:88px;" readonly placeholder="创建成功后，这里会显示授权码（每行一个）"></textarea>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-licenses" class="tab-panel">
+      <div class="card">
+        <div class="hd">授权池列表</div>
+        <div class="bd">
+          <table>
+            <thead>
+            <tr>
+              <th>ID</th>
+              <th>授权码</th>
+              <th>微信OpenID</th>
+              <th>微信昵称</th>
+              <th>状态</th>
+              <th>到期</th>
+              <th>绑定客户端</th>
+              <th>最近活跃</th>
+              <th>操作</th>
+            </tr>
+            </thead>
+            <tbody id="tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const msgEl = $("msg");
+    const tbody = $("tbody");
+    const state = { page: 1, pageSize: 200, total: 0, items: [] };
+    let unrestrictedEnabled = false;
+
+    function showMsg(text, ok = true) {
+      msgEl.className = "msg " + (ok ? "ok" : "err");
+      msgEl.textContent = text || "";
+    }
+
+    function getToken() {
+      return ($("token").value || "").trim();
+    }
+
+    function saveToken() {
+      localStorage.setItem("DY_LICENSE_ADMIN_TOKEN", getToken());
+      showMsg("Token 已保存");
+      refreshAll();
+    }
+
+    function loadToken() {
+      $("token").value = localStorage.getItem("DY_LICENSE_ADMIN_TOKEN") || "";
+    }
+
+    function fmtTime(ms) {
+      if (!ms || Number(ms) <= 0) return "-";
+      const d = new Date(Number(ms));
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mm = String(d.getMinutes()).padStart(2, "0");
+      return `${y}-${m}-${day} ${hh}:${mm}`;
+    }
+
+    async function request(path, method = "GET", body = null) {
+      const token = getToken();
+      const res = await fetch(path, {
+        method,
+        headers: {
+          "content-type": "application/json",
+          "x-admin-token": token
+        },
+        body: body ? JSON.stringify(body) : undefined
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok !== true) {
+        throw new Error(data.error || `http_${res.status}`);
+      }
+      return data;
+    }
+
+    async function createLicense() {
+      try {
+        const days = Number($("create_days").value || 30);
+        const quantity = Number($("create_quantity").value || 1);
+        const data = await request("/admin/api/licenses/create", "POST", {
+          days,
+          quantity
+        });
+        const result = data.result || {};
+        const keys = Array.isArray(result.keys) ? result.keys : [];
+        $("created_keys").value = keys.join("\n");
+        showMsg(`创建成功：共 ${Number(result.count || keys.length || 0)} 个授权码`);
+        await loadLicenses();
+      } catch (err) {
+        showMsg(`创建失败：${err.message}`, false);
+      }
+    }
+
+    function renderGlobalSettings() {
+      const statusEl = $("unrestricted_status");
+      const toggleEl = $("unrestricted_toggle");
+      const svcUnrestricted = $("svc_unrestricted");
+      statusEl.className = "pill " + (unrestrictedEnabled ? "ok" : "off");
+      statusEl.textContent = unrestrictedEnabled ? "已开启，所有客户端免授权" : "已关闭，按正常授权校验";
+      toggleEl.textContent = unrestrictedEnabled ? "关闭免授权" : "开启免授权";
+      toggleEl.className = unrestrictedEnabled ? "danger" : "warn";
+      svcUnrestricted.className = "pill " + (unrestrictedEnabled ? "ok" : "off");
+      svcUnrestricted.textContent = unrestrictedEnabled ? "免授权：开启" : "免授权：关闭";
+    }
+
+    function renderMetrics() {
+      const items = Array.isArray(state.items) ? state.items : [];
+      const activeCount = items.filter((item) => String(item.status) === "active").length;
+      const boundCount = items.filter((item) => String(item.bindClientId || "").trim() !== "").length;
+      const wechatCount = items.filter((item) => String(item.wechatOpenId || "").trim() !== "").length;
+      $("metric_total").textContent = String(state.total || items.length);
+      $("metric_active").textContent = String(activeCount);
+      $("metric_bound").textContent = String(boundCount);
+      $("metric_wechat").textContent = String(wechatCount);
+      $("metric_note").textContent = state.total > items.length ? `当前统计基于已加载 ${items.length} 条` : "";
+    }
+
+    async function loadGlobalSettings() {
+      try {
+        const data = await request("/admin/api/license-settings");
+        const result = data.result || {};
+        unrestrictedEnabled = result.unrestricted === true;
+        renderGlobalSettings();
+        $("svc_license").className = "pill ok";
+        $("svc_license").textContent = "授权服务：正常";
+      } catch (err) {
+        $("unrestricted_status").className = "pill off";
+        $("unrestricted_status").textContent = `加载失败：${err.message}`;
+        $("svc_license").className = "pill off";
+        $("svc_license").textContent = "授权服务：不可用";
+      }
+    }
+
+    async function toggleUnrestricted() {
+      try {
+        const data = await request("/admin/api/license-settings", "POST", {
+          unrestricted: !unrestrictedEnabled
+        });
+        const result = data.result || {};
+        unrestrictedEnabled = result.unrestricted === true;
+        renderGlobalSettings();
+        showMsg(unrestrictedEnabled ? "已开启免授权，所有客户端可直接使用" : "已关闭免授权，恢复正常授权逻辑");
+      } catch (err) {
+        showMsg(`更新失败：${err.message}`, false);
+      }
+    }
+
+    async function setStatus(id, status) {
+      try {
+        await request("/admin/api/licenses/status", "POST", { id, status });
+        showMsg(`状态已更新为 ${status}`);
+        await loadLicenses();
+      } catch (err) {
+        showMsg(`状态更新失败：${err.message}`, false);
+      }
+    }
+
+    async function extendLicense(id, days = 30) {
+      try {
+        await request("/admin/api/licenses/extend", "POST", { id, days });
+        showMsg(`续期成功：+${days} 天`);
+        await loadLicenses();
+      } catch (err) {
+        showMsg(`续期失败：${err.message}`, false);
+      }
+    }
+
+    async function unbindLicense(id) {
+      try {
+        await request("/admin/api/licenses/unbind", "POST", { id });
+        showMsg("解绑成功");
+        await loadLicenses();
+      } catch (err) {
+        showMsg(`解绑失败：${err.message}`, false);
+      }
+    }
+
+    async function deleteLicense(id) {
+      if (!confirm("确认删除该授权吗？该操作不可恢复")) return;
+      try {
+        await request("/admin/api/licenses/delete", "POST", { id });
+        showMsg("删除成功");
+        await loadLicenses();
+      } catch (err) {
+        showMsg(`删除失败：${err.message}`, false);
+      }
+    }
+
+    function renderRows(items = []) {
+      tbody.innerHTML = items.map(item => {
+        const status = String(item.status || "");
+        const statusClass = status === "active" ? "active" : "disabled";
+        return `
+          <tr>
+            <td>${item.id}</td>
+            <td class="mono">${item.licenseKey || ""}</td>
+            <td class="mono">${item.wechatOpenId || "-"}</td>
+            <td>${item.wechatNickname || "-"}</td>
+            <td><span class="status ${statusClass}">${status || "-"}</span></td>
+            <td>${fmtTime(item.expireAt)}</td>
+            <td class="mono">${item.bindClientId || "-"}</td>
+            <td>${fmtTime(item.lastSeenAt)}</td>
+            <td class="actions">
+              <button class="secondary" onclick="extendLicense(${item.id}, 30)">续期30天</button>
+              <button class="secondary" onclick="unbindLicense(${item.id})">解绑</button>
+              <button class="danger" onclick="deleteLicense(${item.id})">删除</button>
+              ${status === "active"
+                ? `<button class="danger" onclick="setStatus(${item.id}, 'disabled')">停用</button>`
+                : `<button class="warn" onclick="setStatus(${item.id}, 'active')">启用</button>`}
+            </td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    async function loadLicenses() {
+      try {
+        const data = await request(`/admin/api/licenses?page=${state.page}&pageSize=${state.pageSize}`);
+        const result = data.result || { total: 0, items: [] };
+        state.total = Number(result.total || 0);
+        state.items = Array.isArray(result.items) ? result.items : [];
+        renderRows(state.items);
+        renderMetrics();
+        showMsg(`加载成功，共 ${state.total} 条`);
+      } catch (err) {
+        showMsg(`加载失败：${err.message}`, false);
+      }
+    }
+
+    function refreshAll() {
+      loadGlobalSettings();
+      loadLicenses();
+    }
+
+    function setupTabs() {
+      const buttons = Array.from(document.querySelectorAll(".tab-btn"));
+      buttons.forEach(btn => {
+        btn.addEventListener("click", () => {
+          buttons.forEach((el) => el.classList.remove("active"));
+          btn.classList.add("active");
+          const tab = btn.getAttribute("data-tab");
+          document.querySelectorAll(".tab-panel").forEach(panel => {
+            panel.classList.toggle("active", panel.id === `tab-${tab}`);
+          });
+        });
+      });
+    }
+
+    loadToken();
+    setupTabs();
+    renderGlobalSettings();
+    refreshAll();
+  </script>
+</body>
+</html>

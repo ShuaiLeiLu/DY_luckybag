@@ -1,0 +1,169 @@
+.me-page {
+  padding-bottom: 24rpx;
+}
+
+.profile-hero {
+  margin: 0 -28rpx;
+  padding: 46rpx 28rpx 160rpx;
+  background: linear-gradient(135deg, #5c4ef1 0%, #4d43df 100%);
+  border-bottom-left-radius: 58rpx;
+  border-bottom-right-radius: 58rpx;
+}
+
+.profile-hero__body {
+  display: flex;
+  align-items: center;
+  gap: 28rpx;
+  padding: 32rpx 18rpx 0;
+}
+
+.profile-avatar {
+  width: 132rpx;
+  height: 132rpx;
+  border-radius: 50%;
+  border: 10rpx solid rgba(255, 255, 255, 0.92);
+  background: rgba(233, 237, 255, 0.75);
+  color: #7078ef;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 42rpx;
+  font-weight: 800;
+}
+
+.profile-meta {
+  flex: 1;
+}
+
+.profile-name {
+  font-size: 38rpx;
+  font-weight: 800;
+  color: #ffffff;
+}
+
+.profile-level {
+  margin-top: 14rpx;
+  font-size: 28rpx;
+  font-weight: 600;
+  color: rgba(231, 236, 255, 0.9);
+}
+
+.summary-card {
+  margin: -92rpx auto 0;
+  display: flex;
+  align-items: stretch;
+  background: rgba(255, 255, 255, 0.98);
+  border-radius: 34rpx;
+  padding: 28rpx 22rpx;
+  box-shadow: 0 18rpx 48rpx rgba(31, 45, 89, 0.12);
+}
+
+.summary-item {
+  flex: 1;
+  text-align: center;
+}
+
+.summary-label {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #7685a1;
+}
+
+.summary-divider {
+  width: 2rpx;
+  background: #e8edf6;
+  margin: 8rpx 6rpx;
+}
+
+.summary-value-row {
+  margin-top: 18rpx;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8rpx;
+}
+
+.summary-value {
+  font-size: 68rpx;
+  line-height: 1;
+  font-weight: 800;
+  color: #1f2a44;
+}
+
+.summary-unit {
+  font-size: 30rpx;
+  font-weight: 700;
+  color: #35425f;
+}
+
+.status-banner {
+  margin-top: 28rpx;
+  padding: 0 16rpx;
+  font-size: 26rpx;
+  color: #7784a0;
+}
+
+.menu-list {
+  margin-top: 24rpx;
+  display: flex;
+  flex-direction: column;
+  gap: 22rpx;
+}
+
+.menu-card {
+  display: flex;
+  align-items: center;
+  gap: 24rpx;
+  padding: 28rpx;
+  border-radius: 30rpx;
+  background: #ffffff;
+  box-shadow: 0 12rpx 30rpx rgba(28, 54, 108, 0.06);
+}
+
+.menu-card__icon {
+  width: 74rpx;
+  height: 74rpx;
+  border-radius: 24rpx;
+  background: #edf0ff;
+  color: #5a5fe8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 30rpx;
+  font-weight: 700;
+}
+
+.menu-card__content {
+  flex: 1;
+}
+
+.menu-card__title {
+  font-size: 34rpx;
+  font-weight: 800;
+  color: #26314b;
+}
+
+.menu-card__desc {
+  margin-top: 10rpx;
+  font-size: 26rpx;
+  line-height: 1.5;
+  color: #95a1b8;
+}
+
+.menu-card__trailing {
+  display: flex;
+  align-items: center;
+  gap: 18rpx;
+}
+
+.menu-card__count {
+  font-size: 26rpx;
+  font-weight: 700;
+  color: #97a4bb;
+}
+
+.menu-card__arrow {
+  font-size: 42rpx;
+  line-height: 1;
+  color: #c2cada;
+}

@@ -44,10 +44,10 @@ npm run server:run
 npm run server:test:license
 
 # 本地构建服务端镜像
-npm run pool:docker:build
+npm run server:docker:build
 
 # 本地部署服务端
-npm run pool:docker:up
+npm run server:docker:up
 ```
 
 ## 说明

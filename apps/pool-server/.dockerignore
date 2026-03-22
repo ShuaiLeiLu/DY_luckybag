@@ -1,0 +1,10 @@
+.git
+.idea
+.vscode
+
+poolserver
+
+config.json
+*.log
+
+README.md

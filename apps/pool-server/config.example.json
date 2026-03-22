@@ -1,0 +1,49 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 9090,
+    "maxBodyBytes": 6291456
+  },
+  "pool": {
+    "topCacheMax": 2500,
+    "ttlGraceSec": 8,
+    "maxBatchSize": 1000,
+    "topRefreshMS": 400,
+    "expireSweepMS": 500,
+    "shards": 64
+  },
+  "license": {
+    "enabled": false,
+    "unrestricted": false,
+    "adminToken": "CHANGE_ME_ADMIN_TOKEN",
+    "adUnlockDays": 1,
+    "miniAppEnabled": false,
+    "miniAppAppId": "wx_replace_me",
+    "miniAppAppSecret": "replace_me",
+    "miniAppSessionSecret": "replace_with_long_random_secret",
+    "miniAppSessionTTLMin": 1440,
+    "miniAppPagePath": "pages/index/index",
+    "miniAppEnvVersion": "release",
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "root",
+    "password": "REPLACE_ME",
+    "database": "dy_fudai",
+    "params": "charset=utf8mb4&parseTime=true&loc=Local",
+    "maxOpenConns": 8,
+    "maxIdleConns": 4,
+    "connMaxLifetimeMin": 30
+  },
+  "redis": {
+    "enabled": false,
+    "addr": "127.0.0.1:6379",
+    "password": "",
+    "db": 0,
+    "prefix": "lottery_pool",
+    "poolSize": 120,
+    "minIdleConns": 16,
+    "dialTimeoutMS": 2000,
+    "readTimeoutMS": 3000,
+    "writeTimeoutMS": 3000
+  }
+}
