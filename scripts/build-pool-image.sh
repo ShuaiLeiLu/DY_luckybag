@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONTEXT_DIR="${ROOT_DIR}/pool-server-go"
+CONTEXT_DIR="${ROOT_DIR}/apps/pool-server"
 DOCKERFILE_PATH="${CONTEXT_DIR}/Dockerfile"
 
 IMAGE_NAME="${IMAGE_NAME:-dy-pool-server}"

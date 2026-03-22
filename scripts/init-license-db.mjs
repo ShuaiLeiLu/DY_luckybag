@@ -29,9 +29,9 @@ function parseArgs(argv) {
 function normalizeConfigPath(inputPath) {
   const candidate = String(inputPath || '').trim()
   if (candidate) return path.resolve(process.cwd(), candidate)
-  const local = path.resolve(ROOT, 'pool-server-go', 'config.json')
+  const local = path.resolve(ROOT, 'apps', 'pool-server', 'config.json')
   if (fs.existsSync(local)) return local
-  return path.resolve(ROOT, 'pool-server-go', 'config.example.json')
+  return path.resolve(ROOT, 'apps', 'pool-server', 'config.example.json')
 }
 
 function readJSON(filePath) {
@@ -65,7 +65,7 @@ function ensureMysqlClient() {
 function main() {
   const args = parseArgs(process.argv)
   const configPath = normalizeConfigPath(args.config)
-  const sqlPath = path.resolve(ROOT, 'pool-server-go', 'sql', 'license.mysql.sql')
+  const sqlPath = path.resolve(ROOT, 'apps', 'pool-server', 'sql', 'license.mysql.sql')
 
   if (!fs.existsSync(configPath)) {
     throw new Error(`配置文件不存在: ${configPath}`)
@@ -121,4 +121,3 @@ try {
   console.error(`[init-db] ${err.message}`)
   process.exit(1)
 }
-

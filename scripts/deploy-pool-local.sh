@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-POOL_DIR="${ROOT_DIR}/pool-server-go"
+POOL_DIR="${ROOT_DIR}/apps/pool-server"
 BUILD_SCRIPT="${ROOT_DIR}/scripts/build-pool-image.sh"
 
 IMAGE_NAME="${IMAGE_NAME:-dy-pool-server}"
@@ -104,7 +104,7 @@ fi
 if [[ ! -f "${POOL_DIR}/config.json" ]]; then
   if [[ -f "${POOL_DIR}/config.example.json" ]]; then
     cp "${POOL_DIR}/config.example.json" "${POOL_DIR}/config.json"
-    echo ">>> 已自动生成配置文件: pool-server-go/config.json"
+    echo ">>> 已自动生成配置文件: apps/pool-server/config.json"
   else
     echo "缺少配置文件: ${POOL_DIR}/config.json"
     exit 1
