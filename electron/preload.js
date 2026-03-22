@@ -7,6 +7,7 @@ const INVOKE_CHANNELS = new Set([
   'check-browser-exists',
   'launch-browser',
   'set-live-stream-blocking',
+  'set-account-monitoring',
   'navigate-to',
   'execute-script',
   'close-browser',
@@ -24,22 +25,29 @@ const INVOKE_CHANNELS = new Set([
   'attend-lottery',
   'room-like',
   'room-chat',
-  'scan-debug-log'
+  'scan-debug-log',
+  'desktop:get-bootstrap',
+  'desktop:save-settings',
+  'desktop:show-account-window',
+  'desktop:hide-account-window',
+  'desktop:get-update-state',
+  'desktop:check-for-updates',
+  'desktop:download-update',
+  'desktop:install-update',
+  'desktop:append-event'
 ])
 
 const EVENT_CHANNELS = new Set([
   'browser-closed',
-  'douyin-response'
+  'douyin-response',
+  'desktop:update-state'
 ])
 
-/**
- * buildMachineFingerprint 方法：生成稳定机器指纹，优先使用网卡 MAC，其次回退主机信息。
- */
 function buildMachineFingerprint() {
   const interfaces = os.networkInterfaces()
   const macs = []
-  Object.values(interfaces || {}).forEach(list => {
-    ;(Array.isArray(list) ? list : []).forEach(item => {
+  Object.values(interfaces || {}).forEach((list) => {
+    ;(Array.isArray(list) ? list : []).forEach((item) => {
       const mac = String(item?.mac || '').trim().toLowerCase()
       if (!mac || mac === '00:00:00:00:00:00') return
       macs.push(mac)
@@ -57,29 +65,59 @@ function buildMachineFingerprint() {
 
 const MACHINE_FINGERPRINT = buildMachineFingerprint()
 
+function invoke(channel, payload) {
+  if (!INVOKE_CHANNELS.has(channel)) {
+    throw new Error(`IPC invoke channel is not allowed: ${channel}`)
+  }
+  return ipcRenderer.invoke(channel, payload)
+}
+
+function on(channel, handler) {
+  if (!EVENT_CHANNELS.has(channel)) {
+    throw new Error(`IPC event channel is not allowed: ${channel}`)
+  }
+  const wrapped = (_event, ...args) => handler(...args)
+  ipcRenderer.on(channel, wrapped)
+  return () => ipcRenderer.removeListener(channel, wrapped)
+}
+
 contextBridge.exposeInMainWorld('electronAPI', {
   machineFingerprint: MACHINE_FINGERPRINT,
-  /**
-   * invoke 方法：向主进程发起白名单 IPC 调用并返回结果。
-   */
-  invoke(channel, payload) {
-    if (!INVOKE_CHANNELS.has(channel)) {
-      throw new Error(`IPC invoke channel is not allowed: ${channel}`)
+  invoke,
+  on,
+  desktop: {
+    getBootstrap() {
+      return invoke('desktop:get-bootstrap')
+    },
+    saveSettings(settings) {
+      return invoke('desktop:save-settings', settings)
+    },
+    showAccountWindow(accountId) {
+      return invoke('desktop:show-account-window', { accountId })
+    },
+    hideAccountWindow(accountId) {
+      return invoke('desktop:hide-account-window', { accountId })
+    },
+    setAccountMonitoring(accountId, enabled) {
+      return invoke('set-account-monitoring', { accountId, enabled })
+    },
+    getUpdateState() {
+      return invoke('desktop:get-update-state')
+    },
+    checkForUpdates() {
+      return invoke('desktop:check-for-updates')
+    },
+    downloadUpdate() {
+      return invoke('desktop:download-update')
+    },
+    installUpdate() {
+      return invoke('desktop:install-update')
+    },
+    appendEvent(event) {
+      return invoke('desktop:append-event', event)
+    },
+    onUpdateState(handler) {
+      return on('desktop:update-state', handler)
     }
-    return ipcRenderer.invoke(channel, payload)
-  },
-  /**
-   * on 方法：订阅白名单 IPC 事件并返回取消订阅函数。
-   */
-  on(channel, handler) {
-    if (!EVENT_CHANNELS.has(channel)) {
-      throw new Error(`IPC event channel is not allowed: ${channel}`)
-    }
-    /**
-     * wrapped 方法：包装 IPC 事件回调，屏蔽原始 event 参数。
-     */
-    const wrapped = (_event, ...args) => handler(...args)
-    ipcRenderer.on(channel, wrapped)
-    return () => ipcRenderer.removeListener(channel, wrapped)
   }
 })

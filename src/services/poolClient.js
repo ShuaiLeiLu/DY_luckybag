@@ -687,6 +687,30 @@ export async function activateLicense(baseUrl, options = {}) {
 }
 
 /**
+ * 为当前设备开启一次性 3 天试用。
+ * @param {string} baseUrl 服务地址
+ * @param {{clientId?:string,fingerprint?:string,appVersion?:string,timeoutMs?:number}} options 参数
+ * @returns {Promise<object>}
+ */
+export async function startLicenseTrial(baseUrl, options = {}) {
+  const res = await requestJSON(baseUrl, '/license/trial/start', {
+    method: 'POST',
+    body: {
+      clientId: String(options.clientId || '').trim(),
+      fingerprint: String(options.fingerprint || '').trim(),
+      appVersion: String(options.appVersion || '').trim()
+    },
+    timeoutMs: Number(options.timeoutMs || DEFAULT_TIMEOUT_MS)
+  })
+  if (!res.ok) return res
+  const payload = isObject(res.data) ? res.data : {}
+  if (payload.ok !== true) {
+    return { ok: false, status: res.status, data: payload, error: payload?.error || 'license_trial_start_failed' }
+  }
+  return { ok: true, status: res.status, data: payload }
+}
+
+/**
  * 创建一次性扫码绑定会话，二维码 60 秒内有效。
  * @param {string} baseUrl 服务地址
  * @param {{clientId?:string,fingerprint?:string,appVersion?:string,adUnlockDays?:number,timeoutMs?:number}} options 参数

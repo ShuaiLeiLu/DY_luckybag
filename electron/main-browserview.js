@@ -1,24 +1,23 @@
-const { app, BrowserWindow, BrowserView, ipcMain, session, safeStorage, powerSaveBlocker } = require('electron')
+const { app, BrowserWindow, ipcMain, safeStorage, powerSaveBlocker } = require('electron')
 const path = require('path')
 const https = require('https')
 const fs = require('fs')
 const os = require('os')
 const { douyinLiveRemote } = require('./douyinLiveRemote')
 const { createLogger } = require('./logger')
+const { createStateStore, DEFAULT_SETTINGS } = require('./state-store')
+const { createUpdateService } = require('./update-service')
 
 let mainWindow
 let browserViews = new Map() // 存储多个BrowserView实例
 let keepAwakeBlockerId = null
 let browserInstanceSeq = 0
+let stateStore = null
+let updateService = null
 
-// 修改token存储路径到项目根目录
-// 开发环境：项目根目录
-// 生产环境：可执行文件所在目录
-const isDev = !app.isPackaged
 const logger = createLogger('main-browserview', { defaultLevel: 'warn' })
-const tokenStorePath = isDev 
-  ? path.join(__dirname, '..', 'tokens.json')  // 开发环境：项目根目录
-  : path.join(path.dirname(app.getPath('exe')), 'tokens.json')  // 生产环境：exe所在目录
+const secureStateDir = path.join(app.getPath('userData'), 'state')
+const tokenStorePath = path.join(secureStateDir, 'credentials.json')
 const protocolGuardPartitions = new Set()
 const DOUYIN_DESKTOP_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
@@ -108,6 +107,48 @@ function scheduleBrowserRecovery(accountId, reason = '', fallbackUrl = 'https://
   }, 1200)
 }
 
+function ensureStateStore() {
+  if (!stateStore) {
+    stateStore = createStateStore(app.getPath('userData'))
+  }
+  return stateStore
+}
+
+function ensureUpdateService() {
+  if (!updateService) {
+    const settings = ensureStateStore().getSettings()
+    updateService = createUpdateService({
+      feedUrl: settings?.updateFeedUrl || DEFAULT_SETTINGS.updateFeedUrl,
+      onChange(snapshot) {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('desktop:update-state', snapshot)
+        }
+      }
+    })
+  }
+  return updateService
+}
+
+function appendRuntimeEvent(level = 'info', message = '', scope = 'desktop') {
+  try {
+    return ensureStateStore().appendEvent({ level, message, scope })
+  } catch (_) {
+    return null
+  }
+}
+
+function getBootstrapSnapshot() {
+  const store = ensureStateStore()
+  const update = ensureUpdateService().getSnapshot()
+  return {
+    appVersion: app.getVersion(),
+    machineFingerprint: '',
+    settings: store.getSettings(),
+    update,
+    events: store.listEvents(180)
+  }
+}
+
 logger.debug(`Token存储路径: ${tokenStorePath}`)
 
 // 关闭后台节流，避免窗口最小化/被全屏窗口遮挡时脚本冻结
@@ -136,6 +177,7 @@ function canUseSafeStorage() {
  * readTokenStore 方法：读取Token存储。
  */
 function readTokenStore() {
+  fs.mkdirSync(path.dirname(tokenStorePath), { recursive: true })
   if (!fs.existsSync(tokenStorePath)) return {}
 
   const raw = fs.readFileSync(tokenStorePath, 'utf8')
@@ -162,6 +204,7 @@ function readTokenStore() {
  * writeTokenStore 方法：写入Token存储。
  */
 function writeTokenStore(tokens) {
+  fs.mkdirSync(path.dirname(tokenStorePath), { recursive: true })
   const payloadObj = tokens && typeof tokens === 'object' ? tokens : {}
   const jsonText = JSON.stringify(payloadObj)
 
@@ -633,11 +676,17 @@ async function resolveUserInfo(accountId, options = {}) {
  */
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1680,
-    height: 1000,
+    width: 1720,
+    height: 1060,
+    minWidth: 1360,
+    minHeight: 860,
+    backgroundColor: '#081320',
+    autoHideMenuBar: true,
+    titleBarStyle: 'hiddenInset',
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: false,
       preload: path.join(__dirname, 'preload.js'),
       backgroundThrottling: false
     }
@@ -654,6 +703,18 @@ function createWindow() {
 }
 
 app.whenReady().then(createWindow)
+app.whenReady().then(() => {
+  fs.mkdirSync(secureStateDir, { recursive: true })
+  stateStore = createStateStore(app.getPath('userData'))
+  updateService = createUpdateService({
+    feedUrl: stateStore?.getSettings()?.updateFeedUrl || DEFAULT_SETTINGS.updateFeedUrl,
+    onChange(snapshot) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('desktop:update-state', snapshot)
+      }
+    }
+  })
+})
 
 /**
  * ensureKeepAwake 方法：确保常亮状态满足预期。
@@ -724,6 +785,39 @@ app.whenReady().then(() => {
 })
 
 // ... 前面的代码保持不变 ...
+
+function setAccountMonitoringState(accountId, enabled) {
+  const browserData = browserViews.get(accountId)
+  if (!browserData || !browserData.window || browserData.window.isDestroyed()) {
+    return { success: false, error: '浏览器实例不存在', code: 'BROWSER_NOT_FOUND' }
+  }
+  browserData.monitoringEnabled = enabled === true
+  const wc = browserData.window.webContents
+  if (browserData.monitoringEnabled) {
+    try {
+      if (!wc.debugger.isAttached()) {
+        wc.debugger.attach('1.3')
+      }
+      if (typeof browserData.bindDebuggerHooks === 'function') {
+        browserData.bindDebuggerHooks()
+      }
+      wc.debugger.sendCommand('Network.enable').catch(() => {})
+      return { success: true, enabled: true }
+    } catch (error) {
+      logger.error(`[${accountId}] Debugger attach error:`, error)
+      return { success: false, error: error.message || 'monitor_enable_failed' }
+    }
+  }
+  try {
+    if (wc.debugger.isAttached()) {
+      wc.debugger.sendCommand('Network.disable').catch(() => {})
+      wc.debugger.detach()
+    }
+  } catch (_) {
+    // ignore
+  }
+  return { success: true, enabled: false }
+}
 
 /**
  * scan-debug-log 方法：接收渲染进程扫描汇总并输出到主进程控制台，便于 IDE 观察每轮结果。
@@ -883,8 +977,15 @@ ipcMain.handle('check-browser-exists', async (event, accountId) => {
   }
 })
 
-ipcMain.handle('launch-browser', async (event, accountId) => {
+ipcMain.handle('launch-browser', async (event, payload) => {
   try {
+    const accountId = typeof payload === 'string'
+      ? String(payload || '').trim()
+      : String(payload?.accountId || '').trim()
+    const visible = typeof payload === 'object' && payload?.visible === true
+    if (!accountId) {
+      throw new Error('accountId required')
+    }
     const previousBrowserData = browserViews.get(accountId)
     if (previousBrowserData) {
       previousBrowserData.superseded = true
@@ -896,11 +997,16 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
     
     // 创建新窗口用于显示抖音页面
     const browserWindow = new BrowserWindow({
-      width: 833,
-      height: 544,
+      width: 1280,
+      height: 860,
+      show: visible,
+      autoHideMenuBar: true,
+      backgroundColor: '#081320',
+      titleBarStyle: 'hiddenInset',
       webPreferences: {
         nodeIntegration: false,
-        contextIsolation: false,
+        contextIsolation: true,
+        sandbox: false,
         preload: path.join(__dirname, 'browser-preload.js'),
         partition: partition, // 独立的session，每个账号互不干扰
         backgroundThrottling: false
@@ -935,7 +1041,9 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
       lastRecoverAt: 0,
       recoveryTimer: null,
       debuggerBound: false,
-      superseded: false
+      superseded: false,
+      monitoringEnabled: false,
+      bindDebuggerHooks: null
     }
     browserViews.set(accountId, instanceData)
 
@@ -1061,6 +1169,13 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
         }
       })
     }
+    instanceData.bindDebuggerHooks = bindDebuggerHooks
+
+    browserWindow.once('ready-to-show', () => {
+      if (visible && !browserWindow.isDestroyed()) {
+        browserWindow.show()
+      }
+    })
 
     // 监听页面加载完成
     browserWindow.webContents.on('did-finish-load', () => {
@@ -1072,16 +1187,8 @@ ipcMain.handle('launch-browser', async (event, accountId) => {
         logger.debug(`[${accountId}] did-finish-load 静音失败`, e)
       }
       
-      // 开启调试模式以监听网络响应体
-      try {
-        const wc = browserWindow.webContents
-        if (!wc.debugger.isAttached()) {
-          wc.debugger.attach('1.3')
-        }
-        bindDebuggerHooks()
-        wc.debugger.sendCommand('Network.enable')
-      } catch (err) {
-        logger.error(`[${accountId}] Debugger attach error:`, err)
+      if (instanceData.monitoringEnabled === true) {
+        setAccountMonitoringState(accountId, true)
       }
     })
 
@@ -1231,6 +1338,75 @@ ipcMain.handle('close-browser', async (event, accountId) => {
       browserViews.delete(accountId)
     }
     return { success: true }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+ipcMain.handle('set-account-monitoring', async (_event, { accountId, enabled }) => {
+  return setAccountMonitoringState(String(accountId || '').trim(), enabled === true)
+})
+
+ipcMain.handle('desktop:get-bootstrap', async () => {
+  return getBootstrapSnapshot()
+})
+
+ipcMain.handle('desktop:save-settings', async (_event, payload = {}) => {
+  try {
+    const settings = ensureStateStore().saveSettings(payload)
+    const nextFeedUrl = String(settings?.updateFeedUrl || '').trim()
+    if (nextFeedUrl && updateService?.getSnapshot()?.feedUrl !== nextFeedUrl) {
+      updateService = createUpdateService({
+        feedUrl: nextFeedUrl,
+        onChange(snapshot) {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('desktop:update-state', snapshot)
+          }
+        }
+      })
+    }
+    return { success: true, settings }
+  } catch (error) {
+    return { success: false, error: error.message, settings: ensureStateStore().getSettings() }
+  }
+})
+
+ipcMain.handle('desktop:show-account-window', async (_event, { accountId } = {}) => {
+  try {
+    const browserData = browserViews.get(String(accountId || '').trim())
+    if (!browserData || !browserData.window || browserData.window.isDestroyed()) {
+      return { success: false, error: '浏览器实例不存在' }
+    }
+    browserData.window.show()
+    browserData.window.focus()
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+ipcMain.handle('desktop:hide-account-window', async (_event, { accountId } = {}) => {
+  try {
+    const browserData = browserViews.get(String(accountId || '').trim())
+    if (!browserData || !browserData.window || browserData.window.isDestroyed()) {
+      return { success: false, error: '浏览器实例不存在' }
+    }
+    browserData.window.hide()
+    return { success: true }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+ipcMain.handle('desktop:get-update-state', async () => ensureUpdateService().getSnapshot())
+ipcMain.handle('desktop:check-for-updates', async () => ensureUpdateService().check())
+ipcMain.handle('desktop:download-update', async () => ensureUpdateService().download())
+ipcMain.handle('desktop:install-update', async () => ({ success: ensureUpdateService().install() }))
+
+ipcMain.handle('desktop:append-event', async (_event, payload = {}) => {
+  try {
+    const item = appendRuntimeEvent(payload.level, payload.message, payload.scope)
+    return { success: true, item }
   } catch (error) {
     return { success: false, error: error.message }
   }

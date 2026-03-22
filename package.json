@@ -1,14 +1,16 @@
 {
-  "name": "douyin-lottery-assistant",
-  "version": "2.1.0",
-  "description": "抖音福袋自动参与助手",
+  "name": "dy-fudai-desktop",
+  "version": "3.0.0",
+  "description": "Windows 桌面端服务端派单福袋工作台",
   "main": "electron/main-browserview.js",
   "engines": {
-    "node": ">=18.18.0"
+    "node": ">=22.0.0"
   },
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "test:license": "cd pool-server-go && go test ./internal/license",
     "pool:server:go": "cd pool-server-go && sh -c 'if command -v go >/dev/null 2>&1; then exec go run ./cmd/poolserver; elif [ -x \"$HOME/.local/go/bin/go\" ]; then exec \"$HOME/.local/go/bin/go\" run ./cmd/poolserver; else echo \"go not found: install Go or add ~/.local/go/bin to PATH\"; exit 127; fi'",
     "pool:learning:replay": "cd pool-server-go && sh -c 'if command -v go >/dev/null 2>&1; then exec go run ./cmd/learning-replay; elif [ -x \"$HOME/.local/go/bin/go\" ]; then exec \"$HOME/.local/go/bin/go\" run ./cmd/learning-replay; else echo \"go not found: install Go or add ~/.local/go/bin to PATH\"; exit 127; fi'",
     "pool:docker:build": "bash ./scripts/build-pool-image.sh",
@@ -17,43 +19,70 @@
     "pool:db:init:dry": "node ./scripts/init-license-db.mjs --dry-run",
     "pool:dump": "node ./scripts/pool-dump.mjs",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
-    "electron:build:win": "vite build && electron-builder --win portable --x64 && mv \"dist-electron/抖娃福袋 ${npm_package_version}.exe\" \"dist-electron/抖娃福袋 ${npm_package_version}-x64.exe\" && electron-builder --win portable --arm64 && mv \"dist-electron/抖娃福袋 ${npm_package_version}.exe\" \"dist-electron/抖娃福袋 ${npm_package_version}-arm64.exe\""
+    "electron:build:win": "npm run build && electron-builder --win nsis --publish never"
   },
   "dependencies": {
-    "@vicons/ionicons5": "^0.13.0",
-    "axios": "^1.6.0",
-    "naive-ui": "^2.38.0",
-    "qrcode": "^1.5.3",
-    "vue": "^3.4.0"
+    "electron-updater": "^6.6.2",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "^5.0.0",
-    "concurrently": "^8.2.0",
-    "cross-env": "^7.0.3",
-    "electron": "^28.0.0",
-    "electron-builder": "^24.9.0",
-    "vite": "^5.0.0",
-    "wait-on": "^7.2.0"
+    "@tailwindcss/vite": "^4.1.12",
+    "@types/node": "^24.5.2",
+    "@types/react": "^19.2.1",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.2",
+    "babel-plugin-react-compiler": "^1.0.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^40.0.0",
+    "electron-builder": "^26.0.12",
+    "jsdom": "^27.0.0",
+    "tailwindcss": "^4.1.12",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3",
+    "vitest": "^3.2.4",
+    "wait-on": "^9.0.1"
   },
   "build": {
-    "appId": "com.douyin.lottery.assistant",
-    "productName": "抖娃福袋",
+    "appId": "com.dy.fudai.desktop",
+    "productName": "抖娃福袋工作台",
+    "asar": true,
     "directories": {
       "output": "dist-electron"
     },
     "files": [
       "dist/**/*",
-      "electron/**/*"
+      "electron/**/*",
+      "package.json"
     ],
-    "mac": {
-      "target": "dmg"
+    "extraMetadata": {
+      "main": "electron/main-browserview.js"
     },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://updates.example.com/dy-fudai/windows"
+      }
+    ],
     "win": {
       "target": [
-        "portable"
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
-      "icon": "build/icon.ico",
+      "icon": "超人福袋助手_1.0.10/icons/logo.ico",
       "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "allowElevation": true,
+      "artifactName": "${productName}-${version}-setup.${ext}"
     }
   }
 }
