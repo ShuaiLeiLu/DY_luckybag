@@ -23,6 +23,7 @@ const DOUYIN_DESKTOP_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 const DOUYIN_SEC_CH_UA = '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"'
 const DOUYIN_ACCEPT_LANGUAGE = 'zh-CN,zh;q=0.9,en;q=0.8'
+const MAX_VISIBLE_ACCOUNT_WINDOWS = 4
 
 /**
  * 判断扫描追踪日志是否启用（环境变量 DY_SCAN_TRACE，默认关闭）。
@@ -135,6 +136,54 @@ function appendRuntimeEvent(level = 'info', message = '', scope = 'desktop') {
   } catch (_) {
     return null
   }
+}
+
+function listVisibleAccountWindows(excludeAccountId = '') {
+  return Array.from(browserViews.entries())
+    .filter(([accountId, browserData]) => {
+      if (excludeAccountId && accountId === excludeAccountId) return false
+      if (!browserData?.window || browserData.window.isDestroyed()) return false
+      return browserData.window.isVisible()
+    })
+    .sort((a, b) => Number(a[1]?.lastShownAt || 0) - Number(b[1]?.lastShownAt || 0))
+}
+
+function enforceVisibleWindowLimit(excludeAccountId = '') {
+  const visibleEntries = listVisibleAccountWindows(excludeAccountId)
+  while (visibleEntries.length >= MAX_VISIBLE_ACCOUNT_WINDOWS) {
+    const [accountId, browserData] = visibleEntries.shift() || []
+    if (!browserData?.window || browserData.window.isDestroyed()) continue
+    browserData.window.hide()
+    browserData.lastHiddenAt = Date.now()
+    browserData.requestedVisible = false
+    appendRuntimeEvent('info', `预览位已满，自动隐藏账号 ${accountId}`, 'preview')
+  }
+}
+
+function revealAccountWindow(accountId, focus = true) {
+  const browserData = browserViews.get(accountId)
+  if (!browserData || !browserData.window || browserData.window.isDestroyed()) {
+    return { success: false, error: '浏览器实例不存在' }
+  }
+  enforceVisibleWindowLimit(accountId)
+  browserData.requestedVisible = true
+  browserData.lastShownAt = Date.now()
+  browserData.window.show()
+  if (focus) {
+    browserData.window.focus()
+  }
+  return { success: true }
+}
+
+function concealAccountWindow(accountId) {
+  const browserData = browserViews.get(accountId)
+  if (!browserData || !browserData.window || browserData.window.isDestroyed()) {
+    return { success: false, error: '浏览器实例不存在' }
+  }
+  browserData.requestedVisible = false
+  browserData.lastHiddenAt = Date.now()
+  browserData.window.hide()
+  return { success: true }
 }
 
 function getBootstrapSnapshot() {
@@ -999,7 +1048,7 @@ ipcMain.handle('launch-browser', async (event, payload) => {
     const browserWindow = new BrowserWindow({
       width: 1280,
       height: 860,
-      show: visible,
+      show: false,
       autoHideMenuBar: true,
       backgroundColor: '#081320',
       titleBarStyle: 'hiddenInset',
@@ -1043,7 +1092,10 @@ ipcMain.handle('launch-browser', async (event, payload) => {
       debuggerBound: false,
       superseded: false,
       monitoringEnabled: false,
-      bindDebuggerHooks: null
+      bindDebuggerHooks: null,
+      requestedVisible: visible,
+      lastShownAt: visible ? Date.now() : 0,
+      lastHiddenAt: visible ? 0 : Date.now()
     }
     browserViews.set(accountId, instanceData)
 
@@ -1172,8 +1224,8 @@ ipcMain.handle('launch-browser', async (event, payload) => {
     instanceData.bindDebuggerHooks = bindDebuggerHooks
 
     browserWindow.once('ready-to-show', () => {
-      if (visible && !browserWindow.isDestroyed()) {
-        browserWindow.show()
+      if (!browserWindow.isDestroyed() && instanceData.requestedVisible) {
+        revealAccountWindow(accountId)
       }
     })
 
@@ -1190,6 +1242,12 @@ ipcMain.handle('launch-browser', async (event, payload) => {
       if (instanceData.monitoringEnabled === true) {
         setAccountMonitoringState(accountId, true)
       }
+    })
+    browserWindow.on('show', () => {
+      instanceData.lastShownAt = Date.now()
+    })
+    browserWindow.on('hide', () => {
+      instanceData.lastHiddenAt = Date.now()
     })
 
     // 页面跳转后再次强制静音，防止站点恢复音量
@@ -1373,13 +1431,7 @@ ipcMain.handle('desktop:save-settings', async (_event, payload = {}) => {
 
 ipcMain.handle('desktop:show-account-window', async (_event, { accountId } = {}) => {
   try {
-    const browserData = browserViews.get(String(accountId || '').trim())
-    if (!browserData || !browserData.window || browserData.window.isDestroyed()) {
-      return { success: false, error: '浏览器实例不存在' }
-    }
-    browserData.window.show()
-    browserData.window.focus()
-    return { success: true }
+    return revealAccountWindow(String(accountId || '').trim())
   } catch (error) {
     return { success: false, error: error.message }
   }
@@ -1387,12 +1439,7 @@ ipcMain.handle('desktop:show-account-window', async (_event, { accountId } = {})
 
 ipcMain.handle('desktop:hide-account-window', async (_event, { accountId } = {}) => {
   try {
-    const browserData = browserViews.get(String(accountId || '').trim())
-    if (!browserData || !browserData.window || browserData.window.isDestroyed()) {
-      return { success: false, error: '浏览器实例不存在' }
-    }
-    browserData.window.hide()
-    return { success: true }
+    return concealAccountWindow(String(accountId || '').trim())
   } catch (error) {
     return { success: false, error: error.message }
   }

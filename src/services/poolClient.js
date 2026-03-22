@@ -1,5 +1,3 @@
-import { APP_CONFIG } from '../config/app.config'
-
 const DEFAULT_POOL_SERVER_URL_FALLBACK = 'http://110.40.169.26:9090'
 const DEFAULT_TIMEOUT_MS = 3200
 const CLIENT_ID_STORAGE_KEY = 'DY_POOL_CLIENT_ID'
@@ -76,13 +74,10 @@ async function requestJSON(baseUrl, path, { method = 'GET', body = null, timeout
 }
 
 /**
- * 解析当前客户端应使用的筛选服务地址（代码配置文件 > localStorage > env > 默认值）。
+ * 解析当前客户端应使用的筛选服务地址（localStorage > env > 默认值）。
  * @returns {string}
  */
 export function resolvePoolServerUrl() {
-  const fileUrl = normalizePoolServerUrl(APP_CONFIG?.poolServer?.url)
-  if (fileUrl) return fileUrl
-
   try {
     if (typeof window !== 'undefined' && window.localStorage) {
       const saved = normalizePoolServerUrl(window.localStorage.getItem('DY_POOL_SERVER_URL'))

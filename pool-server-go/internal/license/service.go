@@ -55,29 +55,29 @@ type TrialRequest struct {
 
 // Status 描述授权状态返回。
 type Status struct {
-	Enabled      bool           `json:"enabled"`
-	Available    bool           `json:"available"`
-	Authorized   bool           `json:"authorized"`
-	Unrestricted bool           `json:"unrestricted"`
-	State        string         `json:"state"`
-	Message      string         `json:"message"`
-	LicenseID    int64          `json:"licenseId"`
-	LicenseKey   string         `json:"licenseKey"`
-	CustomerName string         `json:"customerName"`
-	Plan         string         `json:"plan"`
-	ExpireAtMS   int64          `json:"expireAt"`
-	MaxClients   int            `json:"maxClients"`
-	MaxAccounts  int            `json:"maxAccounts"`
-	Features     map[string]any `json:"features"`
-	FeatureFlags map[string]bool `json:"featureFlags"`
-	AccessMode   string         `json:"accessMode"`
-	TrialState   string         `json:"trialState"`
-	TrialExpireAtMS int64       `json:"trialExpireAt"`
-	TrialRemainingSec int64     `json:"trialRemainingSec"`
-	RequiresActivation bool     `json:"requiresActivation"`
-	LicensePlan string          `json:"licensePlan"`
-	BoundClient  string         `json:"boundClientId"`
-	CheckedAtMS  int64          `json:"checkedAt"`
+	Enabled            bool            `json:"enabled"`
+	Available          bool            `json:"available"`
+	Authorized         bool            `json:"authorized"`
+	Unrestricted       bool            `json:"unrestricted"`
+	State              string          `json:"state"`
+	Message            string          `json:"message"`
+	LicenseID          int64           `json:"licenseId"`
+	LicenseKey         string          `json:"licenseKey"`
+	CustomerName       string          `json:"customerName"`
+	Plan               string          `json:"plan"`
+	ExpireAtMS         int64           `json:"expireAt"`
+	MaxClients         int             `json:"maxClients"`
+	MaxAccounts        int             `json:"maxAccounts"`
+	Features           map[string]any  `json:"features"`
+	FeatureFlags       map[string]bool `json:"featureFlags"`
+	AccessMode         string          `json:"accessMode"`
+	TrialState         string          `json:"trialState"`
+	TrialExpireAtMS    int64           `json:"trialExpireAt"`
+	TrialRemainingSec  int64           `json:"trialRemainingSec"`
+	RequiresActivation bool            `json:"requiresActivation"`
+	LicensePlan        string          `json:"licensePlan"`
+	BoundClient        string          `json:"boundClientId"`
+	CheckedAtMS        int64           `json:"checkedAt"`
 }
 
 // AdminListQuery 描述授权管理后台分页查询参数。
@@ -423,18 +423,18 @@ func unrestrictedFeatures() map[string]any {
 func (s *Service) buildUnrestrictedStatus(now time.Time) Status {
 	features := unrestrictedFeatures()
 	return Status{
-		Enabled:      true,
-		Available:    true,
-		Authorized:   true,
-		Unrestricted: true,
-		State:        "unrestricted",
-		Message:      "服务端已开启免授权",
-		Features:     features,
-		FeatureFlags: normalizeFeatureFlags(features),
-		AccessMode:   "unrestricted",
+		Enabled:            true,
+		Available:          true,
+		Authorized:         true,
+		Unrestricted:       true,
+		State:              "unrestricted",
+		Message:            "服务端已开启免授权",
+		Features:           features,
+		FeatureFlags:       normalizeFeatureFlags(features),
+		AccessMode:         "unrestricted",
 		RequiresActivation: false,
-		LicensePlan:  "server-unrestricted",
-		CheckedAtMS:  now.UnixMilli(),
+		LicensePlan:        "server-unrestricted",
+		CheckedAtMS:        now.UnixMilli(),
 	}
 }
 
@@ -442,17 +442,17 @@ func (s *Service) buildUnrestrictedStatus(now time.Time) Status {
 func (s *Service) Status(ctx context.Context, clientID, fingerprint string) (Status, error) {
 	now := time.Now()
 	base := Status{
-		Enabled:      s != nil && s.cfg.Enabled,
-		Available:    s != nil && s.db != nil,
-		Authorized:   false,
-		Unrestricted: false,
-		State:        "disabled",
-		Message:      "未启用授权",
-		CheckedAtMS:  now.UnixMilli(),
-		Features:     map[string]any{},
-		FeatureFlags: map[string]bool{},
-		AccessMode:   "disabled",
-		TrialState:   "none",
+		Enabled:            s != nil && s.cfg.Enabled,
+		Available:          s != nil && s.db != nil,
+		Authorized:         false,
+		Unrestricted:       false,
+		State:              "disabled",
+		Message:            "未启用授权",
+		CheckedAtMS:        now.UnixMilli(),
+		Features:           map[string]any{},
+		FeatureFlags:       map[string]bool{},
+		AccessMode:         "disabled",
+		TrialState:         "none",
 		RequiresActivation: false,
 	}
 	if s == nil || !s.cfg.Enabled {
@@ -522,17 +522,17 @@ func (s *Service) Status(ctx context.Context, clientID, fingerprint string) (Sta
 func (s *Service) Activate(ctx context.Context, req ActivateRequest) (Status, error) {
 	now := time.Now()
 	base := Status{
-		Enabled:      s != nil && s.cfg.Enabled,
-		Available:    s != nil && s.db != nil,
-		Authorized:   false,
-		Unrestricted: false,
-		State:        "disabled",
-		Message:      "未启用授权",
-		CheckedAtMS:  now.UnixMilli(),
-		Features:     map[string]any{},
-		FeatureFlags: map[string]bool{},
-		AccessMode:   "disabled",
-		TrialState:   "none",
+		Enabled:            s != nil && s.cfg.Enabled,
+		Available:          s != nil && s.db != nil,
+		Authorized:         false,
+		Unrestricted:       false,
+		State:              "disabled",
+		Message:            "未启用授权",
+		CheckedAtMS:        now.UnixMilli(),
+		Features:           map[string]any{},
+		FeatureFlags:       map[string]bool{},
+		AccessMode:         "disabled",
+		TrialState:         "none",
 		RequiresActivation: false,
 	}
 	if s == nil || !s.cfg.Enabled {
@@ -1317,27 +1317,27 @@ func (s *Service) buildStatus(row licenseRow, clientID, fingerprint string, now 
 
 	features := parseFeatures(row.FeaturesJSON.String)
 	return Status{
-		Enabled:      true,
-		Available:    true,
-		Authorized:   authorized,
-		Unrestricted: false,
-		State:        state,
-		Message:      message,
-		LicenseID:    row.ID,
-		LicenseKey:   maskLicenseKey(row.LicenseKey),
-		CustomerName: row.CustomerName,
-		Plan:         row.PlanName,
-		LicensePlan:  row.PlanName,
-		ExpireAtMS:   row.ExpireAt.UnixMilli(),
-		MaxClients:   row.MaxClients,
-		MaxAccounts:  row.MaxAccounts,
-		Features:     features,
-		FeatureFlags: normalizeFeatureFlags(features),
-		AccessMode:   "licensed",
-		TrialState:   "none",
+		Enabled:            true,
+		Available:          true,
+		Authorized:         authorized,
+		Unrestricted:       false,
+		State:              state,
+		Message:            message,
+		LicenseID:          row.ID,
+		LicenseKey:         maskLicenseKey(row.LicenseKey),
+		CustomerName:       row.CustomerName,
+		Plan:               row.PlanName,
+		LicensePlan:        row.PlanName,
+		ExpireAtMS:         row.ExpireAt.UnixMilli(),
+		MaxClients:         row.MaxClients,
+		MaxAccounts:        row.MaxAccounts,
+		Features:           features,
+		FeatureFlags:       normalizeFeatureFlags(features),
+		AccessMode:         "licensed",
+		TrialState:         "none",
 		RequiresActivation: !authorized,
-		BoundClient:  strings.TrimSpace(row.BindClientID.String),
-		CheckedAtMS:  now.UnixMilli(),
+		BoundClient:        strings.TrimSpace(row.BindClientID.String),
+		CheckedAtMS:        now.UnixMilli(),
 	}
 }
 

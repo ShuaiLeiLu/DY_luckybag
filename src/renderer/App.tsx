@@ -16,6 +16,15 @@ import {
   resolvePoolClientId,
   startLicenseTrial
 } from '../services/poolClient'
+import {
+  createAccountModel,
+  deriveRuntimeState,
+  formatRelative,
+  normalizeLicenseSnapshot,
+  sortAccounts,
+  statusText,
+  statusTone
+} from './lib/runtime'
 import type {
   AccountSession,
   BootstrapSnapshot,
@@ -27,6 +36,11 @@ import type {
 } from '@shared/models'
 
 type AnyRecord = Record<string, any>
+type ServiceResult<T = AnyRecord> = {
+  ok?: boolean
+  data?: T
+  error?: unknown
+}
 
 type UiLogEntry = {
   id: number
@@ -91,12 +105,6 @@ const emptyUpdate: UpdateSnapshot = {
 
 let logSeq = 0
 
-function normalizeNickname(raw: string) {
-  const text = String(raw || '').trim()
-  if (!text) return '未命名账号'
-  return text.length > 18 ? `${text.slice(0, 18)}…` : text
-}
-
 function buildLegacyConfig(settings: DesktopSettings) {
   return {
     stayDuration: settings.stayDuration,
@@ -115,70 +123,6 @@ function buildLegacyConfig(settings: DesktopSettings) {
   }
 }
 
-function createAccountModel(base: Partial<AccountSession> & AnyRecord = {}): AccountSession {
-  return {
-    id: String(base.id || ''),
-    nickname: normalizeNickname(String(base.nickname || '')),
-    userId: String(base.userId || base.id || ''),
-    state: String(base.state || 'waiting'),
-    runtimeState: (base.runtimeState as AccountSession['runtimeState']) || 'ready',
-    actionActive: base.actionActive === true,
-    currentRoom: String(base.currentRoom || ''),
-    token: base.token ?? null,
-    scanRole: (base.scanRole as AccountSession['scanRole']) || 'worker',
-    currentTaskStage: String(base.currentTaskStage || ''),
-    currentTaskLabel: String(base.currentTaskLabel || ''),
-    currentTaskAnchor: String(base.currentTaskAnchor || ''),
-    currentTaskLotteryName: String(base.currentTaskLotteryName || ''),
-    currentTaskLeaseId: String(base.currentTaskLeaseId || ''),
-    currentTaskLeaseExpiresAt: Number(base.currentTaskLeaseExpiresAt || 0),
-    currentTaskLeaseRemainingSec: Number(base.currentTaskLeaseRemainingSec || 0),
-    currentTaskScore: Number(base.currentTaskScore || 0),
-    participationCount: Number(base.participationCount || 0),
-    todayEarnedDiamonds: Number(base.todayEarnedDiamonds || 0),
-    todayLotteryWinCount: Number(base.todayLotteryWinCount || 0),
-    todayRedPacketWinCount: Number(base.todayRedPacketWinCount || 0),
-    todayLotteryWonDiamonds: Number(base.todayLotteryWonDiamonds || 0),
-    todayRedPacketWonDiamonds: Number(base.todayRedPacketWonDiamonds || 0)
-  }
-}
-
-function deriveRuntimeState(account: AccountSession, license: LicenseSnapshot): AccountSession['runtimeState'] {
-  if (license.accessMode === 'locked' && !license.authorized) return 'locked'
-  if (license.accessMode === 'trial' && license.authorized) return 'trial_active'
-  if (account.state === 'paused') return 'paused'
-  if (account.state === 'waiting' && !account.actionActive) return 'ready'
-  if (!account.actionActive) return 'login_required'
-  if (account.currentTaskStage === 'claimed') return 'claiming'
-  if (account.currentTaskStage === 'joining') return 'joining'
-  if (account.currentTaskStage === 'waiting_draw') return 'waiting_result'
-  if (account.currentTaskStage === 'post_draw_stay') return 'cooldown'
-  if (account.scanRole === 'scanner') return 'scanning'
-  if (account.state === 'running') return 'preheating'
-  if (account.state === 'error') return 'error'
-  return 'ready'
-}
-
-function normalizeLicenseSnapshot(raw: AnyRecord = {}): LicenseSnapshot {
-  return {
-    enabled: raw.enabled === true,
-    available: raw.available === true,
-    authorized: raw.authorized === true,
-    unrestricted: raw.unrestricted === true,
-    state: String(raw.state || 'disabled'),
-    message: String(raw.message || ''),
-    accessMode: (raw.accessMode || 'disabled') as LicenseSnapshot['accessMode'],
-    trialState: String(raw.trialState || 'none'),
-    trialExpireAt: Number(raw.trialExpireAt || 0),
-    trialRemainingSec: Number(raw.trialRemainingSec || 0),
-    requiresActivation: raw.requiresActivation === true,
-    licensePlan: String(raw.licensePlan || raw.plan || ''),
-    features: (raw.features && typeof raw.features === 'object') ? raw.features : {},
-    featureFlags: (raw.featureFlags && typeof raw.featureFlags === 'object') ? raw.featureFlags : {},
-    checkedAt: Number(raw.checkedAt || Date.now())
-  }
-}
-
 function buildLogEntry(message: string, type: UiLogEntry['type'] = 'info'): UiLogEntry {
   return {
     id: ++logSeq,
@@ -186,71 +130,6 @@ function buildLogEntry(message: string, type: UiLogEntry['type'] = 'info'): UiLo
     type,
     message: String(message || '')
   }
-}
-
-function statusTone(state: AccountSession['runtimeState']) {
-  switch (state) {
-    case 'locked':
-    case 'error':
-      return 'text-rose-300 border-rose-400/25 bg-rose-500/10'
-    case 'trial_active':
-    case 'ready':
-      return 'text-emerald-200 border-emerald-400/20 bg-emerald-500/10'
-    case 'scanning':
-    case 'claiming':
-      return 'text-cyan-200 border-cyan-400/20 bg-cyan-500/10'
-    case 'joining':
-    case 'preheating':
-    case 'waiting_result':
-      return 'text-amber-200 border-amber-400/20 bg-amber-500/10'
-    case 'cooldown':
-      return 'text-violet-200 border-violet-400/20 bg-violet-500/10'
-    default:
-      return 'text-slate-200 border-slate-400/20 bg-slate-500/10'
-  }
-}
-
-function statusText(state: AccountSession['runtimeState']) {
-  switch (state) {
-    case 'locked':
-      return '已锁定'
-    case 'trial_active':
-      return '试用中'
-    case 'ready':
-      return '待命'
-    case 'scanning':
-      return '扫描'
-    case 'claiming':
-      return '领单'
-    case 'preheating':
-      return '预热'
-    case 'joining':
-      return '参与中'
-    case 'waiting_result':
-      return '等开奖'
-    case 'cooldown':
-      return '停留'
-    case 'error':
-      return '异常'
-    case 'paused':
-      return '暂停'
-    default:
-      return '待登录'
-  }
-}
-
-function formatRelative(seconds: number) {
-  const safe = Math.max(0, Number(seconds || 0))
-  const hours = Math.floor(safe / 3600)
-  const minutes = Math.floor((safe % 3600) / 60)
-  const secs = Math.floor(safe % 60)
-  if (hours > 0) return `${hours}h ${minutes}m`
-  if (minutes > 0) return `${minutes}m ${secs}s`
-  return `${secs}s`
-}
-
-function sortAccounts(accounts: AccountSession[]) {
-  return [...accounts].sort((a, b) => a.id.localeCompare(b.id))
 }
 
 export default function App() {
@@ -364,11 +243,11 @@ export default function App() {
       })
       return
     }
-    const result = await fetchLicenseStatus(baseUrl, {
+    const result = (await fetchLicenseStatus(baseUrl, {
       clientId: poolClientId,
       fingerprint: poolFingerprint,
       timeoutMs: 3000
-    })
+    })) as ServiceResult<{ license?: AnyRecord }>
     if (!result?.ok) {
       setLicense({
         ...emptyLicense,
@@ -391,7 +270,9 @@ export default function App() {
       return
     }
     manager.setPoolServerConfig({ url: settings.poolServerUrl }, { silent: true })
-    const result = await manager.fetchPoolTaskDebugSnapshot(buildLegacyConfig(settings), { limit: 50 })
+    const result = (await manager.fetchPoolTaskDebugSnapshot(buildLegacyConfig(settings), { limit: 50 })) as ServiceResult<{
+      summary?: AnyRecord
+    }>
     if (!result?.ok) {
       setDispatchSummary({
         enabled: true,
@@ -421,7 +302,10 @@ export default function App() {
       setLearningItems([])
       return
     }
-    const result = await manager.fetchPoolLearningDebugSnapshot({ limit: 12 })
+    const result = (await manager.fetchPoolLearningDebugSnapshot({ limit: 12 })) as ServiceResult<{
+      summary?: AnyRecord
+      items?: AnyRecord[]
+    }>
     if (!result?.ok) return
     setLearningSummary(result.data?.summary || null)
     setLearningItems(Array.isArray(result.data?.items) ? result.data.items : [])
@@ -736,12 +620,12 @@ export default function App() {
     }
     setLicenseBusy(true)
     try {
-      const result = await startLicenseTrial(settings.poolServerUrl, {
+      const result = (await startLicenseTrial(settings.poolServerUrl, {
         clientId: poolClientId,
         fingerprint: poolFingerprint,
         appVersion: bootstrap?.appVersion || '3.0.0',
         timeoutMs: 3000
-      })
+      })) as ServiceResult<{ license?: AnyRecord }>
       if (!result?.ok) {
         addLog(`试用开启失败: ${String(result?.error || 'unknown')}`, 'error')
         return
@@ -765,14 +649,14 @@ export default function App() {
     }
     setLicenseBusy(true)
     try {
-      const result = await activateLicense(settings.poolServerUrl, {
+      const result = (await activateLicense(settings.poolServerUrl, {
         licenseKey,
         clientId: poolClientId,
         fingerprint: poolFingerprint,
         appVersion: bootstrap?.appVersion || '3.0.0',
         currentAccounts: accounts.length,
         timeoutMs: 3000
-      })
+      })) as ServiceResult<{ license?: AnyRecord }>
       if (!result?.ok) {
         addLog(`授权激活失败: ${String(result?.data?.license?.message || result?.error || 'unknown')}`, 'error')
         return

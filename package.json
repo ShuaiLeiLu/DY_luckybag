@@ -2,6 +2,7 @@
   "name": "dy-fudai-desktop",
   "version": "3.0.0",
   "description": "Windows 桌面端服务端派单福袋工作台",
+  "author": "lushuailei",
   "main": "electron/main-browserview.js",
   "engines": {
     "node": ">=22.0.0"
@@ -19,7 +20,7 @@
     "pool:db:init:dry": "node ./scripts/init-license-db.mjs --dry-run",
     "pool:dump": "node ./scripts/pool-dump.mjs",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
-    "electron:build:win": "npm run build && electron-builder --win nsis --publish never"
+    "electron:build:win": "npm run build && electron-builder --win nsis --x64 --publish never"
   },
   "dependencies": {
     "electron-updater": "^6.6.2",
@@ -74,7 +75,7 @@
           ]
         }
       ],
-      "icon": "超人福袋助手_1.0.10/icons/logo.ico",
+      "icon": "build/icon.ico",
       "requestedExecutionLevel": "asInvoker"
     },
     "nsis": {

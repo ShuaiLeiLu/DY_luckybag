@@ -179,7 +179,7 @@ func (s *Service) StartTrial(ctx context.Context, req TrialRequest) (Status, err
 func (s *Service) buildTrialStatus(row trialRow, now time.Time) Status {
 	features := defaultTrialFeatures(defaultTrialDays)
 	expireAtMS := row.ExpireAt.UnixMilli()
-	remainingSec := maxInt64(0, row.ExpireAt.Unix()-now.Unix())
+	remainingSec := maxTrialRemainingSec(0, row.ExpireAt.Unix()-now.Unix())
 	state := strings.TrimSpace(strings.ToLower(row.Status))
 	if state == "" {
 		state = "active"
@@ -275,7 +275,7 @@ func (s *Service) markTrialActivatedTx(ctx context.Context, tx *sql.Tx, fingerpr
 	return err
 }
 
-func maxInt64(a, b int64) int64 {
+func maxTrialRemainingSec(a, b int64) int64 {
 	if a > b {
 		return a
 	}
