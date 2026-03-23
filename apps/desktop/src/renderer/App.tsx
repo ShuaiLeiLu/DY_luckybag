@@ -272,12 +272,12 @@ export default function App() {
     appendEvent(type === 'success' ? 'success' : type === 'warning' ? 'warning' : type === 'error' ? 'error' : 'info', message)
   })
 
-  const syncRuntimeRef = useEffectEvent((account: AccountSession) => {
+  const syncRuntimeRef = (account: AccountSession) => {
     runtimeAccountsRef.current.set(account.id, {
       ...(runtimeAccountsRef.current.get(account.id) || {}),
       ...account
     })
-  })
+  }
 
   const patchAccount = useEffectEvent((accountId: string, patch: Partial<AccountSession>) => {
     const runtime = runtimeAccountsRef.current.get(accountId)

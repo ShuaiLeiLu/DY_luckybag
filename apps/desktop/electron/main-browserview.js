@@ -25,6 +25,7 @@ const DOUYIN_SEC_CH_UA = '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrom
 const DOUYIN_ACCEPT_LANGUAGE = 'zh-CN,zh;q=0.9,en;q=0.8'
 const MAX_VISIBLE_ACCOUNT_WINDOWS = 4
 const DESKTOP_DEV_SERVER_URL = 'http://127.0.0.1:5173'
+const unreadableLegacyTokenPaths = new Set()
 
 /**
  * 判断扫描追踪日志是否启用（环境变量 DY_SCAN_TRACE，默认关闭）。
@@ -301,6 +302,13 @@ function readTokenStore() {
         merged[accountId] = mergeTokenRecords(merged[accountId], tokenInfo)
       })
     } catch (error) {
+      if (path.resolve(filePath) !== path.resolve(tokenStorePath)) {
+        if (!unreadableLegacyTokenPaths.has(filePath)) {
+          unreadableLegacyTokenPaths.add(filePath)
+          logger.warn(`跳过旧Token存储: ${filePath} ${error?.message || error}`)
+        }
+        return
+      }
       logger.warn(`读取Token失败: ${filePath} ${error?.message || error}`)
     }
   })
@@ -792,6 +800,111 @@ async function resolveUserInfo(accountId, options = {}) {
   return null
 }
 
+function getDesktopIndexFile() {
+  return path.join(__dirname, '../dist/index.html')
+}
+
+function buildDesktopFailureHtml(message = '', detail = '') {
+  const escapeHtml = (value) => String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+
+  return `<!DOCTYPE html>
+  <html lang="zh-CN">
+    <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <title>抖娃福袋工作台</title>
+      <style>
+        html, body {
+          margin: 0;
+          width: 100%;
+          height: 100%;
+          background: linear-gradient(160deg, #05111f, #0d1b2a 48%, #091625 100%);
+          color: #ecf4ff;
+          font-family: "IBM Plex Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
+        }
+        body {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 24px;
+          box-sizing: border-box;
+        }
+        .panel {
+          width: min(720px, 100%);
+          padding: 28px;
+          border-radius: 28px;
+          border: 1px solid rgba(148, 163, 184, 0.18);
+          background: linear-gradient(180deg, rgba(15, 29, 46, 0.92), rgba(8, 18, 30, 0.78));
+          box-shadow: 0 18px 60px rgba(3, 10, 18, 0.42);
+        }
+        h1 {
+          margin: 0 0 12px;
+          font-size: 24px;
+        }
+        p {
+          margin: 0;
+          line-height: 1.7;
+          color: #b8c6db;
+        }
+        pre {
+          margin: 18px 0 0;
+          white-space: pre-wrap;
+          word-break: break-word;
+          padding: 16px;
+          border-radius: 18px;
+          background: rgba(2, 6, 23, 0.45);
+          color: #dbeafe;
+          font-size: 13px;
+          line-height: 1.6;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="panel">
+        <h1>桌面端启动失败</h1>
+        <p>${escapeHtml(message || '前端页面未能正常加载。')}</p>
+        ${detail ? `<pre>${escapeHtml(detail)}</pre>` : ''}
+      </div>
+    </body>
+  </html>`
+}
+
+function attachMainWindowDiagnostics(windowRef) {
+  if (!windowRef || windowRef.isDestroyed()) return
+
+  windowRef.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    const normalized = String(message || '').trim()
+    if (!normalized) return
+    logger.warn(`[desktop-console:${level}] ${normalized} (${sourceId || 'unknown'}:${line || 0})`)
+  })
+
+  windowRef.webContents.on('render-process-gone', (_event, details) => {
+    logger.error(`[desktop] render-process-gone: ${details?.reason || 'unknown'}`)
+  })
+
+  windowRef.webContents.on('unresponsive', () => {
+    logger.error('[desktop] window became unresponsive')
+  })
+
+  windowRef.webContents.on('did-finish-load', () => {
+    logger.info('[desktop] did-finish-load')
+  })
+
+  windowRef.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame) return
+    logger.error(`[desktop] did-fail-load code=${errorCode} url=${validatedURL || ''} error=${errorDescription || 'unknown'}`)
+  })
+
+  windowRef.webContents.on('preload-error', (_event, preloadPath, error) => {
+    logger.error(`[desktop] preload-error: ${preloadPath} ${error?.message || error}`)
+  })
+}
+
 /**
  * createWindow 方法：创建窗口配置。
  */
@@ -812,14 +925,29 @@ function createWindow() {
       backgroundThrottling: false
     }
   })
+  attachMainWindowDiagnostics(mainWindow)
 
   // 开发环境加载 Vite 服务器
   const isDev = !app.isPackaged
   if (isDev) {
-    mainWindow.loadURL(DESKTOP_DEV_SERVER_URL)
+    mainWindow.loadURL(DESKTOP_DEV_SERVER_URL).catch(async (error) => {
+      logger.error(`[desktop] dev server load failed: ${error?.message || error}`)
+      const fallbackFile = getDesktopIndexFile()
+      if (fs.existsSync(fallbackFile)) {
+        await mainWindow.loadFile(fallbackFile).catch(async (fallbackError) => {
+          await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildDesktopFailureHtml('开发服务器未能加载，本地兜底页面也加载失败。', `${error?.message || error}\n${fallbackError?.message || fallbackError}`))}`)
+        })
+        return
+      }
+      await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildDesktopFailureHtml('开发服务器未能加载。', error?.message || error))}`)
+    })
     // mainWindow.webContents.openDevTools() // 已禁用：不需要自动打开控制台
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
+    const desktopIndexFile = getDesktopIndexFile()
+    mainWindow.loadFile(desktopIndexFile).catch(async (error) => {
+      logger.error(`[desktop] loadFile failed: ${desktopIndexFile} ${error?.message || error}`)
+      await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildDesktopFailureHtml('本地桌面页面未能加载。', `${desktopIndexFile}\n${error?.message || error}`))}`)
+    })
   }
 }
 
