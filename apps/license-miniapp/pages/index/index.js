@@ -1,13 +1,16 @@
 const app = getApp()
-const { SIGNIN_REWARD_DAYS, AD_UNLOCK_DAYS } = require('../../config')
+const { SIGNIN_REWARD_DAYS, AD_UNLOCK_DAYS, REWARDED_VIDEO_AD_UNIT_ID } = require('../../config')
 const { request, wxLogin } = require('../../utils/request')
+const { parseSceneCode } = require('../../utils/scene')
 
 function buildRewardCopy(unlockDays) {
   const safeDays = Math.max(1, Number(unlockDays || SIGNIN_REWARD_DAYS || AD_UNLOCK_DAYS || 1))
   return {
     unlockDays: safeDays,
     gainText: `+${safeDays}天`,
-    subtitleText: `每日签到一次，可免费续签 ${safeDays} 天授权`
+    subtitleText: `每日签到一次，可免费续签 ${safeDays} 天授权`,
+    buttonText: `观看广告后签到（${safeDays}天）`,
+    grantMaskText: `系统正在同步 ${safeDays} 天授权时长，请稍候`
   }
 }
 
@@ -80,11 +83,16 @@ function mergeHistory(list, nextItem) {
   return deduped.slice(0, 6)
 }
 
+function hasRewardedVideoSupport() {
+  return typeof wx !== 'undefined' && typeof wx.createRewardedVideoAd === 'function'
+}
+
 Page({
   data: {
     sceneCode: '',
     bootstrapReady: false,
     adUnlockDays: Number(SIGNIN_REWARD_DAYS || AD_UNLOCK_DAYS || 1),
+    rewardAdUnitId: String(REWARDED_VIDEO_AD_UNIT_ID || '').trim(),
     sessionLoading: false,
     bindLoading: false,
     rewardLoading: false,
@@ -96,7 +104,9 @@ Page({
     remainingUnit: '小时',
     rewardGainText: buildRewardCopy(SIGNIN_REWARD_DAYS || AD_UNLOCK_DAYS || 1).gainText,
     rewardSubtitleText: buildRewardCopy(SIGNIN_REWARD_DAYS || AD_UNLOCK_DAYS || 1).subtitleText,
-    rewardButtonText: `立即签到（${buildRewardCopy(SIGNIN_REWARD_DAYS || AD_UNLOCK_DAYS || 1).gainText}）`,
+    rewardButtonText: buildRewardCopy(SIGNIN_REWARD_DAYS || AD_UNLOCK_DAYS || 1).buttonText,
+    grantMaskText: buildRewardCopy(SIGNIN_REWARD_DAYS || AD_UNLOCK_DAYS || 1).grantMaskText,
+
     licenseSubtitleText: '完成绑定后即可解锁完整功能',
     licenseChipText: '待解锁',
     history: [],
@@ -129,9 +139,8 @@ Page({
       : []
     this.setData({
       sceneCode,
-      history: cachedHistory.length
-        ? cachedHistory
-        : []
+
+      history: cachedHistory.length ? cachedHistory : []
     })
     if (sceneCode) {
       app.globalData.lastSceneCode = sceneCode
@@ -157,11 +166,7 @@ Page({
   },
 
   extractSceneCode(options = {}) {
-    if (options.scene) return decodeURIComponent(String(options.scene)).trim()
-    if (options.sceneCode) return String(options.sceneCode).trim()
-    if (options.bindToken) return String(options.bindToken).trim()
-    if (app.globalData.lastSceneCode) return String(app.globalData.lastSceneCode).trim()
-    return ''
+    return parseSceneCode(options.scene || options.sceneCode || options.bindToken || app.globalData.lastSceneCode || '')
   },
 
   async ensureSession() {
@@ -173,7 +178,7 @@ Page({
       }
       if (!this.data.sceneCode) {
         this.setData({
-          deviceStatusText: '等待设备扫码'
+          deviceStatusText: '等待设备扫码',
         })
         return
       }
@@ -242,6 +247,8 @@ Page({
       adUnlockDays: rewardCopy.unlockDays,
       rewardGainText: rewardCopy.gainText,
       rewardSubtitleText: rewardCopy.subtitleText,
+      rewardButtonText: rewardCopy.buttonText,
+      grantMaskText: rewardCopy.grantMaskText,
       deviceStatusText,
       licenseSubtitleText,
       licenseChipText,
@@ -305,15 +312,102 @@ Page({
   },
 
   handleDailySignin() {
-    if (!this.data.bindReady) {
-      wx.showToast({ title: '请先完成客户端绑定', icon: 'none' })
+    if (this.data.rewardLoading) {
       return
     }
-    if (this.data.rewardDisabled || this.data.rewardLoading) {
+    if (!this.data.bindReady) {
+      wx.showToast({ title: '请先在“我的”页扫一扫绑定桌面端', icon: 'none' })
+      return
+    }
+    if (this.data.rewardDisabled) {
+      wx.showToast({ title: '今日已签到', icon: 'none' })
       return
     }
     this.setData({ rewardLoading: true })
-    this.grantAuthorization()
+    this.performSigninFlow()
+  },
+
+  async performSigninFlow() {
+    try {
+      if (!this.data.rewardAdUnitId) {
+        wx.showToast({ title: '未配置广告位，直接签到', icon: 'none' })
+        await this.grantAuthorization()
+        return
+      }
+      if (!hasRewardedVideoSupport()) {
+        wx.showToast({ title: '当前设备不支持激励视频广告', icon: 'none' })
+        return
+      }
+      const watched = await this.playRewardedVideoAd(this.data.rewardAdUnitId)
+      if (!watched) {
+        wx.showToast({ title: '需完整观看广告后才能签到', icon: 'none' })
+        return
+      }
+      await this.grantAuthorization()
+    } catch (error) {
+      const message = this.normalizeError(error)
+      wx.showToast({ title: message || '签到失败', icon: 'none' })
+    } finally {
+      this.setData({ rewardLoading: false })
+    }
+  },
+
+  playRewardedVideoAd(adUnitId) {
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const finish = (value, shouldReject = false) => {
+        if (settled) return
+        settled = true
+        if (shouldReject) {
+          reject(value)
+        } else {
+          resolve(value)
+        }
+      }
+
+      let ad
+      try {
+        ad = wx.createRewardedVideoAd({ adUnitId })
+      } catch (error) {
+        finish(error, true)
+        return
+      }
+      if (!ad || typeof ad.load !== 'function' || typeof ad.show !== 'function') {
+        finish(new Error('rewarded_video_not_supported'), true)
+        return
+      }
+
+      const onClose = (res) => {
+        if (res && res.isEnded === false) {
+          wx.showToast({ title: '广告未完整观看', icon: 'none' })
+          finish(false)
+          return
+        }
+        finish(true)
+      }
+
+      const onError = (error) => {
+        finish(error || new Error('rewarded_video_failed'), true)
+      }
+
+      if (typeof ad.offClose === 'function') {
+        ad.offClose(onClose)
+      }
+      if (typeof ad.offError === 'function') {
+        ad.offError(onError)
+      }
+      ad.onClose(onClose)
+      if (typeof ad.onError === 'function') {
+        ad.onError(onError)
+      }
+
+      Promise.resolve()
+        .then(() => ad.load())
+        .then(() => ad.show())
+        .catch((error) => {
+          onError(error)
+        })
+    })
   },
 
   async grantAuthorization() {
@@ -346,7 +440,7 @@ Page({
       if (message === '今日已签到，请明天再来') {
         this.setData({
           rewardDisabled: true,
-          rewardButtonText: '签到成功',
+          rewardButtonText: '今日已签到',
           rewardSubtitleText: '今日已完成签到，明天可再次领取'
         })
         wx.showToast({ title: '今日已签到', icon: 'none' })
@@ -355,8 +449,8 @@ Page({
       this.setData({
         deviceStatusText: `授权失败：${message}`
       })
+      throw error
     } finally {
-      this.setData({ rewardLoading: false })
       this.setData({ grantSubmitting: false })
     }
   },
@@ -366,6 +460,7 @@ Page({
     const bindStatus = String(session.status || '')
     const grantedAt = Number(session.grantedAt || session.grantedAtMS || 0)
     const rewardDays = Math.max(1, Number(session.adUnlockDays || this.data.adUnlockDays || SIGNIN_REWARD_DAYS || AD_UNLOCK_DAYS || 1))
+    const rewardCopy = buildRewardCopy(rewardDays)
     const cachedSigninAt = Number(app.globalData.lastSigninAt || getStoredSigninAt() || 0)
     const signedToday =
       session.signedToday === true ||
@@ -400,10 +495,11 @@ Page({
       rewardDisabled: signedToday,
       rewardSubtitleText: signedToday
         ? '今日已完成签到，明天可再次领取'
-        : buildRewardCopy(rewardDays).subtitleText,
+        : rewardCopy.subtitleText,
       rewardButtonText: signedToday
-        ? '签到成功'
-        : `立即签到（${buildRewardCopy(rewardDays).gainText}）`,
+        ? '今日已签到'
+        : rewardCopy.buttonText,
+      grantMaskText: rewardCopy.grantMaskText,
       session: {
         status: bindStatus,
         clientLabel: String(session.clientLabel || ''),
@@ -452,7 +548,7 @@ Page({
   },
 
   normalizeError(error) {
-    const raw = String((error && error.message) || error || '').trim()
+    const raw = String((error && (error.message || error.errMsg || error.errCode)) || error || '').trim()
     const mapping = {
       miniapp_disabled: '小程序授权未启用',
       miniapp_config_incomplete: '服务端未配置小程序参数',
@@ -465,6 +561,8 @@ Page({
       miniapp_session_expired: '小程序登录已过期，请重新进入',
       miniapp_session_invalid: '小程序会话无效，请重新进入',
       miniapp_signin_already_claimed: '今日已签到，请明天再来',
+      rewarded_video_not_supported: '当前设备不支持激励视频广告',
+      rewarded_video_failed: '激励视频广告加载失败，请稍后重试',
       bind_ref_required: '缺少绑定参数，请从桌面端扫码进入',
       bind_scene_invalid: '二维码无效，请回到桌面端刷新',
       bind_session_expired: '二维码已过期，请回到桌面刷新',
@@ -474,3 +572,8 @@ Page({
     return mapping[raw] || raw || '请求失败'
   }
 })
+
+
+
+
+

@@ -1,0 +1,42 @@
+{
+    "poolServerUrl":  "http://127.0.0.1:9090",
+    "updateFeedUrl":  "https://updates.example.com/dy-fudai/windows",
+    "stayDuration":  18,
+    "enableRedPacket":  true,
+    "randomInteraction":  true,
+    "hitRate":  {
+                    "enabled":  true,
+                    "value":  0.08
+                },
+    "secondInspect":  {
+                          "enabled":  true,
+                          "value":  0.05
+                      },
+    "filterFanClub":  {
+                          "enabled":  true
+                      },
+    "onlyPhysicalPrize":  {
+                              "enabled":  false
+                          },
+    "preferBigRedPacket":  {
+                               "enabled":  true,
+                               "threshold":  40
+                           },
+    "filterOnline":  {
+                         "enabled":  false,
+                         "value":  0
+                     },
+    "participationCount":  {
+                               "enabled":  false,
+                               "value":  120
+                           },
+    "singleAccountDuration":  {
+                                  "enabled":  false,
+                                  "value":  6
+                              },
+    "scanConfig":  {
+                       "countPerPage":  15,
+                       "pagesPerCategory":  12,
+                       "allCount":  24
+                   }
+}

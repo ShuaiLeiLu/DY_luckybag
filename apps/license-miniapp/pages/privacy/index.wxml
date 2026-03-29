@@ -8,7 +8,7 @@
     <view class="privacy-section">
       <view class="privacy-section__title">1. 收集的信息</view>
       <view class="privacy-section__text">
-        为完成设备绑定与授权，本小程序会收集微信 OpenID、设备绑定标识（设备指纹）、授权状态与操作记录。
+        为完成设备绑定与授权，本小程序会收集微信用户唯一标识、设备绑定标识（设备指纹）、授权状态与操作记录。
       </view>
     </view>
 

@@ -12,6 +12,8 @@ import LotteryManager from '../services/LotteryManager-lite'
 import {
   FIXED_POOL_SERVER_URL,
   activateLicense,
+  createLicenseBindSession,
+  fetchLicenseBindSessionStatus,
   fetchLicenseStatus,
   resolveLicenseFingerprint,
   resolvePoolClientId,
@@ -48,6 +50,18 @@ type UiLogEntry = {
   time: string
   type: 'info' | 'warning' | 'error' | 'success'
   message: string
+}
+
+type LicenseBindSession = {
+  bindToken?: string
+  sceneCode?: string
+  status?: string
+  message?: string
+  remainingSec?: number
+  adUnlockDays?: number
+  authorized?: boolean
+  wechatNickname?: string
+  expireAt?: number
 }
 
 const defaultSettings: DesktopSettings = {
@@ -224,10 +238,83 @@ function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
+function normalizeBindSession(raw: AnyRecord | null | undefined): LicenseBindSession | null {
+  if (!raw || typeof raw !== 'object') return null
+  return {
+    bindToken: String(raw.bindToken || ''),
+    sceneCode: String(raw.sceneCode || ''),
+    status: String(raw.status || ''),
+    message: String(raw.message || ''),
+    remainingSec: Number(raw.remainingSec || 0),
+    adUnlockDays: Number(raw.adUnlockDays || 0),
+    authorized: raw.authorized === true,
+    wechatNickname: String(raw.wechatNickname || ''),
+    expireAt: Number(raw.expireAt || 0)
+  }
+}
+
+function formatAccessModeText(accessMode: LicenseSnapshot['accessMode']) {
+  switch (accessMode) {
+    case 'unrestricted':
+      return '服务端免授权'
+    case 'licensed':
+      return '正式授权'
+    case 'trial':
+      return '试用中'
+    case 'locked':
+      return '已锁定'
+    case 'disabled':
+      return '未启用'
+    default:
+      return '未知模式'
+  }
+}
+
+function formatUpdateStatusText(status: UpdateSnapshot['status']) {
+  switch (status) {
+    case 'idle':
+      return '空闲'
+    case 'checking':
+      return '检查中'
+    case 'available':
+      return '可更新'
+    case 'downloading':
+      return '下载中'
+    case 'downloaded':
+      return '下载完成'
+    case 'error':
+      return '更新异常'
+    case 'disabled':
+      return '未启用'
+    default:
+      return '未知状态'
+  }
+}
+
+function formatLicensePlanText(license: LicenseSnapshot) {
+  const raw = String(license?.licensePlan || '').trim()
+  const key = raw.toLowerCase()
+  if (!key) {
+    return license.authorized ? formatAccessModeText(license.accessMode) : '未授权'
+  }
+  if (key.includes('unrestricted')) return '服务端免授权'
+  if (key.includes('trial')) return '3天试用'
+  if (key.includes('licensed') || key.includes('pro')) return '正式授权'
+  return '自定义授权'
+}
+
+function formatScanRoleText(role: string) {
+  if (role === 'scanner') return '扫描账号'
+  if (role === 'worker') return '执行账号'
+  return role || '-'
+}
+
 export default function App() {
   const manager = useMemo(() => new LotteryManager(), [])
   const runtimeAccountsRef = useRef<Map<string, AnyRecord>>(new Map())
   const loginTimersRef = useRef<Map<string, number>>(new Map())
+  const logListRef = useRef<HTMLDivElement | null>(null)
+  const logAutoFollowRef = useRef(true)
   const [bootstrap, setBootstrap] = useState<BootstrapSnapshot | null>(null)
   const [settings, setSettings] = useState<DesktopSettings>(defaultSettings)
   const [accounts, setAccounts] = useState<AccountSession[]>([])
@@ -242,11 +329,17 @@ export default function App() {
   const [licenseKey, setLicenseKey] = useState('')
   const [selectedAccountId, setSelectedAccountId] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [authDrawerOpen, setAuthDrawerOpen] = useState(false)
   const [logQuery, setLogQuery] = useState('')
   const [licenseBusy, setLicenseBusy] = useState(false)
+  const [bindBusy, setBindBusy] = useState(false)
+  const [bindSession, setBindSession] = useState<LicenseBindSession | null>(null)
+  const [bindCodeVersion, setBindCodeVersion] = useState(0)
+  const bindNoticeRef = useRef<'idle' | 'success' | 'expired'>('idle')
   const deferredLogQuery = useDeferredValue(logQuery)
 
   const poolClientId = useMemo(() => resolvePoolClientId(), [])
+  const activePoolServerUrl = useMemo(() => settings.poolServerUrl.trim() || FIXED_POOL_SERVER_URL, [settings.poolServerUrl])
   const poolFingerprint = useMemo(() => resolveLicenseFingerprint(), [])
 
   const selectedAccount = accounts.find((item) => item.id === selectedAccountId) || accounts[0] || null
@@ -255,6 +348,29 @@ export default function App() {
     if (!deferredLogQuery.trim()) return true
     return entry.message.toLowerCase().includes(deferredLogQuery.trim().toLowerCase())
   })
+  const latestFilteredLogId = filteredLogs.length > 0 ? filteredLogs[filteredLogs.length - 1].id : 0
+
+  const handleLogListScroll = useEffectEvent(() => {
+    const container = logListRef.current
+    if (!container) return
+    const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight
+    logAutoFollowRef.current = distanceToBottom <= 48
+  })
+
+  useEffect(() => {
+    if (!deferredLogQuery.trim()) return
+    logAutoFollowRef.current = true
+  }, [deferredLogQuery])
+
+  useEffect(() => {
+    if (!logAutoFollowRef.current) return
+    const raf = window.requestAnimationFrame(() => {
+      const container = logListRef.current
+      if (!container) return
+      container.scrollTop = container.scrollHeight
+    })
+    return () => window.cancelAnimationFrame(raf)
+  }, [latestFilteredLogId, deferredLogQuery])
 
   const appendEvent = useEffectEvent(async (level: RecoveryEvent['level'], message: string, scope = 'desktop') => {
     try {
@@ -272,12 +388,12 @@ export default function App() {
     appendEvent(type === 'success' ? 'success' : type === 'warning' ? 'warning' : type === 'error' ? 'error' : 'info', message)
   })
 
-  const syncRuntimeRef = useEffectEvent((account: AccountSession) => {
+  const syncRuntimeRef = (account: AccountSession) => {
     runtimeAccountsRef.current.set(account.id, {
       ...(runtimeAccountsRef.current.get(account.id) || {}),
       ...account
     })
-  })
+  }
 
   const patchAccount = useEffectEvent((accountId: string, patch: Partial<AccountSession>) => {
     const runtime = runtimeAccountsRef.current.get(accountId)
@@ -350,12 +466,33 @@ export default function App() {
 
   const refreshLicense = useEffectEvent(async () => {
     const baseUrl = settings.poolServerUrl.trim() || FIXED_POOL_SERVER_URL
-    const result = (await fetchLicenseStatus(baseUrl, {
+    const requestStatus = async (timeoutMs: number) => (await fetchLicenseStatus(baseUrl, {
       clientId: poolClientId,
       fingerprint: poolFingerprint,
-      timeoutMs: 3000
+      timeoutMs
     })) as ServiceResult<{ license?: AnyRecord }>
+
+    let result = await requestStatus(3000)
+    const firstError = String(result?.error || '')
+    if (!result?.ok && /timeout/i.test(firstError)) {
+      result = await requestStatus(9000)
+    }
+
     if (!result?.ok) {
+      const errorText = String(result?.error || '未知错误')
+      const keepCurrent = license.authorized
+        || license.unrestricted
+        || license.accessMode === 'unrestricted'
+        || license.accessMode === 'licensed'
+        || license.accessMode === 'trial'
+      if (keepCurrent) {
+        setLicense((current) => ({
+          ...current,
+          message: `授权服务请求超时：${errorText}（保持当前授权状态）`,
+          checkedAt: Date.now()
+        }))
+        return
+      }
       setLicense({
         ...emptyLicense,
         enabled: true,
@@ -363,7 +500,7 @@ export default function App() {
         accessMode: 'locked',
         requiresActivation: true,
         state: 'backend_unavailable',
-        message: `授权服务不可用: ${String(result?.error || 'unknown')}`,
+        message: `授权服务不可用：${errorText}`,
         checkedAt: Date.now()
       })
       return
@@ -372,7 +509,7 @@ export default function App() {
   })
 
   const refreshDispatch = useEffectEvent(async () => {
-    const poolServerUrl = settings.poolServerUrl.trim() || FIXED_POOL_SERVER_URL
+    const poolServerUrl = activePoolServerUrl
     manager.setPoolServerConfig({ url: poolServerUrl }, { silent: true })
     const result = (await manager.fetchPoolTaskDebugSnapshot(buildLegacyConfig(settings), { limit: 50 })) as ServiceResult<{
       summary?: AnyRecord
@@ -476,7 +613,7 @@ export default function App() {
           patchAccount(accountId, { state: 'waiting', actionActive: false })
           return
         }
-        await window.electronAPI.invoke('navigate-to', { accountId, url: 'https://live.douyin.com/' })
+        await window.electronAPI.invoke('navigate-to', { accountId, url: 'https://www.douyin.com' })
       }
 
       await window.electronAPI.desktop.setAccountMonitoring(accountId, true)
@@ -556,7 +693,7 @@ export default function App() {
       }
       patchAccount(accountId, { state: 'opened', actionActive: false })
       await window.electronAPI.desktop.setAccountMonitoring(accountId, false)
-      await window.electronAPI.invoke('navigate-to', { accountId, url: 'https://live.douyin.com/' })
+      await window.electronAPI.invoke('navigate-to', { accountId, url: 'https://www.douyin.com' })
       await window.electronAPI.desktop.showAccountWindow(accountId).catch(() => {})
       void ensureAccountLoginPrompt(accountId, runtime.nickname || accountId)
       stopLoginPolling(accountId)
@@ -713,9 +850,12 @@ export default function App() {
   const totalWins = accounts.reduce((sum, account) => sum + Number(account.todayLotteryWinCount || 0), 0)
   const totalDiamonds = accounts.reduce((sum, account) => sum + Number(account.todayEarnedDiamonds || 0), 0)
   const totalParticipation = accounts.reduce((sum, account) => sum + Number(account.participationCount || 0), 0)
+  const accessModeText = formatAccessModeText(license.accessMode)
+  const updateStatusText = formatUpdateStatusText(updateState.status)
+  const licensePlanText = formatLicensePlanText(license)
 
   async function handleStartTrial() {
-    const poolServerUrl = settings.poolServerUrl.trim() || FIXED_POOL_SERVER_URL
+    const poolServerUrl = activePoolServerUrl
     setLicenseBusy(true)
     try {
       const result = (await startLicenseTrial(poolServerUrl, {
@@ -725,19 +865,36 @@ export default function App() {
         timeoutMs: 3000
       })) as ServiceResult<{ license?: AnyRecord }>
       if (!result?.ok) {
-        addLog(`试用开启失败: ${String(result?.error || 'unknown')}`, 'error')
+        const errorText = String(result?.data?.license?.message || result?.error || '未知错误')
+        const message = `试用开启失败：${errorText}`
+        setLicense((current) => ({
+          ...current,
+          message,
+          checkedAt: Date.now()
+        }))
+        addLog(message, 'error')
+        await refreshLicense()
         return
       }
       const nextLicense = normalizeLicenseSnapshot(result.data?.license || {})
       setLicense(nextLicense)
-      addLog(nextLicense.authorized ? '设备试用已开启，完整功能已解锁 3 天' : nextLicense.message, nextLicense.authorized ? 'success' : 'warning')
+      addLog(nextLicense.authorized ? '试用已开启' : nextLicense.message, nextLicense.authorized ? 'success' : 'warning')
+    } catch (error) {
+      const errorText = String((error as Error)?.message || error || '未知错误')
+      const message = `试用开启失败：${errorText}`
+      setLicense((current) => ({
+        ...current,
+        message,
+        checkedAt: Date.now()
+      }))
+      addLog(message, 'error')
     } finally {
       setLicenseBusy(false)
     }
   }
 
   async function handleActivate() {
-    const poolServerUrl = settings.poolServerUrl.trim() || FIXED_POOL_SERVER_URL
+    const poolServerUrl = activePoolServerUrl
     if (!licenseKey.trim()) {
       addLog('请输入授权码', 'warning')
       return
@@ -753,17 +910,147 @@ export default function App() {
         timeoutMs: 3000
       })) as ServiceResult<{ license?: AnyRecord }>
       if (!result?.ok) {
-        addLog(`授权激活失败: ${String(result?.data?.license?.message || result?.error || 'unknown')}`, 'error')
+        const errorText = String(result?.data?.license?.message || result?.error || '未知错误')
+        const message = `授权激活失败：${errorText}`
+        setLicense((current) => ({
+          ...current,
+          message,
+          checkedAt: Date.now()
+        }))
+        addLog(message, 'error')
+        await refreshLicense()
         return
       }
       const nextLicense = normalizeLicenseSnapshot(result.data?.license || {})
       setLicense(nextLicense)
       setLicenseKey('')
-      addLog(nextLicense.authorized ? '授权激活成功，完整功能已解锁' : nextLicense.message, nextLicense.authorized ? 'success' : 'warning')
+      addLog(nextLicense.authorized ? '授权激活成功' : nextLicense.message, nextLicense.authorized ? 'success' : 'warning')
+    } catch (error) {
+      const errorText = String((error as Error)?.message || error || '未知错误')
+      const message = `授权激活失败：${errorText}`
+      setLicense((current) => ({
+        ...current,
+        message,
+        checkedAt: Date.now()
+      }))
+      addLog(message, 'error')
     } finally {
       setLicenseBusy(false)
     }
   }
+
+  const applyBindSession = useEffectEvent(async (nextSession: LicenseBindSession | null) => {
+    setBindSession(nextSession)
+    if (!nextSession) {
+      bindNoticeRef.current = 'idle'
+      return
+    }
+    const status = String(nextSession.status || '').toLowerCase()
+    const authorized = nextSession.authorized === true || status === 'authorized' || status === 'granted'
+    if (authorized) {
+      if (bindNoticeRef.current !== 'success') {
+        addLog('Mini-app binding complete, license status refreshed', 'success')
+      }
+      bindNoticeRef.current = 'success'
+      await refreshLicense()
+      return
+    }
+    if ((status === 'expired' || Number(nextSession.remainingSec || 0) <= 0) && bindNoticeRef.current !== 'expired') {
+      bindNoticeRef.current = 'expired'
+      addLog('Mini-app QR code expired, please regenerate', 'warning')
+    }
+  })
+
+  const refreshBindSessionStatus = useEffectEvent(async (manual = false) => {
+    const bindToken = String(bindSession?.bindToken || '').trim()
+    if (!bindToken) {
+      if (manual) addLog('Please generate mini-app code first', 'warning')
+      return
+    }
+    if (manual) setBindBusy(true)
+    try {
+      const result = (await fetchLicenseBindSessionStatus(activePoolServerUrl, {
+        bindToken,
+        timeoutMs: 3000
+      })) as ServiceResult<{ session?: AnyRecord }>
+      if (!result?.ok) {
+        const errorText = String((result?.data as AnyRecord)?.error || result?.error || 'unknown_error')
+        if (manual) addLog(`Fetch mini-app bind status failed: ${errorText}`, 'error')
+        return
+      }
+      const nextSession = normalizeBindSession(result.data?.session || null)
+      await applyBindSession(nextSession)
+      if (manual && nextSession && !nextSession.authorized) {
+        addLog(nextSession.message || 'Bind status refreshed', 'info')
+      }
+    } catch (error) {
+      if (manual) addLog(`Fetch mini-app bind status error: ${String((error as Error)?.message || error || 'unknown_error')}`, 'error')
+    } finally {
+      if (manual) setBindBusy(false)
+    }
+  })
+
+  async function handleCreateMiniAppBindSession() {
+    setBindBusy(true)
+    try {
+      const result = (await createLicenseBindSession(activePoolServerUrl, {
+        clientId: poolClientId,
+        fingerprint: poolFingerprint,
+        appVersion: bootstrap?.appVersion || '3.0.0',
+        timeoutMs: 3000
+      })) as ServiceResult<{ session?: AnyRecord }>
+      if (!result?.ok) {
+        const errorText = String((result?.data as AnyRecord)?.error || result?.error || 'unknown_error')
+        addLog(`Create mini-app bind session failed: ${errorText}`, 'error')
+        return
+      }
+      bindNoticeRef.current = 'idle'
+      const nextSession = normalizeBindSession(result.data?.session || null)
+      await applyBindSession(nextSession)
+      setBindCodeVersion((current) => current + 1)
+      setAuthDrawerOpen(true)
+      if (!nextSession?.authorized) {
+        addLog('Please scan with mini-app to complete binding', 'info')
+      }
+    } catch (error) {
+      addLog(`Create mini-app bind session error: ${String((error as Error)?.message || error || 'unknown_error')}`, 'error')
+    } finally {
+      setBindBusy(false)
+    }
+  }
+
+  useEffect(() => {
+    const bindToken = String(bindSession?.bindToken || '').trim()
+    const status = String(bindSession?.status || '').toLowerCase()
+    const done = !bindToken || bindSession?.authorized || status === 'authorized' || status === 'granted' || status === 'expired' || Number(bindSession?.remainingSec || 0) <= 0
+    if (done) return
+    const timer = window.setTimeout(() => {
+      void refreshBindSessionStatus(false)
+    }, 2200)
+    return () => window.clearTimeout(timer)
+  }, [bindSession?.authorized, bindSession?.bindToken, bindSession?.remainingSec, bindSession?.status])
+
+  const handleAccountWindowVisibility = useEffectEvent(async (account: AccountSession, visible: boolean) => {
+    const accountName = account.nickname || account.id
+    try {
+      const result = visible
+        ? (await window.electronAPI.desktop.showAccountWindow(account.id) as AnyRecord)
+        : (await window.electronAPI.desktop.hideAccountWindow(account.id) as AnyRecord)
+      if (!result?.success) {
+        addLog('[' + accountName + ']' + (visible ? ' 显示窗口失败：' : ' 隐藏窗口失败：') + String(result?.error || '未知错误'), 'warning')
+        return
+      }
+      addLog('[' + accountName + ']' + (visible ? ' 窗口已显示' : ' 窗口已隐藏'), 'info')
+    } catch (error) {
+      addLog('[' + accountName + ']' + (visible ? ' 显示窗口异常：' : ' 隐藏窗口异常：') + String((error as Error)?.message || error || '未知错误'), 'error')
+    }
+  })
+
+  const bindSceneCode = String(bindSession?.sceneCode || '').trim()
+  const bindToken = String(bindSession?.bindToken || '').trim()
+  const bindMiniAppCodeUrl = bindSceneCode || bindToken
+    ? `${activePoolServerUrl.replace(/\/+$/, '')}/license/bind-session/miniapp-code?${bindSceneCode ? `sceneCode=${encodeURIComponent(bindSceneCode)}` : `bindToken=${encodeURIComponent(bindToken)}`}&v=${bindCodeVersion}`
+    : ''
 
   const gateLocked = license.accessMode === 'locked' && license.requiresActivation
 
@@ -786,7 +1073,7 @@ export default function App() {
             <div className="flex flex-col gap-4 2xl:flex-row 2xl:items-start 2xl:justify-between">
               <div className="space-y-3">
                 <div className="inline-flex items-center gap-3 rounded-full border border-emerald-400/20 bg-emerald-500/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-emerald-200">
-                  Hidden Execution Pool
+                  隐藏执行池
                 </div>
                 <div>
                   <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-3xl">抖娃福袋工作台</h1>
@@ -798,7 +1085,7 @@ export default function App() {
               <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-4">
                 <StatCard label="在线账号" value={String(runningCount)} tone="emerald" helper={`${accounts.length} 个账号已接入`} />
                 <StatCard label="候选可领" value={String(dispatchSummary.availableCandidates)} tone="cyan" helper={dispatchSummary.connected ? '共享池已连接' : dispatchSummary.error || '等待连接'} />
-                <StatCard label="今日参与" value={String(totalParticipation)} tone="amber" helper={license.licensePlan || '未授权'} />
+                <StatCard label="今日参与" value={String(totalParticipation)} tone="amber" helper={licensePlanText} />
                 <StatCard label="今日收益" value={`${totalDiamonds}`} tone="violet" helper={`中奖 ${totalWins} 次`} />
               </div>
             </div>
@@ -808,6 +1095,9 @@ export default function App() {
               </button>
               <button className="w-full rounded-full border border-slate-600/70 px-4 py-2 transition hover:border-slate-400 hover:bg-slate-800/60 sm:w-auto" onClick={() => setSettingsOpen(true)}>
                 设置中心
+              </button>
+              <button className="w-full rounded-full border border-cyan-500/50 bg-cyan-500/10 px-4 py-2 text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-500/20 sm:w-auto" onClick={() => setAuthDrawerOpen(true)}>
+                授权中心
               </button>
               <button className="w-full rounded-full border border-slate-600/70 px-4 py-2 transition hover:border-slate-400 hover:bg-slate-800/60 sm:w-auto" onClick={() => void window.electronAPI.desktop.checkForUpdates()}>
                 检查更新
@@ -825,8 +1115,8 @@ export default function App() {
             <div className="grid gap-4 2xl:min-h-0">
               <div className="glass rounded-[26px] p-4">
                 <div className="flex flex-wrap items-center gap-3 text-sm text-slate-300">
-                  <ClusterBadge label="授权模式" value={license.accessMode} />
-                  <ClusterBadge label="更新状态" value={updateState.status} />
+                  <ClusterBadge label="授权模式" value={accessModeText} />
+                  <ClusterBadge label="更新状态" value={updateStatusText} />
                   <ClusterBadge label="候选活跃" value={String(dispatchSummary.activeCandidates)} />
                   <ClusterBadge label="候选有效" value={String(dispatchSummary.validCandidates)} />
                   <ClusterBadge label="学习桶" value={String(learningItems.length)} />
@@ -862,8 +1152,8 @@ export default function App() {
                         }
                       }}
                       onRelogin={() => void startAccountWithLogin(account.id, true)}
-                      onInspect={() => void window.electronAPI.desktop.showAccountWindow(account.id)}
-                      onHide={() => void window.electronAPI.desktop.hideAccountWindow(account.id)}
+                      onInspect={() => void handleAccountWindowVisibility(account, true)}
+                      onHide={() => void handleAccountWindowVisibility(account, false)}
                       onDelete={() => void removeAccount(account.id)}
                     />
                   ))}
@@ -877,19 +1167,24 @@ export default function App() {
             </div>
 
             <div className="grid gap-4 xl:grid-cols-2 2xl:min-h-0 2xl:grid-cols-1">
-              <aside className="glass flex flex-col rounded-[26px] p-4 2xl:min-h-0">
+              <aside className="glass scrollbar-thin flex flex-col overflow-auto rounded-[26px] p-4 2xl:min-h-0">
                 <div className="mb-4">
                   <h2 className="text-lg font-semibold text-white">任务详情</h2>
                   <p className="text-sm text-slate-400">选中账号后查看当前租约、候选池和派单细节。</p>
                 </div>
                 <div className="space-y-3">
                   <DetailRow label="账号" value={selectedAccount?.nickname || '未选择'} />
-                  <DetailRow label="角色" value={selectedAccount?.scanRole || '-'} />
+                  <DetailRow label="角色" value={formatScanRoleText(selectedAccount?.scanRole || '')} />
                   <DetailRow label="状态" value={selectedAccount ? statusText(selectedAccount.runtimeState) : '-'} />
                   <DetailRow label="当前任务" value={selectedAccount?.currentTaskLotteryName || selectedAccount?.currentTaskLabel || '暂无'} />
                   <DetailRow label="主播" value={selectedAccount?.currentTaskAnchor || '-'} />
                   <DetailRow label="租约剩余" value={selectedAccount?.currentTaskLeaseRemainingSec ? formatRelative(selectedAccount.currentTaskLeaseRemainingSec) : '-'} />
                 </div>
+                {!selectedAccount?.currentTaskLotteryName && !selectedAccount?.currentTaskLabel ? (
+                  <div className="mt-3 rounded-2xl border border-slate-700/70 bg-slate-950/45 px-3 py-3 text-xs text-slate-400">
+                    暂无派单任务。请先在左侧点击“启动”，等待服务端分配后这里会显示主播与租约信息。
+                  </div>
+                ) : null}
 
                 <div className="mt-4">
                   <div className="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">候选样本</div>
@@ -942,7 +1237,11 @@ export default function App() {
                     className="w-full rounded-full border border-slate-700/80 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-400/60 sm:w-40"
                   />
                 </div>
-                <div className="scrollbar-thin flex-1 space-y-2 overflow-auto pr-1">
+                <div
+                  ref={logListRef}
+                  onScroll={handleLogListScroll}
+                  className="scrollbar-thin flex-1 space-y-2 overflow-auto pr-1"
+                >
                   {filteredLogs.map((entry) => (
                     <div key={entry.id} className="rounded-2xl border border-slate-700/70 bg-slate-950/55 p-3">
                       <div className="flex items-center justify-between gap-3">
@@ -955,7 +1254,7 @@ export default function App() {
                                 ? 'border-rose-400/20 bg-rose-500/10 text-rose-200'
                                 : 'border-slate-400/20 bg-slate-500/10 text-slate-200'
                         }`}>
-                          {entry.type}
+                          {{ info: '信息', warning: '警告', error: '错误', success: '成功' }[entry.type]}
                         </span>
                         <span className="text-xs text-slate-500">{entry.time}</span>
                       </div>
@@ -979,6 +1278,22 @@ export default function App() {
         onNestedChange={(updater) => void persistSettings(updater(settings))}
         onInstallUpdate={() => void window.electronAPI.desktop.installUpdate()}
         onDownloadUpdate={() => void window.electronAPI.desktop.downloadUpdate()}
+      />
+
+      <LicenseDrawer
+        open={authDrawerOpen}
+        license={license}
+        licenseKey={licenseKey}
+        licenseBusy={licenseBusy}
+        bindBusy={bindBusy}
+        bindSession={bindSession}
+        miniAppCodeUrl={bindMiniAppCodeUrl}
+        onLicenseKeyChange={setLicenseKey}
+        onStartTrial={() => void handleStartTrial()}
+        onActivate={() => void handleActivate()}
+        onCreateBindSession={() => void handleCreateMiniAppBindSession()}
+        onRefreshBindStatus={() => void refreshBindSessionStatus(true)}
+        onClose={() => setAuthDrawerOpen(false)}
       />
     </div>
   )
@@ -1064,8 +1379,8 @@ function AccountCard(props: {
           onChange={(event) => props.onRoleChange(event.target.value as AccountSession['scanRole'])}
           className="w-full rounded-full border border-slate-700/80 bg-slate-900 px-3 py-2 text-slate-100 outline-none sm:w-auto"
         >
-          <option value="scanner">Scanner</option>
-          <option value="worker">Worker</option>
+          <option value="scanner">扫描账号</option>
+          <option value="worker">执行账号</option>
         </select>
       </div>
 
@@ -1127,7 +1442,7 @@ function LicenseGate(props: {
       <section className="glass flex min-h-[320px] flex-col justify-between rounded-[32px] p-5 sm:p-6 xl:p-8">
         <div>
           <div className="inline-flex items-center gap-3 rounded-full border border-cyan-400/20 bg-cyan-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.28em] text-cyan-100">
-            Service Dispatch Edition
+            服务端派单版
           </div>
           <h1 className="mt-6 max-w-xl text-3xl font-semibold leading-tight text-white sm:text-4xl">
             3 天设备试用 + 正式授权
@@ -1152,10 +1467,10 @@ function LicenseGate(props: {
         </div>
 
         <div className="mt-4 grid gap-3 text-sm text-slate-300 sm:grid-cols-2">
-          <DeviceField label="Pool Server" value={FIXED_POOL_SERVER_URL} />
-          <DeviceField label="Client ID" value={props.clientId} />
-          <DeviceField label="Fingerprint" value={props.fingerprint} />
-          <DeviceField label="Access Mode" value={props.license.accessMode} />
+          <DeviceField label="服务端地址" value={FIXED_POOL_SERVER_URL} />
+          <DeviceField label="客户端编号" value={props.clientId} />
+          <DeviceField label="设备指纹" value={props.fingerprint} />
+          <DeviceField label="授权模式" value={formatAccessModeText(props.license.accessMode)} />
         </div>
 
         <div className="mt-4 rounded-[24px] border border-cyan-400/20 bg-cyan-500/10 p-4 text-sm text-cyan-100">
@@ -1212,6 +1527,106 @@ function DeviceField(props: { label: string; value: string }) {
   )
 }
 
+function LicenseDrawer(props: {
+  open: boolean
+  license: LicenseSnapshot
+  licenseKey: string
+  licenseBusy: boolean
+  bindBusy: boolean
+  bindSession: LicenseBindSession | null
+  miniAppCodeUrl: string
+  onLicenseKeyChange: (value: string) => void
+  onStartTrial: () => void
+  onActivate: () => void
+  onCreateBindSession: () => void
+  onRefreshBindStatus: () => void
+  onClose: () => void
+}) {
+  const bindStatus = props.bindSession?.status || '-'
+  const bindMessage = props.bindSession?.message || '-'
+  const bindToken = String(props.bindSession?.bindToken || '').trim()
+  const bindSceneCode = String(props.bindSession?.sceneCode || '').trim()
+  const bindRemaining = props.bindSession ? formatRelative(Number(props.bindSession.remainingSec || 0)) : '-'
+
+  return (
+    <div className={`pointer-events-none fixed inset-3 z-30 transition duration-300 md:inset-y-4 md:left-auto md:right-4 md:w-[380px] ${props.open ? 'translate-x-0 opacity-100' : 'translate-x-[110%] opacity-0'}`}>
+      <div className="glass pointer-events-auto flex h-full flex-col rounded-[30px] p-5">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-xl font-semibold text-white">Auth Center</h2>
+            <p className="mt-1 text-sm text-slate-400">Trial, license key activation, and mini-app binding.</p>
+          </div>
+          <button className="rounded-full border border-slate-700/80 px-3 py-2 text-sm text-slate-200 transition hover:bg-slate-800/60" onClick={props.onClose}>
+            关闭
+          </button>
+        </div>
+
+        <div className="scrollbar-thin mt-5 flex-1 space-y-5 overflow-auto pr-1">
+          <Panel title="授权状态">
+            <DetailRow label="授权模式" value={formatAccessModeText(props.license.accessMode)} />
+            <DetailRow label="授权状态" value={props.license.authorized ? '已授权' : '未授权'} />
+            <DetailRow label="试用剩余" value={props.license.accessMode === 'trial' ? formatRelative(props.license.trialRemainingSec) : '-'} />
+            <DetailRow label="服务提示" value={props.license.message || '-'} />
+          </Panel>
+
+          <Panel title="授权码">
+            <Input label="授权码" value={props.licenseKey} onChange={props.onLicenseKeyChange} />
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <button
+                className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-3 py-3 text-sm text-emerald-100 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={props.licenseBusy}
+                onClick={props.onStartTrial}
+              >
+                {props.licenseBusy ? '处理中...' : '开始试用'}
+              </button>
+              <button
+                className="rounded-2xl border border-cyan-400/20 bg-cyan-500/10 px-3 py-3 text-sm text-cyan-100 transition hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={props.licenseBusy}
+                onClick={props.onActivate}
+              >
+                {props.licenseBusy ? '处理中...' : '激活授权'}
+              </button>
+            </div>
+          </Panel>
+
+          <Panel title="绑定小程序">
+            <div className="rounded-2xl border border-slate-700/80 bg-slate-950/50 p-3">
+              {props.miniAppCodeUrl ? (
+                <img src={props.miniAppCodeUrl} alt="mini-app-code" className="mx-auto h-44 w-44 rounded-xl border border-slate-700/80 bg-slate-900 object-contain" />
+              ) : (
+                <div className="flex h-44 items-center justify-center rounded-xl border border-dashed border-slate-700 text-sm text-slate-400">
+                  点击“生成小程序码”后显示
+                </div>
+              )}
+            </div>
+            <DetailRow label="绑定状态" value={bindStatus} />
+            <DetailRow label="剩余时长" value={bindRemaining} />
+            <DetailRow label="绑定令牌" value={bindToken || '-'} />
+            <DetailRow label="场景码" value={bindSceneCode || '-'} />
+            <DetailRow label="绑定提示" value={bindMessage} />
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <button
+                className="rounded-2xl border border-cyan-400/20 bg-cyan-500/10 px-3 py-3 text-sm text-cyan-100 transition hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={props.bindBusy}
+                onClick={props.onCreateBindSession}
+              >
+                {props.bindBusy ? '处理中...' : '生成小程序码'}
+              </button>
+              <button
+                className="rounded-2xl border border-slate-600/80 bg-slate-900/80 px-3 py-3 text-sm text-slate-100 transition hover:bg-slate-800/60 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={props.bindBusy || !bindToken}
+                onClick={props.onRefreshBindStatus}
+              >
+                刷新绑定状态
+              </button>
+            </div>
+          </Panel>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function SettingsDrawer(props: {
   open: boolean
   settings: DesktopSettings
@@ -1238,8 +1653,8 @@ function SettingsDrawer(props: {
 
         <div className="scrollbar-thin mt-5 flex-1 space-y-5 overflow-auto pr-1">
           <Panel title="服务端">
-            <StaticField label="Pool Server URL" value={FIXED_POOL_SERVER_URL} />
-            <Input label="Update Feed URL" value={props.settings.updateFeedUrl} onChange={(value) => props.onChange({ updateFeedUrl: value })} />
+            <StaticField label="服务端地址" value={FIXED_POOL_SERVER_URL} />
+            <Input label="更新地址" value={props.settings.updateFeedUrl} onChange={(value) => props.onChange({ updateFeedUrl: value })} />
           </Panel>
 
           <Panel title="筛选">
@@ -1304,7 +1719,7 @@ function SettingsDrawer(props: {
           </Panel>
 
           <Panel title="更新与学习">
-            <DetailRow label="更新状态" value={props.updateState.status} />
+            <DetailRow label="更新状态" value={formatUpdateStatusText(props.updateState.status)} />
             <DetailRow label="当前版本" value={props.updateState.currentVersion} />
             <DetailRow label="最新版本" value={props.updateState.latestVersion || '-'} />
             <DetailRow label="学习反馈数" value={String(props.learningSummary?.feedbackCount || 0)} />
@@ -1368,7 +1783,7 @@ function SwitchRow(props: { label: string; checked: boolean; onChange: (checked:
     >
       <span>{props.label}</span>
       <span className={`rounded-full px-3 py-1 text-xs font-semibold ${props.checked ? 'bg-emerald-400 text-slate-950' : 'bg-slate-700 text-slate-200'}`}>
-        {props.checked ? 'ON' : 'OFF'}
+        {props.checked ? '开' : '关'}
       </span>
     </button>
   )

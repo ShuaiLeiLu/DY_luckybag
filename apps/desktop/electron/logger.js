@@ -30,6 +30,7 @@ function createLogger(scope = 'electron', options = {}) {
   const fallbackLevel = normalizeLogLevel(options.defaultLevel || 'warn', 'warn')
   let currentLevel = normalizeLogLevel(readEnvLogLevel(), fallbackLevel)
   const prefix = scope ? `[${scope}]` : ''
+  let streamBroken = false
 
   /**
    * shouldLog 方法：判断当前日志级别是否允许输出该条日志。
@@ -41,7 +42,21 @@ function createLogger(scope = 'electron', options = {}) {
    */
   const emit = (level, printer) => (...args) => {
     if (!shouldLog(level)) return
-    printer(prefix, ...args)
+    if (streamBroken) return
+    try {
+      printer(prefix, ...args)
+    } catch (error) {
+      const code = error?.code || error?.errno
+      if (code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || code === 'EBADF') {
+        streamBroken = true
+        return
+      }
+      try {
+        process.stderr.write(`${prefix} logger write failed: ${String(error?.message || error)}\n`)
+      } catch (_) {
+        streamBroken = true
+      }
+    }
   }
 
   return {

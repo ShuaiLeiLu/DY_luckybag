@@ -1,11 +1,10 @@
-const fs = require('fs')
+﻿const fs = require('fs')
 const path = require('path')
 const { DatabaseSync } = require('node:sqlite')
 
-const FIXED_POOL_SERVER_URL = 'http://110.40.169.26:9090'
-
-const DEFAULT_SETTINGS = Object.freeze({
-  poolServerUrl: FIXED_POOL_SERVER_URL,
+const DESKTOP_CONFIG_PATH = path.resolve(__dirname, '..', 'config.json')
+const BUILTIN_DEFAULT_SETTINGS = Object.freeze({
+  poolServerUrl: 'http://110.40.169.26:9090',
   updateFeedUrl: 'https://updates.example.com/dy-fudai/windows',
   stayDuration: 18,
   enableRedPacket: true,
@@ -33,12 +32,42 @@ function safeParseJSON(raw, fallback) {
   }
 }
 
-function normalizeSettings(raw = {}) {
+function asPlainObject(value, fallback = {}) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value
+  return fallback
+}
+
+function mergeSettings(base, patch = {}) {
+  const next = asPlainObject(patch, {})
   return {
-    ...DEFAULT_SETTINGS,
-    ...(raw && typeof raw === 'object' ? raw : {}),
-    poolServerUrl: FIXED_POOL_SERVER_URL
+    ...base,
+    ...next,
+    hitRate: { ...base.hitRate, ...asPlainObject(next.hitRate) },
+    secondInspect: { ...base.secondInspect, ...asPlainObject(next.secondInspect) },
+    filterFanClub: { ...base.filterFanClub, ...asPlainObject(next.filterFanClub) },
+    onlyPhysicalPrize: { ...base.onlyPhysicalPrize, ...asPlainObject(next.onlyPhysicalPrize) },
+    preferBigRedPacket: { ...base.preferBigRedPacket, ...asPlainObject(next.preferBigRedPacket) },
+    filterOnline: { ...base.filterOnline, ...asPlainObject(next.filterOnline) },
+    participationCount: { ...base.participationCount, ...asPlainObject(next.participationCount) },
+    singleAccountDuration: { ...base.singleAccountDuration, ...asPlainObject(next.singleAccountDuration) },
+    scanConfig: { ...base.scanConfig, ...asPlainObject(next.scanConfig) }
   }
+}
+
+function loadDesktopConfigDefaults() {
+  try {
+    if (!fs.existsSync(DESKTOP_CONFIG_PATH)) return {}
+    const raw = fs.readFileSync(DESKTOP_CONFIG_PATH, 'utf8')
+    return asPlainObject(safeParseJSON(raw, {}), {})
+  } catch (_) {
+    return {}
+  }
+}
+
+const DEFAULT_SETTINGS = Object.freeze(mergeSettings(BUILTIN_DEFAULT_SETTINGS, loadDesktopConfigDefaults()))
+
+function normalizeSettings(raw = {}) {
+  return mergeSettings(DEFAULT_SETTINGS, raw)
 }
 
 function createStateStore(baseDir) {

@@ -1,13 +1,16 @@
 .container {
   min-height: 100vh;
-  background: #f8fafc;
+  background:
+    radial-gradient(circle at top left, rgba(99, 102, 241, 0.12), transparent 26%),
+    radial-gradient(circle at top right, rgba(245, 158, 11, 0.12), transparent 22%),
+    #f8fafc;
   padding: 34rpx 40rpx 198rpx;
   box-sizing: border-box;
 }
 
 .header {
   margin-top: 26rpx;
-  margin-bottom: 42rpx;
+  margin-bottom: 26rpx;
 }
 
 .page-title {
@@ -193,7 +196,7 @@
 }
 
 .action-card-wrapper {
-  margin-bottom: 42rpx;
+  margin-bottom: 26rpx;
   padding: 12rpx;
   border-radius: 40rpx;
   background: linear-gradient(90deg, #fff7ed 0%, #fffbeb 100%);
@@ -502,3 +505,4 @@
     opacity: 1;
   }
 }
+

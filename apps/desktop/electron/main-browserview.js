@@ -19,10 +19,6 @@ const logger = createLogger('main-browserview', { defaultLevel: 'warn' })
 const secureStateDir = path.join(app.getPath('userData'), 'state')
 const tokenStorePath = path.join(secureStateDir, 'credentials.json')
 const protocolGuardPartitions = new Set()
-const DOUYIN_DESKTOP_UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
-const DOUYIN_SEC_CH_UA = '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"'
-const DOUYIN_ACCEPT_LANGUAGE = 'zh-CN,zh;q=0.9,en;q=0.8'
 const MAX_VISIBLE_ACCOUNT_WINDOWS = 4
 const DESKTOP_DEV_SERVER_URL = 'http://127.0.0.1:5173'
 
@@ -164,27 +160,44 @@ function enforceVisibleWindowLimit(excludeAccountId = '') {
 function revealAccountWindow(accountId, focus = true) {
   const browserData = browserViews.get(accountId)
   if (!browserData || !browserData.window || browserData.window.isDestroyed()) {
-    return { success: false, error: '浏览器实例不存在' }
+    return { success: false, error: 'browser_window_not_found' }
   }
   enforceVisibleWindowLimit(accountId)
+  if (browserData.window.isMinimized()) {
+    browserData.window.restore()
+  }
+  browserData.window.setSkipTaskbar(false)
   browserData.requestedVisible = true
   browserData.lastShownAt = Date.now()
   browserData.window.show()
+  if (typeof browserData.window.moveTop === 'function') {
+    browserData.window.moveTop()
+  }
   if (focus) {
     browserData.window.focus()
+    if (typeof browserData.window.moveTop === 'function') {
+      browserData.window.moveTop()
+    }
   }
-  return { success: true }
+  return {
+    success: true,
+    visible: browserData.window.isVisible(),
+    focused: browserData.window.isFocused()
+  }
 }
 
 function concealAccountWindow(accountId) {
   const browserData = browserViews.get(accountId)
   if (!browserData || !browserData.window || browserData.window.isDestroyed()) {
-    return { success: false, error: '浏览器实例不存在' }
+    return { success: false, error: 'browser_window_not_found' }
   }
   browserData.requestedVisible = false
   browserData.lastHiddenAt = Date.now()
   browserData.window.hide()
-  return { success: true }
+  return {
+    success: true,
+    visible: browserData.window.isVisible()
+  }
 }
 
 function getBootstrapSnapshot() {
@@ -1128,7 +1141,6 @@ ipcMain.handle('launch-browser', async (event, payload) => {
         nodeIntegration: false,
         contextIsolation: true,
         sandbox: false,
-        preload: path.join(__dirname, 'browser-preload.js'),
         partition: partition, // 独立的session，每个账号互不干扰
         backgroundThrottling: false
       }
@@ -1136,12 +1148,6 @@ ipcMain.handle('launch-browser', async (event, payload) => {
     
     // 获取该账号的独立 session
     const accountSession = browserWindow.webContents.session
-
-    try {
-      browserWindow.webContents.setUserAgent(DOUYIN_DESKTOP_UA)
-    } catch (e) {
-      logger.debug(`[${accountId}] 设置浏览器 UA 失败`, e)
-    }
 
     logger.info(`[${accountId}] 已创建独立session: ${partition}`)
 
@@ -1207,20 +1213,6 @@ ipcMain.handle('launch-browser', async (event, payload) => {
           return
         }
         callback({ cancel: false })
-      })
-      accountSession.webRequest.onBeforeSendHeaders({ urls: ['https://*.douyin.com/*'] }, (details, callback) => {
-        const headers = { ...(details.requestHeaders || {}) }
-        headers['User-Agent'] = DOUYIN_DESKTOP_UA
-        headers['user-agent'] = DOUYIN_DESKTOP_UA
-        headers['Accept-Language'] = DOUYIN_ACCEPT_LANGUAGE
-        headers['accept-language'] = DOUYIN_ACCEPT_LANGUAGE
-        headers['sec-ch-ua'] = DOUYIN_SEC_CH_UA
-        headers['Sec-CH-UA'] = DOUYIN_SEC_CH_UA
-        headers['sec-ch-ua-mobile'] = '?0'
-        headers['Sec-CH-UA-Mobile'] = '?0'
-        headers['sec-ch-ua-platform'] = '"Windows"'
-        headers['Sec-CH-UA-Platform'] = '"Windows"'
-        callback({ requestHeaders: headers })
       })
     }
 
