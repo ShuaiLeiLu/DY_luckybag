@@ -1,4 +1,4 @@
-import type { BootstrapSnapshot, DesktopSettings, RecoveryEvent, UpdateSnapshot } from '@shared/models'
+import type { BootstrapSnapshot, DesktopSettings, LotteryHistoryRecord, RecoveryEvent, UpdateSnapshot } from '@shared/models'
 
 declare global {
   interface Window {

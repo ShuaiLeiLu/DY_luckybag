@@ -34,7 +34,8 @@ const INVOKE_CHANNELS = new Set([
   'desktop:check-for-updates',
   'desktop:download-update',
   'desktop:install-update',
-  'desktop:append-event'
+  'desktop:append-event',
+  'desktop:append-history-record'
 ])
 
 const EVENT_CHANNELS = new Set([
@@ -115,6 +116,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     appendEvent(event) {
       return invoke('desktop:append-event', event)
+    },
+    appendHistoryRecord(record) {
+      return invoke('desktop:append-history-record', record)
     },
     onUpdateState(handler) {
       return on('desktop:update-state', handler)

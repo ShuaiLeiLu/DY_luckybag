@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 判断错误文本是否属于风控/拒绝访问类错误。
  * @param {string} message 错误文本
  * @returns {boolean}
@@ -99,6 +99,33 @@ function emitScanDebug(manager, payload = {}) {
   try {
     if (!manager?.ipc?.invoke) return
     manager.ipc.invoke('scan-debug-log', payload).catch(() => {})
+  } catch (_) {
+    // ignore
+  }
+}
+
+/**
+ * emitScanMetric 方法：输出固定结构的扫描指标到渲染控制台，并同步到主进程控制台。
+ */
+function emitScanMetric(manager, accountId, stage, requestIndex, metric = {}) {
+  const safeAccountId = String(accountId || 'unknown')
+  const safeStage = String(stage || 'scan')
+  const safeRequest = Number(requestIndex || 0)
+  const summary = metric && typeof metric === 'object' ? metric : { value: metric }
+  try {
+    console.log(`[scan-metrics] [${safeAccountId}] [${safeStage}] request=${safeRequest}`, summary)
+  } catch (_) {
+    // ignore
+  }
+  try {
+    if (!manager?.ipc?.invoke) return
+    manager.ipc.invoke('scan-debug-log', {
+      accountId: safeAccountId,
+      stage: `metric:${safeStage}`,
+      requestIndex: safeRequest,
+      type: 'request-metric',
+      summary
+    }).catch(() => {})
   } catch (_) {
     // ignore
   }
@@ -329,6 +356,21 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
       const emitRoundSummary = () => {
         roundSummary.noGrowthAfter = noGrowthRounds
         roundSummary.poolAfter = manager.getAccountLotteryList(accountId).length
+        emitScanMetric(manager, accountId, 'all-request', i + 1, {
+          mode: roundSummary.mode,
+          requestOk: roundSummary.requestOk === true,
+          rawRooms: Number(roundSummary.rawRooms || 0),
+          dedupRooms: Number(roundSummary.dedupRooms || 0),
+          detailRequested: Number(roundSummary.detailRequested || 0),
+          validLotteries: Number(roundSummary.detailSuccess || 0),
+          keptLotteries: Number(roundSummary.kept || 0),
+          poolBefore: Number(roundSummary.poolBefore || 0),
+          poolAfter: Number(roundSummary.poolAfter || 0),
+          poolDelta: Number(roundSummary.poolAfter || 0) - Number(roundSummary.poolBefore || 0),
+          hasMore: roundSummary.hasMore === true,
+          breakReason: String(roundSummary.breakReason || ''),
+          error: String(roundSummary.error || '')
+        })
         traceScan(`[${accountId}] all-round-summary`, roundSummary)
         emitScanDebug(manager, {
           accountId,
@@ -790,6 +832,7 @@ export async function searchLiveRoomCategory(
           offset: requestOffset,
           count: countPerPage
         })
+        const rawRoomCount = Array.isArray(result?.roomInfoList) ? result.roomInfoList.length : 0
 
         if (!result.success || !result.roomInfoList) {
           noGrowthPages += 1
@@ -1032,3 +1075,6 @@ export async function getLotteryInfo(manager, roomInfoList, accountId, scanProfi
   await Promise.all(Array.from({ length: concurrency }, (_, i) => worker(i)))
   return { settled, stats }
 }
+
+
+

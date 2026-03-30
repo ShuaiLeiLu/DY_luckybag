@@ -105,6 +105,39 @@ export interface RecoveryEvent {
   createdAt: number
 }
 
+export type LotteryHistoryRecordType = 'join' | 'win'
+
+export interface LotteryHistoryRecord {
+  id: number
+  recordType: LotteryHistoryRecordType
+  accountId: string
+  accountNickname: string
+  roomId: string
+  webRid: string
+  lotteryId: string
+  authorNickname: string
+  lotteryName: string
+  predictedProbability: number
+  predictedJoinTotal: number
+  joinTotal: number
+  luckyCount: number
+  onlineTotal: number
+  totalAmount: number
+  prizeType: unknown
+  prizeInfo: Record<string, unknown>
+  conditions: unknown[]
+  remainingSec: number
+  serverScore: number
+  startTime: number
+  joinMode: string
+  joinStatus: string
+  resultStatus: string
+  resultReason: string
+  joinedAt: number
+  endTime: number
+  rewardAmount: number
+  createdAt: number
+}
 export interface DesktopSettings {
   poolServerUrl: string
   updateFeedUrl: string
@@ -128,4 +161,5 @@ export interface BootstrapSnapshot {
   settings: DesktopSettings
   update: UpdateSnapshot
   events: RecoveryEvent[]
+  historyRecords: LotteryHistoryRecord[]
 }

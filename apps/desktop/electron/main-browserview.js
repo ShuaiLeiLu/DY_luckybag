@@ -208,7 +208,8 @@ function getBootstrapSnapshot() {
     machineFingerprint: '',
     settings: store.getSettings(),
     update,
-    events: store.listEvents(180)
+    events: store.listEvents(180),
+    historyRecords: store.listHistoryRecords(240)
   }
 }
 
@@ -1517,6 +1518,15 @@ ipcMain.handle('desktop:install-update', async () => ({ success: ensureUpdateSer
 ipcMain.handle('desktop:append-event', async (_event, payload = {}) => {
   try {
     const item = appendRuntimeEvent(payload.level, payload.message, payload.scope)
+    return { success: true, item }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+ipcMain.handle('desktop:append-history-record', async (_event, payload = {}) => {
+  try {
+    const item = ensureStateStore().appendHistoryRecord(payload)
     return { success: true, item }
   } catch (error) {
     return { success: false, error: error.message }

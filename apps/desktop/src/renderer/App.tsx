@@ -1,7 +1,5 @@
 import {
   startTransition,
-  type ReactNode,
-  useDeferredValue,
   useEffect,
   useEffectEvent,
   useMemo,
@@ -12,8 +10,6 @@ import LotteryManager from '../services/LotteryManager-lite'
 import {
   FIXED_POOL_SERVER_URL,
   activateLicense,
-  createLicenseBindSession,
-  fetchLicenseBindSessionStatus,
   fetchLicenseStatus,
   resolveLicenseFingerprint,
   resolvePoolClientId,
@@ -24,10 +20,20 @@ import {
   formatRelative,
   mergeAccountModel,
   normalizeLicenseSnapshot,
-  sortAccounts,
-  statusText,
-  statusTone
+  sortAccounts
 } from './lib/runtime'
+import { StatCard, ClusterBadge } from './components/ui/StatusWidgets'
+import { AccountCard } from './features/accounts/AccountCard'
+import { buildLegacyConfig } from './features/accounts/legacyConfig'
+import { DOUYIN_LOGIN_PROMPT_SCRIPT } from './features/accounts/loginPrompt'
+import { LicenseDrawer } from './features/license/LicenseDrawer'
+import { LicenseGate } from './features/license/LicenseGate'
+import { formatAccessModeText, formatLicensePlanText, formatUpdateStatusText } from './features/license/presentation'
+import { useLicenseBinding } from './features/license/useLicenseBinding'
+import { SettingsDrawer } from './features/settings/SettingsDrawer'
+import { TaskDetailPanel } from './features/dashboard/TaskDetailPanel'
+import { TimelinePanel } from './features/dashboard/TimelinePanel'
+import { type UiLogEntry, useTimelineLogs } from './features/dashboard/useTimelineLogs'
 import type {
   AccountSession,
   BootstrapSnapshot,
@@ -45,24 +51,6 @@ type ServiceResult<T = AnyRecord> = {
   error?: unknown
 }
 
-type UiLogEntry = {
-  id: number
-  time: string
-  type: 'info' | 'warning' | 'error' | 'success'
-  message: string
-}
-
-type LicenseBindSession = {
-  bindToken?: string
-  sceneCode?: string
-  status?: string
-  message?: string
-  remainingSec?: number
-  adUnlockDays?: number
-  authorized?: boolean
-  wechatNickname?: string
-  expireAt?: number
-}
 
 const defaultSettings: DesktopSettings = {
   poolServerUrl: FIXED_POOL_SERVER_URL,
@@ -118,209 +106,22 @@ const emptyUpdate: UpdateSnapshot = {
   checkedAt: 0
 }
 
-let logSeq = 0
 
-const DOUYIN_LOGIN_PROMPT_SCRIPT = String.raw`
-(() => {
-  const normalize = (value) => String(value || '').replace(/\s+/g, '').trim();
-  const textOf = (node) => normalize(
-    node?.innerText
-    || node?.textContent
-    || node?.getAttribute?.('aria-label')
-    || node?.getAttribute?.('title')
-    || ''
-  );
-  const isVisible = (node) => {
-    if (!node || typeof node.getBoundingClientRect !== 'function') return false;
-    const style = window.getComputedStyle(node);
-    if (!style || style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') return false;
-    const rect = node.getBoundingClientRect();
-    return rect.width >= 18 && rect.height >= 18 && rect.bottom >= 0 && rect.right >= 0;
-  };
-  const clickNode = (node) => {
-    if (!node) return false;
-    try { node.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
-    try { node.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true, view: window })); } catch (_) {}
-    try { node.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window })); } catch (_) {}
-    try { node.click(); } catch (_) {}
-    try { node.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window })); } catch (_) {}
-    return true;
-  };
-  const bodyText = normalize(document.body?.innerText || '');
-  const hasQr = /扫码登录|二维码登录|打开抖音扫码登录|请使用抖音扫码/.test(bodyText)
-    || !!document.querySelector('img[src*="qrcode"], img[alt*="二维码"], [class*="qrcode"] img, [class*="qr"] canvas');
-
-  const nodes = Array.from(document.querySelectorAll('button,a,[role="button"],div,span')).filter(isVisible);
-  const pickNode = (patterns, options = {}) => {
-    let best = null;
-    let bestScore = -Infinity;
-    nodes.forEach((node) => {
-      const text = textOf(node);
-      if (!text) return;
-      if (!patterns.some((pattern) => pattern.test(text))) return;
-      const rect = node.getBoundingClientRect();
-      let score = rect.width * rect.height;
-      if (options.preferTopRight) {
-        score += Math.max(0, window.innerWidth - rect.left) * 0.6;
-        score += Math.max(0, 220 - rect.top);
-      }
-      if (options.preferCentered) {
-        const cx = rect.left + rect.width / 2;
-        const cy = rect.top + rect.height / 2;
-        score -= Math.abs(window.innerWidth / 2 - cx) * 0.2;
-        score -= Math.abs(window.innerHeight / 2 - cy) * 0.15;
-      }
-      if (score > bestScore) {
-        best = node;
-        bestScore = score;
-      }
-    });
-    return best;
-  };
-
-  const qrTab = pickNode([/扫码登录/, /二维码登录/, /^扫码$/], { preferCentered: true });
-  if (hasQr) {
-    if (qrTab) {
-      clickNode(qrTab);
-    }
-    return { ok: true, state: 'qr_ready', text: qrTab ? textOf(qrTab) : '' };
-  }
-
-  if (qrTab) {
-    clickNode(qrTab);
-    return { ok: true, state: 'qr_tab_clicked', text: textOf(qrTab) };
-  }
-
-  const loginNode = pickNode([/^登录$/, /立即登录/, /去登录/, /账号登录/, /手机号登录/], { preferTopRight: true })
-    || pickNode([/登录/], { preferTopRight: true });
-
-  if (loginNode) {
-    clickNode(loginNode);
-    return { ok: true, state: 'login_clicked', text: textOf(loginNode) };
-  }
-
-  return {
-    ok: false,
-    state: 'login_not_found',
-    text: bodyText.slice(0, 120)
-  };
-})()
-`
-
-function buildLegacyConfig(settings: DesktopSettings) {
-  return {
-    stayDuration: settings.stayDuration,
-    enableRedPacket: settings.enableRedPacket,
-    hitRate: settings.hitRate,
-    secondInspect: settings.secondInspect,
-    filterFanClub: settings.filterFanClub,
-    onlyPhysicalPrize: settings.onlyPhysicalPrize,
-    preferBigRedPacket: settings.preferBigRedPacket,
-    filterOnline: settings.filterOnline,
-    randomInteraction: { enabled: settings.randomInteraction },
-    closeLiveStream: { enabled: false },
-    participationCount: settings.participationCount,
-    singleAccountDuration: settings.singleAccountDuration,
-    poolServer: { url: settings.poolServerUrl }
-  }
-}
-
-function buildLogEntry(message: string, type: UiLogEntry['type'] = 'info'): UiLogEntry {
-  return {
-    id: ++logSeq,
-    time: new Date().toLocaleTimeString(),
-    type,
-    message: String(message || '')
-  }
-}
 
 function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
-function normalizeBindSession(raw: AnyRecord | null | undefined): LicenseBindSession | null {
-  if (!raw || typeof raw !== 'object') return null
-  return {
-    bindToken: String(raw.bindToken || ''),
-    sceneCode: String(raw.sceneCode || ''),
-    status: String(raw.status || ''),
-    message: String(raw.message || ''),
-    remainingSec: Number(raw.remainingSec || 0),
-    adUnlockDays: Number(raw.adUnlockDays || 0),
-    authorized: raw.authorized === true,
-    wechatNickname: String(raw.wechatNickname || ''),
-    expireAt: Number(raw.expireAt || 0)
-  }
-}
-
-function formatAccessModeText(accessMode: LicenseSnapshot['accessMode']) {
-  switch (accessMode) {
-    case 'unrestricted':
-      return '服务端免授权'
-    case 'licensed':
-      return '正式授权'
-    case 'trial':
-      return '试用中'
-    case 'locked':
-      return '已锁定'
-    case 'disabled':
-      return '未启用'
-    default:
-      return '未知模式'
-  }
-}
-
-function formatUpdateStatusText(status: UpdateSnapshot['status']) {
-  switch (status) {
-    case 'idle':
-      return '空闲'
-    case 'checking':
-      return '检查中'
-    case 'available':
-      return '可更新'
-    case 'downloading':
-      return '下载中'
-    case 'downloaded':
-      return '下载完成'
-    case 'error':
-      return '更新异常'
-    case 'disabled':
-      return '未启用'
-    default:
-      return '未知状态'
-  }
-}
-
-function formatLicensePlanText(license: LicenseSnapshot) {
-  const raw = String(license?.licensePlan || '').trim()
-  const key = raw.toLowerCase()
-  if (!key) {
-    return license.authorized ? formatAccessModeText(license.accessMode) : '未授权'
-  }
-  if (key.includes('unrestricted')) return '服务端免授权'
-  if (key.includes('trial')) return '3天试用'
-  if (key.includes('licensed') || key.includes('pro')) return '正式授权'
-  return '自定义授权'
-}
-
-function formatScanRoleText(role: string) {
-  if (role === 'scanner') return '扫描账号'
-  if (role === 'worker') return '执行账号'
-  return role || '-'
-}
 
 export default function App() {
   const manager = useMemo(() => new LotteryManager(), [])
   const runtimeAccountsRef = useRef<Map<string, AnyRecord>>(new Map())
   const loginTimersRef = useRef<Map<string, number>>(new Map())
-  const logListRef = useRef<HTMLDivElement | null>(null)
-  const logAutoFollowRef = useRef(true)
   const [bootstrap, setBootstrap] = useState<BootstrapSnapshot | null>(null)
   const [settings, setSettings] = useState<DesktopSettings>(defaultSettings)
   const [accounts, setAccounts] = useState<AccountSession[]>([])
   const [lotteriesByAccount, setLotteriesByAccount] = useState<Record<string, AnyRecord[]>>({})
   const [historyRecords, setHistoryRecords] = useState<AnyRecord[]>([])
-  const [logs, setLogs] = useState<UiLogEntry[]>([])
   const [dispatchSummary, setDispatchSummary] = useState<DispatchSummary>(emptyDispatchSummary)
   const [learningSummary, setLearningSummary] = useState<AnyRecord | null>(null)
   const [learningItems, setLearningItems] = useState<AnyRecord[]>([])
@@ -330,64 +131,22 @@ export default function App() {
   const [selectedAccountId, setSelectedAccountId] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [authDrawerOpen, setAuthDrawerOpen] = useState(false)
-  const [logQuery, setLogQuery] = useState('')
   const [licenseBusy, setLicenseBusy] = useState(false)
-  const [bindBusy, setBindBusy] = useState(false)
-  const [bindSession, setBindSession] = useState<LicenseBindSession | null>(null)
-  const [bindCodeVersion, setBindCodeVersion] = useState(0)
-  const bindNoticeRef = useRef<'idle' | 'success' | 'expired'>('idle')
-  const deferredLogQuery = useDeferredValue(logQuery)
+  const {
+    filteredLogs,
+    logListRef,
+    logQuery,
+    setLogQuery,
+    handleLogListScroll,
+    addLog,
+    replaceLogs
+  } = useTimelineLogs()
 
   const poolClientId = useMemo(() => resolvePoolClientId(), [])
   const activePoolServerUrl = useMemo(() => settings.poolServerUrl.trim() || FIXED_POOL_SERVER_URL, [settings.poolServerUrl])
   const poolFingerprint = useMemo(() => resolveLicenseFingerprint(), [])
 
   const selectedAccount = accounts.find((item) => item.id === selectedAccountId) || accounts[0] || null
-  const selectedLotteries = selectedAccount ? (lotteriesByAccount[selectedAccount.id] || []) : []
-  const filteredLogs = logs.filter((entry) => {
-    if (!deferredLogQuery.trim()) return true
-    return entry.message.toLowerCase().includes(deferredLogQuery.trim().toLowerCase())
-  })
-  const latestFilteredLogId = filteredLogs.length > 0 ? filteredLogs[filteredLogs.length - 1].id : 0
-
-  const handleLogListScroll = useEffectEvent(() => {
-    const container = logListRef.current
-    if (!container) return
-    const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight
-    logAutoFollowRef.current = distanceToBottom <= 48
-  })
-
-  useEffect(() => {
-    if (!deferredLogQuery.trim()) return
-    logAutoFollowRef.current = true
-  }, [deferredLogQuery])
-
-  useEffect(() => {
-    if (!logAutoFollowRef.current) return
-    const raf = window.requestAnimationFrame(() => {
-      const container = logListRef.current
-      if (!container) return
-      container.scrollTop = container.scrollHeight
-    })
-    return () => window.cancelAnimationFrame(raf)
-  }, [latestFilteredLogId, deferredLogQuery])
-
-  const appendEvent = useEffectEvent(async (level: RecoveryEvent['level'], message: string, scope = 'desktop') => {
-    try {
-      await window.electronAPI.desktop.appendEvent({ level, message, scope })
-    } catch (_) {
-      // ignore
-    }
-  })
-
-  const addLog = useEffectEvent((message: string, type: UiLogEntry['type'] = 'info') => {
-    const entry = buildLogEntry(message, type)
-    startTransition(() => {
-      setLogs((current) => [...current.slice(-359), entry])
-    })
-    appendEvent(type === 'success' ? 'success' : type === 'warning' ? 'warning' : type === 'error' ? 'error' : 'info', message)
-  })
-
   const syncRuntimeRef = (account: AccountSession) => {
     runtimeAccountsRef.current.set(account.id, {
       ...(runtimeAccountsRef.current.get(account.id) || {}),
@@ -556,14 +315,12 @@ export default function App() {
         ...(snapshot.settings || {})
       })
       setUpdateState(snapshot.update || emptyUpdate)
-      startTransition(() => {
-        setLogs((snapshot.events || []).map((event) => ({
-          id: event.id,
-          time: new Date(event.createdAt).toLocaleTimeString(),
-          type: event.level === 'success' ? 'success' : event.level === 'warning' ? 'warning' : event.level === 'error' ? 'error' : 'info',
-          message: event.message
-        })))
-      })
+      replaceLogs((snapshot.events || []).map((event) => ({
+        id: event.id,
+        time: new Date(event.createdAt).toLocaleTimeString(),
+        type: event.level === 'success' ? 'success' : event.level === 'warning' ? 'warning' : event.level === 'error' ? 'error' : 'info',
+        message: event.message
+      })))
     } catch (error) {
       addLog(`引导信息加载失败: ${String((error as Error)?.message || error)}`, 'warning')
     }
@@ -939,118 +696,53 @@ export default function App() {
     }
   }
 
-  const applyBindSession = useEffectEvent(async (nextSession: LicenseBindSession | null) => {
-    setBindSession(nextSession)
-    if (!nextSession) {
-      bindNoticeRef.current = 'idle'
-      return
-    }
-    const status = String(nextSession.status || '').toLowerCase()
-    const authorized = nextSession.authorized === true || status === 'authorized' || status === 'granted'
-    if (authorized) {
-      if (bindNoticeRef.current !== 'success') {
-        addLog('Mini-app binding complete, license status refreshed', 'success')
-      }
-      bindNoticeRef.current = 'success'
-      await refreshLicense()
-      return
-    }
-    if ((status === 'expired' || Number(nextSession.remainingSec || 0) <= 0) && bindNoticeRef.current !== 'expired') {
-      bindNoticeRef.current = 'expired'
-      addLog('Mini-app QR code expired, please regenerate', 'warning')
-    }
-  })
-
-  const refreshBindSessionStatus = useEffectEvent(async (manual = false) => {
-    const bindToken = String(bindSession?.bindToken || '').trim()
-    if (!bindToken) {
-      if (manual) addLog('Please generate mini-app code first', 'warning')
-      return
-    }
-    if (manual) setBindBusy(true)
-    try {
-      const result = (await fetchLicenseBindSessionStatus(activePoolServerUrl, {
-        bindToken,
-        timeoutMs: 3000
-      })) as ServiceResult<{ session?: AnyRecord }>
-      if (!result?.ok) {
-        const errorText = String((result?.data as AnyRecord)?.error || result?.error || 'unknown_error')
-        if (manual) addLog(`Fetch mini-app bind status failed: ${errorText}`, 'error')
-        return
-      }
-      const nextSession = normalizeBindSession(result.data?.session || null)
-      await applyBindSession(nextSession)
-      if (manual && nextSession && !nextSession.authorized) {
-        addLog(nextSession.message || 'Bind status refreshed', 'info')
-      }
-    } catch (error) {
-      if (manual) addLog(`Fetch mini-app bind status error: ${String((error as Error)?.message || error || 'unknown_error')}`, 'error')
-    } finally {
-      if (manual) setBindBusy(false)
-    }
-  })
-
-  async function handleCreateMiniAppBindSession() {
-    setBindBusy(true)
-    try {
-      const result = (await createLicenseBindSession(activePoolServerUrl, {
-        clientId: poolClientId,
-        fingerprint: poolFingerprint,
-        appVersion: bootstrap?.appVersion || '3.0.0',
-        timeoutMs: 3000
-      })) as ServiceResult<{ session?: AnyRecord }>
-      if (!result?.ok) {
-        const errorText = String((result?.data as AnyRecord)?.error || result?.error || 'unknown_error')
-        addLog(`Create mini-app bind session failed: ${errorText}`, 'error')
-        return
-      }
-      bindNoticeRef.current = 'idle'
-      const nextSession = normalizeBindSession(result.data?.session || null)
-      await applyBindSession(nextSession)
-      setBindCodeVersion((current) => current + 1)
-      setAuthDrawerOpen(true)
-      if (!nextSession?.authorized) {
-        addLog('Please scan with mini-app to complete binding', 'info')
-      }
-    } catch (error) {
-      addLog(`Create mini-app bind session error: ${String((error as Error)?.message || error || 'unknown_error')}`, 'error')
-    } finally {
-      setBindBusy(false)
-    }
-  }
-
-  useEffect(() => {
-    const bindToken = String(bindSession?.bindToken || '').trim()
-    const status = String(bindSession?.status || '').toLowerCase()
-    const done = !bindToken || bindSession?.authorized || status === 'authorized' || status === 'granted' || status === 'expired' || Number(bindSession?.remainingSec || 0) <= 0
-    if (done) return
-    const timer = window.setTimeout(() => {
-      void refreshBindSessionStatus(false)
-    }, 2200)
-    return () => window.clearTimeout(timer)
-  }, [bindSession?.authorized, bindSession?.bindToken, bindSession?.remainingSec, bindSession?.status])
-
   const handleAccountWindowVisibility = useEffectEvent(async (account: AccountSession, visible: boolean) => {
     const accountName = account.nickname || account.id
+    const actionText = visible ? '显示窗口' : '隐藏窗口'
+
     try {
-      const result = visible
-        ? (await window.electronAPI.desktop.showAccountWindow(account.id) as AnyRecord)
-        : (await window.electronAPI.desktop.hideAccountWindow(account.id) as AnyRecord)
+      const requestVisibility = async () => {
+        return visible
+          ? (await window.electronAPI.desktop.showAccountWindow(account.id) as AnyRecord)
+          : (await window.electronAPI.desktop.hideAccountWindow(account.id) as AnyRecord)
+      }
+
+      let result = await requestVisibility()
+      if (!result?.success && visible && String(result?.error || '').includes('browser_window_not_found')) {
+        const launch = await window.electronAPI.invoke('launch-browser', { accountId: account.id, visible: true })
+        if (!launch?.success) {
+          addLog('[' + accountName + '] 窗口不存在且重建失败 - ' + String(launch?.error || 'unknown_error'), 'warning')
+          return
+        }
+        await window.electronAPI.invoke('navigate-to', { accountId: account.id, url: 'https://www.douyin.com' }).catch(() => {})
+        result = await requestVisibility()
+      }
+
       if (!result?.success) {
-        addLog('[' + accountName + ']' + (visible ? ' 显示窗口失败：' : ' 隐藏窗口失败：') + String(result?.error || '未知错误'), 'warning')
+        addLog('[' + accountName + '] ' + actionText + '失败：' + String(result?.error || 'unknown_error'), 'warning')
         return
       }
-      addLog('[' + accountName + ']' + (visible ? ' 窗口已显示' : ' 窗口已隐藏'), 'info')
+      addLog('[' + accountName + '] 已' + actionText, 'info')
     } catch (error) {
-      addLog('[' + accountName + ']' + (visible ? ' 显示窗口异常：' : ' 隐藏窗口异常：') + String((error as Error)?.message || error || '未知错误'), 'error')
+      addLog('[' + accountName + '] ' + actionText + '失败：' + String((error as Error)?.message || error || 'unknown_error'), 'error')
     }
   })
 
-  const bindSceneCode = String(bindSession?.sceneCode || '').trim()
-  const bindToken = String(bindSession?.bindToken || '').trim()
-  const bindMiniAppCodeUrl = bindSceneCode || bindToken
-    ? `${activePoolServerUrl.replace(/\/+$/, '')}/license/bind-session/miniapp-code?${bindSceneCode ? `sceneCode=${encodeURIComponent(bindSceneCode)}` : `bindToken=${encodeURIComponent(bindToken)}`}&v=${bindCodeVersion}`
-    : ''
+  const {
+    bindBusy,
+    bindSession,
+    bindMiniAppCodeUrl,
+    refreshBindSessionStatus
+  } = useLicenseBinding({
+    poolServerUrl: activePoolServerUrl,
+    poolClientId,
+    poolFingerprint,
+    appVersion: bootstrap?.appVersion || '3.0.0',
+    autoCreateEnabled: authDrawerOpen,
+    onOpenAuthDrawer: () => setAuthDrawerOpen(true),
+    onLicenseRefresh: refreshLicense,
+    onLog: addLog
+  })
 
   const gateLocked = license.accessMode === 'locked' && license.requiresActivation
 
@@ -1060,6 +752,8 @@ export default function App() {
         <LicenseGate
           license={license}
           licenseKey={licenseKey}
+          accessModeText={accessModeText}
+          serverUrl={FIXED_POOL_SERVER_URL}
           onLicenseKeyChange={setLicenseKey}
           onStartTrial={handleStartTrial}
           onActivate={handleActivate}
@@ -1069,45 +763,37 @@ export default function App() {
         />
       ) : (
         <main className="flex min-h-full flex-col gap-4 2xl:h-full 2xl:min-h-0">
-          <section className="glass rounded-[28px] p-4 sm:p-5">
-            <div className="flex flex-col gap-4 2xl:flex-row 2xl:items-start 2xl:justify-between">
-              <div className="space-y-3">
-                <div className="inline-flex items-center gap-3 rounded-full border border-emerald-400/20 bg-emerald-500/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-emerald-200">
-                  隐藏执行池
-                </div>
-                <div>
-                  <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-3xl">抖娃福袋工作台</h1>
-                  <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-300">
-                    服务端统一派单，本地执行账号默认隐藏运行。你现在看到的是新的调度台壳层，适合几十账号同时在线的高密度场景。
-                  </p>
+          <section className="glass rounded-[26px] p-3 sm:p-4">
+            <div className="flex flex-col gap-2 2xl:flex-row 2xl:items-end 2xl:justify-between">
+              <div className="flex flex-col gap-1.5 2xl:pr-4">
+                <h1 className="relative -top-3 text-2xl font-semibold tracking-tight text-white sm:text-3xl">抖娃福袋工作台</h1>
+                <div className="flex flex-wrap items-center gap-2 text-sm text-slate-300">
+                  <button className="w-full rounded-full bg-emerald-400 px-4 py-2 font-semibold text-slate-950 transition hover:bg-emerald-300 sm:w-auto" onClick={addAccount}>
+                    添加账号
+                  </button>
+                  <button className="w-full rounded-full border border-slate-600/70 px-4 py-2 transition hover:border-slate-400 hover:bg-slate-800/60 sm:w-auto" onClick={() => setSettingsOpen(true)}>
+                    设置中心
+                  </button>
+                  <button className="w-full rounded-full border border-cyan-500/50 bg-cyan-500/10 px-4 py-2 text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-500/20 sm:w-auto" onClick={() => setAuthDrawerOpen(true)}>
+                    授权中心
+                  </button>
+                  <button className="w-full rounded-full border border-slate-600/70 px-4 py-2 transition hover:border-slate-400 hover:bg-slate-800/60 sm:w-auto" onClick={() => void window.electronAPI.desktop.checkForUpdates()}>
+                    检查更新
+                  </button>
+                  <span className="w-full rounded-full border border-cyan-400/20 bg-cyan-500/10 px-3 py-2 text-cyan-100 sm:w-auto">
+                    {license.accessMode === 'trial' ? `试用剩余 ${formatRelative(license.trialRemainingSec)}` : license.message}
+                  </span>
+                  <span className="w-full rounded-full border border-slate-700 px-3 py-2 text-slate-300 sm:w-auto">
+                    版本 {bootstrap?.appVersion || updateState.currentVersion}
+                  </span>
                 </div>
               </div>
-              <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-4">
+              <div className="grid gap-2 sm:grid-cols-2 2xl:grid-cols-4">
                 <StatCard label="在线账号" value={String(runningCount)} tone="emerald" helper={`${accounts.length} 个账号已接入`} />
                 <StatCard label="候选可领" value={String(dispatchSummary.availableCandidates)} tone="cyan" helper={dispatchSummary.connected ? '共享池已连接' : dispatchSummary.error || '等待连接'} />
                 <StatCard label="今日参与" value={String(totalParticipation)} tone="amber" helper={licensePlanText} />
                 <StatCard label="今日收益" value={`${totalDiamonds}`} tone="violet" helper={`中奖 ${totalWins} 次`} />
               </div>
-            </div>
-            <div className="mt-5 flex flex-wrap items-center gap-3 text-sm text-slate-300">
-              <button className="w-full rounded-full bg-emerald-400 px-4 py-2 font-semibold text-slate-950 transition hover:bg-emerald-300 sm:w-auto" onClick={addAccount}>
-                添加账号
-              </button>
-              <button className="w-full rounded-full border border-slate-600/70 px-4 py-2 transition hover:border-slate-400 hover:bg-slate-800/60 sm:w-auto" onClick={() => setSettingsOpen(true)}>
-                设置中心
-              </button>
-              <button className="w-full rounded-full border border-cyan-500/50 bg-cyan-500/10 px-4 py-2 text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-500/20 sm:w-auto" onClick={() => setAuthDrawerOpen(true)}>
-                授权中心
-              </button>
-              <button className="w-full rounded-full border border-slate-600/70 px-4 py-2 transition hover:border-slate-400 hover:bg-slate-800/60 sm:w-auto" onClick={() => void window.electronAPI.desktop.checkForUpdates()}>
-                检查更新
-              </button>
-              <span className="w-full rounded-full border border-cyan-400/20 bg-cyan-500/10 px-3 py-2 text-cyan-100 sm:w-auto">
-                {license.accessMode === 'trial' ? `试用剩余 ${formatRelative(license.trialRemainingSec)}` : license.message}
-              </span>
-              <span className="w-full rounded-full border border-slate-700 px-3 py-2 text-slate-300 sm:w-auto">
-                版本 {bootstrap?.appVersion || updateState.currentVersion}
-              </span>
             </div>
           </section>
 
@@ -1136,14 +822,8 @@ export default function App() {
                     <AccountCard
                       key={account.id}
                       account={account}
-                      topLotteries={(lotteriesByAccount[account.id] || []).slice(0, 3)}
                       selected={selectedAccount?.id === account.id}
                       onSelect={() => setSelectedAccountId(account.id)}
-                      onRoleChange={(value) => {
-                        patchAccount(account.id, { scanRole: value })
-                        const runtime = runtimeAccountsRef.current.get(account.id)
-                        if (runtime) runtime.scanRole = value
-                      }}
                       onToggle={() => {
                         if (account.actionActive) {
                           void stopAccount(account.id)
@@ -1167,102 +847,16 @@ export default function App() {
             </div>
 
             <div className="grid gap-4 xl:grid-cols-2 2xl:min-h-0 2xl:grid-cols-1">
-              <aside className="glass scrollbar-thin flex flex-col overflow-auto rounded-[26px] p-4 2xl:min-h-0">
-                <div className="mb-4">
-                  <h2 className="text-lg font-semibold text-white">任务详情</h2>
-                  <p className="text-sm text-slate-400">选中账号后查看当前租约、候选池和派单细节。</p>
-                </div>
-                <div className="space-y-3">
-                  <DetailRow label="账号" value={selectedAccount?.nickname || '未选择'} />
-                  <DetailRow label="角色" value={formatScanRoleText(selectedAccount?.scanRole || '')} />
-                  <DetailRow label="状态" value={selectedAccount ? statusText(selectedAccount.runtimeState) : '-'} />
-                  <DetailRow label="当前任务" value={selectedAccount?.currentTaskLotteryName || selectedAccount?.currentTaskLabel || '暂无'} />
-                  <DetailRow label="主播" value={selectedAccount?.currentTaskAnchor || '-'} />
-                  <DetailRow label="租约剩余" value={selectedAccount?.currentTaskLeaseRemainingSec ? formatRelative(selectedAccount.currentTaskLeaseRemainingSec) : '-'} />
-                </div>
-                {!selectedAccount?.currentTaskLotteryName && !selectedAccount?.currentTaskLabel ? (
-                  <div className="mt-3 rounded-2xl border border-slate-700/70 bg-slate-950/45 px-3 py-3 text-xs text-slate-400">
-                    暂无派单任务。请先在左侧点击“启动”，等待服务端分配后这里会显示主播与租约信息。
-                  </div>
-                ) : null}
-
-                <div className="mt-4">
-                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">候选样本</div>
-                  <div className="scrollbar-thin max-h-72 space-y-2 overflow-auto pr-1">
-                    {selectedLotteries.map((item, index) => (
-                      <div key={`${item.roomId || item.webRid || 'room'}-${item.lottery_id || item.lotteryId || index}`} className="rounded-2xl border border-slate-700/70 bg-slate-900/50 p-3">
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <div className="font-medium text-white">{item.lotteryName || item.prize_name || '未命名福袋'}</div>
-                            <div className="mt-1 text-xs text-slate-400">{item.authorNickname || item.roomTitle || '未知主播'}</div>
-                          </div>
-                          <div className="text-right text-xs text-cyan-200">
-                            <div>{Number(item.simpleProbability || item.predictedProbability || 0).toFixed(2)}%</div>
-                            <div className="mt-1 text-slate-500">#{index + 1}</div>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                    {selectedLotteries.length === 0 ? (
-                      <div className="rounded-2xl border border-dashed border-slate-700/80 p-4 text-sm text-slate-500">
-                        当前账号还没有候选池样本。
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-
-                <div className="mt-4">
-                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">最近回放</div>
-                  <div className="scrollbar-thin max-h-44 space-y-2 overflow-auto pr-1">
-                    {historyRecords.slice(0, 8).map((item, index) => (
-                      <div key={`${item.accountId || selectedAccount?.id || 'history'}-${index}`} className="rounded-2xl border border-slate-700/70 bg-slate-900/50 p-3 text-sm text-slate-300">
-                        <div className="font-medium text-white">{item.lotteryName || '已参与任务'}</div>
-                        <div className="mt-1 text-xs text-slate-500">{item.authorNickname || item.nickname || '未知主播'}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </aside>
-
-              <aside className="glass flex flex-col rounded-[26px] p-4 2xl:min-h-0">
-                <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <h2 className="text-lg font-semibold text-white">运行时间线</h2>
-                    <p className="text-sm text-slate-400">这里保留执行过程、异常恢复和授权更新。</p>
-                  </div>
-                  <input
-                    value={logQuery}
-                    onChange={(event) => setLogQuery(event.target.value)}
-                    placeholder="筛选日志"
-                    className="w-full rounded-full border border-slate-700/80 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-400/60 sm:w-40"
-                  />
-                </div>
-                <div
-                  ref={logListRef}
-                  onScroll={handleLogListScroll}
-                  className="scrollbar-thin flex-1 space-y-2 overflow-auto pr-1"
-                >
-                  {filteredLogs.map((entry) => (
-                    <div key={entry.id} className="rounded-2xl border border-slate-700/70 bg-slate-950/55 p-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <span className={`rounded-full border px-2 py-1 text-[11px] uppercase tracking-[0.18em] ${
-                          entry.type === 'success'
-                            ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200'
-                            : entry.type === 'warning'
-                              ? 'border-amber-400/20 bg-amber-500/10 text-amber-200'
-                              : entry.type === 'error'
-                                ? 'border-rose-400/20 bg-rose-500/10 text-rose-200'
-                                : 'border-slate-400/20 bg-slate-500/10 text-slate-200'
-                        }`}>
-                          {{ info: '信息', warning: '警告', error: '错误', success: '成功' }[entry.type]}
-                        </span>
-                        <span className="text-xs text-slate-500">{entry.time}</span>
-                      </div>
-                      <div className="mt-2 text-sm leading-6 text-slate-200">{entry.message}</div>
-                    </div>
-                  ))}
-                </div>
-              </aside>
+              <TaskDetailPanel
+                selectedAccount={selectedAccount}
+              />
+              <TimelinePanel
+                logQuery={logQuery}
+                logs={filteredLogs}
+                logListRef={logListRef}
+                onLogQueryChange={setLogQuery}
+                onLogListScroll={handleLogListScroll}
+              />
             </div>
           </section>
         </main>
@@ -1272,6 +866,7 @@ export default function App() {
         open={settingsOpen}
         settings={settings}
         updateState={updateState}
+        updateStatusText={updateStatusText}
         learningSummary={learningSummary}
         onClose={() => setSettingsOpen(false)}
         onChange={(patch) => void persistSettings({ ...settings, ...patch })}
@@ -1283,6 +878,7 @@ export default function App() {
       <LicenseDrawer
         open={authDrawerOpen}
         license={license}
+        accessModeText={accessModeText}
         licenseKey={licenseKey}
         licenseBusy={licenseBusy}
         bindBusy={bindBusy}
@@ -1291,7 +887,6 @@ export default function App() {
         onLicenseKeyChange={setLicenseKey}
         onStartTrial={() => void handleStartTrial()}
         onActivate={() => void handleActivate()}
-        onCreateBindSession={() => void handleCreateMiniAppBindSession()}
         onRefreshBindStatus={() => void refreshBindSessionStatus(true)}
         onClose={() => setAuthDrawerOpen(false)}
       />
@@ -1299,492 +894,3 @@ export default function App() {
   )
 }
 
-function StatCard(props: { label: string; value: string; helper: string; tone: 'emerald' | 'cyan' | 'amber' | 'violet' }) {
-  const toneMap = {
-    emerald: 'from-emerald-400/20 to-emerald-500/5 border-emerald-300/20 text-emerald-100',
-    cyan: 'from-cyan-400/20 to-cyan-500/5 border-cyan-300/20 text-cyan-100',
-    amber: 'from-amber-300/20 to-amber-500/5 border-amber-300/20 text-amber-100',
-    violet: 'from-violet-400/20 to-violet-500/5 border-violet-300/20 text-violet-100'
-  }
-  return (
-    <div className={`min-w-0 rounded-[22px] border bg-gradient-to-br px-4 py-3 ${toneMap[props.tone]}`}>
-      <div className="text-xs uppercase tracking-[0.24em] text-slate-400">{props.label}</div>
-      <div className="mt-2 text-3xl font-semibold text-white">{props.value}</div>
-      <div className="mt-1 text-xs text-slate-400">{props.helper}</div>
-    </div>
-  )
-}
-
-function ClusterBadge(props: { label: string; value: string }) {
-  return (
-    <div className="rounded-full border border-slate-700/80 bg-slate-950/45 px-3 py-2">
-      <span className="text-slate-500">{props.label}</span>
-      <span className="ml-2 font-medium text-slate-100">{props.value}</span>
-    </div>
-  )
-}
-
-function DetailRow(props: { label: string; value: string }) {
-  return (
-    <div className="flex flex-col items-start gap-2 rounded-2xl border border-slate-700/70 bg-slate-950/45 px-3 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
-      <span className="text-slate-400">{props.label}</span>
-      <span className="max-w-full break-all text-left text-slate-100 sm:max-w-[58%] sm:text-right">{props.value}</span>
-    </div>
-  )
-}
-
-function AccountCard(props: {
-  account: AccountSession
-  topLotteries: AnyRecord[]
-  selected: boolean
-  onSelect: () => void
-  onRoleChange: (value: AccountSession['scanRole']) => void
-  onToggle: () => void
-  onRelogin: () => void
-  onInspect: () => void
-  onHide: () => void
-  onDelete: () => void
-}) {
-  return (
-    <div
-      className={`rounded-[24px] border p-4 transition ${
-        props.selected
-          ? 'border-cyan-300/40 bg-cyan-500/10 shadow-[0_0_0_1px_rgba(34,211,238,0.16)]'
-          : 'border-slate-700/80 bg-slate-950/50 hover:border-slate-500'
-      }`}
-    >
-      <button className="w-full text-left" onClick={props.onSelect}>
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <div className="text-base font-semibold text-white">{props.account.nickname}</div>
-            <div className="mt-1 text-xs text-slate-500">{props.account.id}</div>
-          </div>
-          <span className={`self-start rounded-full border px-3 py-1 text-xs font-semibold ${statusTone(props.account.runtimeState)}`}>
-            {statusText(props.account.runtimeState)}
-          </span>
-        </div>
-      </button>
-
-      <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-        <Metric label="今日参与" value={String(props.account.participationCount)} />
-        <Metric label="今日收益" value={String(props.account.todayEarnedDiamonds)} />
-        <Metric label="任务阶段" value={props.account.currentTaskStage || '空闲'} />
-        <Metric label="租约" value={props.account.currentTaskLeaseRemainingSec ? `${props.account.currentTaskLeaseRemainingSec}s` : '-'} />
-      </div>
-
-      <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-slate-700/80 bg-slate-950/55 px-3 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
-        <span className="text-slate-400">角色</span>
-        <select
-          value={props.account.scanRole}
-          onChange={(event) => props.onRoleChange(event.target.value as AccountSession['scanRole'])}
-          className="w-full rounded-full border border-slate-700/80 bg-slate-900 px-3 py-2 text-slate-100 outline-none sm:w-auto"
-        >
-          <option value="scanner">扫描账号</option>
-          <option value="worker">执行账号</option>
-        </select>
-      </div>
-
-      <div className="mt-4 space-y-2">
-        {props.topLotteries.length > 0 ? props.topLotteries.map((item, index) => (
-          <div key={`${props.account.id}-${index}`} className="rounded-2xl border border-slate-700/70 bg-slate-950/45 px-3 py-2 text-sm text-slate-300">
-            <div className="truncate text-white">{item.lotteryName || item.prize_name || '候选任务'}</div>
-            <div className="mt-1 truncate text-xs text-slate-500">{item.authorNickname || '未知主播'}</div>
-          </div>
-        )) : (
-          <div className="rounded-2xl border border-dashed border-slate-700/80 px-3 py-4 text-sm text-slate-500">
-            当前还没有候选样本。
-          </div>
-        )}
-      </div>
-
-      <div className="mt-4 grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
-        <button className="rounded-full bg-emerald-400 px-3 py-2 font-semibold text-slate-950 transition hover:bg-emerald-300" onClick={props.onToggle}>
-          {props.account.actionActive ? '暂停' : '启动'}
-        </button>
-        <button className="rounded-full border border-slate-600/80 px-3 py-2 text-slate-100 transition hover:bg-slate-800/60" onClick={props.onRelogin}>
-          重新扫码
-        </button>
-        <button className="rounded-full border border-slate-600/80 px-3 py-2 text-slate-100 transition hover:bg-slate-800/60" onClick={props.onInspect}>
-          显示窗口
-        </button>
-        <button className="rounded-full border border-slate-600/80 px-3 py-2 text-slate-100 transition hover:bg-slate-800/60" onClick={props.onHide}>
-          隐藏窗口
-        </button>
-      </div>
-      <button className="mt-2 w-full rounded-full border border-rose-400/20 bg-rose-500/10 px-3 py-2 text-sm text-rose-200 transition hover:bg-rose-500/20" onClick={props.onDelete}>
-        删除账号
-      </button>
-    </div>
-  )
-}
-
-function Metric(props: { label: string; value: string }) {
-  return (
-    <div className="rounded-2xl border border-slate-700/70 bg-slate-950/45 px-3 py-3">
-      <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{props.label}</div>
-      <div className="mt-2 truncate text-lg font-semibold text-white">{props.value}</div>
-    </div>
-  )
-}
-
-function LicenseGate(props: {
-  license: LicenseSnapshot
-  licenseKey: string
-  onLicenseKeyChange: (value: string) => void
-  onStartTrial: () => void
-  onActivate: () => void
-  busy: boolean
-  clientId: string
-  fingerprint: string
-}) {
-  return (
-    <div className="grid gap-4 lg:h-full lg:grid-cols-[minmax(0,1.05fr)_minmax(280px,420px)]">
-      <section className="glass flex min-h-[320px] flex-col justify-between rounded-[32px] p-5 sm:p-6 xl:p-8">
-        <div>
-          <div className="inline-flex items-center gap-3 rounded-full border border-cyan-400/20 bg-cyan-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.28em] text-cyan-100">
-            服务端派单版
-          </div>
-          <h1 className="mt-6 max-w-xl text-3xl font-semibold leading-tight text-white sm:text-4xl">
-            3 天设备试用 + 正式授权
-            <br />
-            进入新的桌面调度台
-          </h1>
-          <p className="mt-4 max-w-2xl text-sm leading-7 text-slate-300">
-            当前版本采用服务端统一派单、客户端隐藏执行池和高密度账号调度面板。试用期内完整开放，多账号、派单、执行和学习视图都可以直接体验。
-          </p>
-        </div>
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          <FeaturePanel title="服务端派单" description="候选池统一筛选，客户端只管执行和回传。" />
-          <FeaturePanel title="隐藏执行池" description="几十账号默认隐藏运行，人工检查时再拉起窗口。" />
-          <FeaturePanel title="授权状态机" description="试用、激活、过期和锁定全部由服务端状态驱动。" />
-        </div>
-      </section>
-
-      <section className="glass flex flex-col rounded-[32px] p-5 sm:p-6">
-        <div>
-          <h2 className="text-2xl font-semibold text-white">设备接入</h2>
-          <p className="mt-2 text-sm text-slate-400">{props.license.message || '请先开始试用或输入授权码。'}</p>
-        </div>
-
-        <div className="mt-4 grid gap-3 text-sm text-slate-300 sm:grid-cols-2">
-          <DeviceField label="服务端地址" value={FIXED_POOL_SERVER_URL} />
-          <DeviceField label="客户端编号" value={props.clientId} />
-          <DeviceField label="设备指纹" value={props.fingerprint} />
-          <DeviceField label="授权模式" value={formatAccessModeText(props.license.accessMode)} />
-        </div>
-
-        <div className="mt-4 rounded-[24px] border border-cyan-400/20 bg-cyan-500/10 p-4 text-sm text-cyan-100">
-          服务端地址已写死到代码中，当前版本统一使用旧配置，不再支持在界面中修改。
-        </div>
-
-        <div className="mt-6 rounded-[24px] border border-amber-400/20 bg-amber-500/10 p-4 text-sm text-amber-100">
-          <div className="font-semibold">试用说明</div>
-          <div className="mt-1 text-amber-100/80">每台设备首次安装可获得 3 天完整试用。试用结束后需要正式授权才能进入主调度台。</div>
-        </div>
-
-        <button
-          className="mt-5 rounded-2xl bg-emerald-400 px-4 py-3 font-semibold text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
-          disabled={props.busy}
-          onClick={props.onStartTrial}
-        >
-          {props.busy ? '处理中...' : '开始 3 天试用'}
-        </button>
-
-        <label className="mt-6 text-xs uppercase tracking-[0.2em] text-slate-500">授权码</label>
-        <input
-          value={props.licenseKey}
-          onChange={(event) => props.onLicenseKeyChange(event.target.value)}
-          className="mt-2 rounded-2xl border border-slate-700/80 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-400/70"
-          placeholder="输入正式授权码"
-        />
-        <button
-          className="mt-4 rounded-2xl border border-cyan-400/30 bg-cyan-500/10 px-4 py-3 font-semibold text-cyan-100 transition hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-60"
-          disabled={props.busy}
-          onClick={props.onActivate}
-        >
-          {props.busy ? '处理中...' : '激活正式授权'}
-        </button>
-      </section>
-    </div>
-  )
-}
-
-function FeaturePanel(props: { title: string; description: string }) {
-  return (
-    <div className="rounded-[24px] border border-slate-700/70 bg-slate-950/55 p-4">
-      <div className="text-sm font-semibold text-white">{props.title}</div>
-      <div className="mt-2 text-sm leading-6 text-slate-400">{props.description}</div>
-    </div>
-  )
-}
-
-function DeviceField(props: { label: string; value: string }) {
-  return (
-    <div className="rounded-2xl border border-slate-700/70 bg-slate-950/55 px-3 py-3">
-      <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{props.label}</div>
-      <div className="mt-2 break-all text-sm text-slate-100">{props.value || '-'}</div>
-    </div>
-  )
-}
-
-function LicenseDrawer(props: {
-  open: boolean
-  license: LicenseSnapshot
-  licenseKey: string
-  licenseBusy: boolean
-  bindBusy: boolean
-  bindSession: LicenseBindSession | null
-  miniAppCodeUrl: string
-  onLicenseKeyChange: (value: string) => void
-  onStartTrial: () => void
-  onActivate: () => void
-  onCreateBindSession: () => void
-  onRefreshBindStatus: () => void
-  onClose: () => void
-}) {
-  const bindStatus = props.bindSession?.status || '-'
-  const bindMessage = props.bindSession?.message || '-'
-  const bindToken = String(props.bindSession?.bindToken || '').trim()
-  const bindSceneCode = String(props.bindSession?.sceneCode || '').trim()
-  const bindRemaining = props.bindSession ? formatRelative(Number(props.bindSession.remainingSec || 0)) : '-'
-
-  return (
-    <div className={`pointer-events-none fixed inset-3 z-30 transition duration-300 md:inset-y-4 md:left-auto md:right-4 md:w-[380px] ${props.open ? 'translate-x-0 opacity-100' : 'translate-x-[110%] opacity-0'}`}>
-      <div className="glass pointer-events-auto flex h-full flex-col rounded-[30px] p-5">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-xl font-semibold text-white">Auth Center</h2>
-            <p className="mt-1 text-sm text-slate-400">Trial, license key activation, and mini-app binding.</p>
-          </div>
-          <button className="rounded-full border border-slate-700/80 px-3 py-2 text-sm text-slate-200 transition hover:bg-slate-800/60" onClick={props.onClose}>
-            关闭
-          </button>
-        </div>
-
-        <div className="scrollbar-thin mt-5 flex-1 space-y-5 overflow-auto pr-1">
-          <Panel title="授权状态">
-            <DetailRow label="授权模式" value={formatAccessModeText(props.license.accessMode)} />
-            <DetailRow label="授权状态" value={props.license.authorized ? '已授权' : '未授权'} />
-            <DetailRow label="试用剩余" value={props.license.accessMode === 'trial' ? formatRelative(props.license.trialRemainingSec) : '-'} />
-            <DetailRow label="服务提示" value={props.license.message || '-'} />
-          </Panel>
-
-          <Panel title="授权码">
-            <Input label="授权码" value={props.licenseKey} onChange={props.onLicenseKeyChange} />
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              <button
-                className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-3 py-3 text-sm text-emerald-100 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={props.licenseBusy}
-                onClick={props.onStartTrial}
-              >
-                {props.licenseBusy ? '处理中...' : '开始试用'}
-              </button>
-              <button
-                className="rounded-2xl border border-cyan-400/20 bg-cyan-500/10 px-3 py-3 text-sm text-cyan-100 transition hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={props.licenseBusy}
-                onClick={props.onActivate}
-              >
-                {props.licenseBusy ? '处理中...' : '激活授权'}
-              </button>
-            </div>
-          </Panel>
-
-          <Panel title="绑定小程序">
-            <div className="rounded-2xl border border-slate-700/80 bg-slate-950/50 p-3">
-              {props.miniAppCodeUrl ? (
-                <img src={props.miniAppCodeUrl} alt="mini-app-code" className="mx-auto h-44 w-44 rounded-xl border border-slate-700/80 bg-slate-900 object-contain" />
-              ) : (
-                <div className="flex h-44 items-center justify-center rounded-xl border border-dashed border-slate-700 text-sm text-slate-400">
-                  点击“生成小程序码”后显示
-                </div>
-              )}
-            </div>
-            <DetailRow label="绑定状态" value={bindStatus} />
-            <DetailRow label="剩余时长" value={bindRemaining} />
-            <DetailRow label="绑定令牌" value={bindToken || '-'} />
-            <DetailRow label="场景码" value={bindSceneCode || '-'} />
-            <DetailRow label="绑定提示" value={bindMessage} />
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              <button
-                className="rounded-2xl border border-cyan-400/20 bg-cyan-500/10 px-3 py-3 text-sm text-cyan-100 transition hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={props.bindBusy}
-                onClick={props.onCreateBindSession}
-              >
-                {props.bindBusy ? '处理中...' : '生成小程序码'}
-              </button>
-              <button
-                className="rounded-2xl border border-slate-600/80 bg-slate-900/80 px-3 py-3 text-sm text-slate-100 transition hover:bg-slate-800/60 disabled:cursor-not-allowed disabled:opacity-60"
-                disabled={props.bindBusy || !bindToken}
-                onClick={props.onRefreshBindStatus}
-              >
-                刷新绑定状态
-              </button>
-            </div>
-          </Panel>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function SettingsDrawer(props: {
-  open: boolean
-  settings: DesktopSettings
-  updateState: UpdateSnapshot
-  learningSummary: AnyRecord | null
-  onClose: () => void
-  onChange: (patch: Partial<DesktopSettings>) => void
-  onNestedChange: (updater: (settings: DesktopSettings) => DesktopSettings) => void
-  onInstallUpdate: () => void
-  onDownloadUpdate: () => void
-}) {
-  return (
-    <div className={`pointer-events-none fixed inset-3 z-20 transition duration-300 md:inset-y-4 md:left-auto md:right-4 md:w-[380px] ${props.open ? 'translate-x-0 opacity-100' : 'translate-x-[110%] opacity-0'}`}>
-      <div className="glass pointer-events-auto flex h-full flex-col rounded-[30px] p-5">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-xl font-semibold text-white">设置中心</h2>
-            <p className="mt-1 text-sm text-slate-400">修改服务端、筛选阈值和更新通道。</p>
-          </div>
-          <button className="rounded-full border border-slate-700/80 px-3 py-2 text-sm text-slate-200 transition hover:bg-slate-800/60" onClick={props.onClose}>
-            关闭
-          </button>
-        </div>
-
-        <div className="scrollbar-thin mt-5 flex-1 space-y-5 overflow-auto pr-1">
-          <Panel title="服务端">
-            <StaticField label="服务端地址" value={FIXED_POOL_SERVER_URL} />
-            <Input label="更新地址" value={props.settings.updateFeedUrl} onChange={(value) => props.onChange({ updateFeedUrl: value })} />
-          </Panel>
-
-          <Panel title="筛选">
-            <SwitchRow
-              label="过滤粉丝团"
-              checked={props.settings.filterFanClub.enabled}
-              onChange={(checked) => props.onNestedChange((settings) => ({ ...settings, filterFanClub: { enabled: checked } }))}
-            />
-            <SwitchRow
-              label="只抢实物"
-              checked={props.settings.onlyPhysicalPrize.enabled}
-              onChange={(checked) => props.onNestedChange((settings) => ({ ...settings, onlyPhysicalPrize: { enabled: checked } }))}
-            />
-            <SwitchRow
-              label="优先大红包"
-              checked={props.settings.preferBigRedPacket.enabled}
-              onChange={(checked) => props.onNestedChange((settings) => ({
-                ...settings,
-                preferBigRedPacket: { ...settings.preferBigRedPacket, enabled: checked }
-              }))}
-            />
-            <RangeInput
-              label="大红包阈值"
-              value={String(props.settings.preferBigRedPacket.threshold)}
-              onChange={(value) => props.onNestedChange((settings) => ({
-                ...settings,
-                preferBigRedPacket: {
-                  ...settings.preferBigRedPacket,
-                  threshold: Number(value || 40)
-                }
-              }))}
-            />
-            <RangeInput
-              label="命中率下限"
-              value={String(props.settings.hitRate.value)}
-              onChange={(value) => props.onNestedChange((settings) => ({
-                ...settings,
-                hitRate: {
-                  ...settings.hitRate,
-                  value: Number(value || 0.08)
-                }
-              }))}
-            />
-          </Panel>
-
-          <Panel title="执行">
-            <SwitchRow
-              label="自动抢红包"
-              checked={props.settings.enableRedPacket}
-              onChange={(checked) => props.onChange({ enableRedPacket: checked })}
-            />
-            <SwitchRow
-              label="随机互动"
-              checked={props.settings.randomInteraction}
-              onChange={(checked) => props.onChange({ randomInteraction: checked })}
-            />
-            <RangeInput
-              label="抢后停留（秒）"
-              value={String(props.settings.stayDuration)}
-              onChange={(value) => props.onChange({ stayDuration: Number(value || 18) })}
-            />
-          </Panel>
-
-          <Panel title="更新与学习">
-            <DetailRow label="更新状态" value={formatUpdateStatusText(props.updateState.status)} />
-            <DetailRow label="当前版本" value={props.updateState.currentVersion} />
-            <DetailRow label="最新版本" value={props.updateState.latestVersion || '-'} />
-            <DetailRow label="学习反馈数" value={String(props.learningSummary?.feedbackCount || 0)} />
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              <button className="rounded-2xl border border-cyan-400/20 bg-cyan-500/10 px-3 py-3 text-sm text-cyan-100 transition hover:bg-cyan-500/20" onClick={props.onDownloadUpdate}>
-                下载更新
-              </button>
-              <button className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-3 py-3 text-sm text-emerald-100 transition hover:bg-emerald-500/20" onClick={props.onInstallUpdate}>
-                安装更新
-              </button>
-            </div>
-          </Panel>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function Panel(props: { title: string; children: ReactNode }) {
-  return (
-    <section className="rounded-[24px] border border-slate-700/70 bg-slate-950/55 p-4">
-      <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-300">{props.title}</h3>
-      <div className="mt-4 space-y-3">{props.children}</div>
-    </section>
-  )
-}
-
-function Input(props: { label: string; value: string; onChange: (value: string) => void }) {
-  return (
-    <label className="block">
-      <div className="mb-2 text-xs uppercase tracking-[0.16em] text-slate-500">{props.label}</div>
-      <input
-        value={props.value}
-        onChange={(event) => props.onChange(event.target.value)}
-        className="w-full rounded-2xl border border-slate-700/80 bg-slate-900/80 px-3 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-400/60"
-      />
-    </label>
-  )
-}
-
-function StaticField(props: { label: string; value: string }) {
-  return (
-    <div>
-      <div className="mb-2 text-xs uppercase tracking-[0.16em] text-slate-500">{props.label}</div>
-      <div className="w-full rounded-2xl border border-slate-700/80 bg-slate-900/55 px-3 py-3 text-sm text-slate-100">
-        {props.value}
-      </div>
-    </div>
-  )
-}
-
-function RangeInput(props: { label: string; value: string; onChange: (value: string) => void }) {
-  return <Input {...props} />
-}
-
-function SwitchRow(props: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
-  return (
-    <button
-      className="flex w-full items-center justify-between rounded-2xl border border-slate-700/80 bg-slate-900/80 px-3 py-3 text-sm text-slate-200 transition hover:border-slate-500"
-      onClick={() => props.onChange(!props.checked)}
-    >
-      <span>{props.label}</span>
-      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${props.checked ? 'bg-emerald-400 text-slate-950' : 'bg-slate-700 text-slate-200'}`}>
-        {props.checked ? '开' : '关'}
-      </span>
-    </button>
-  )
-}

@@ -1,4 +1,4 @@
-import { calcAdaptiveScanProfile, createScanRiskState, updateScanRiskState } from './scanRiskPolicy'
+﻿import { calcAdaptiveScanProfile, createScanRiskState, updateScanRiskState } from './scanRiskPolicy'
 import {
   getRedPacketAveragePerWinner as getLotteryAveragePerWinner,
   isPhysicalPrizeLottery
@@ -2278,7 +2278,7 @@ class LotteryManager {
       return {
         retryDelay,
         forceScan: true,
-        message: `No server task yet, run first-round local scan in ${Math.ceil(retryDelay / 1000)}s...`,
+        message: `当前账号尚未完成首轮扫描，${Math.ceil(retryDelay / 1000)}秒后继续补扫...`,
         silent: !showMessage
       }
     }
@@ -2289,7 +2289,7 @@ class LotteryManager {
     return {
       retryDelay,
       forceScan: true,
-      message: `No server task available, local scan fallback starts in ${Math.ceil(retryDelay / 1000)}s...`,
+      message: `服务端当前暂无可分配任务，${Math.ceil(retryDelay / 1000)}秒后继续请求共享池...`,
       silent: !showMessage
     }
   }
@@ -2951,7 +2951,17 @@ class LotteryManager {
       const scanAssignment = await this.refreshPoolScanAssignment(scanOnly || quickCycle)
       const scanPlan = forceScanner ? forcedScanPlan : this.getNormalScanPlan(accountId, scanAssignment)
       const isScanner = forceScanner || !!scanPlan
-      if (isScanner && this.activeScanAccountId && this.activeScanAccountId !== accountId) {
+      const activeScannerId = String(this.activeScanAccountId || '').trim()
+      if (activeScannerId && activeScannerId !== accountId) {
+        const activeExists = this.accounts.has(activeScannerId)
+        const activePaused = activeExists ? this.isPaused(activeScannerId) : true
+        const activeStillAssigned = forceScanner ? true : this.scanPlanByAccount.has(activeScannerId)
+        if (!activeExists || activePaused || !activeStillAssigned) {
+          this.logger.debug('[' + accountId + '] release stale active scanner slot: ' + activeScannerId)
+          this.activeScanAccountId = ''
+        }
+      }
+      if (!forceScanner && isScanner && this.activeScanAccountId && this.activeScanAccountId !== accountId) {
         this.logScanRoleIfChanged(accountId, 'worker')
         if (!scanOnly) {
           this.scheduleSelectionOrScanRetry(accountId, 1800, { quickCycle, trigger: 'scan-slot-busy' })
@@ -2964,6 +2974,21 @@ class LotteryManager {
         if (scanOnly) {
           return
         }
+
+        const firstRoundPending = accountData.firstRoundScanDone !== true
+        if (firstRoundPending && !forceScanner) {
+          const retryDelay = quickCycle
+            ? this.randomBetween(480, 900)
+            : this.randomBetween(700, 1200)
+          accountData.callbacks.onLog('⚠️ 当前账号未完成首轮扫描，先补一轮本地扫描再继续派单...')
+          this.scheduleSelectionOrScanRetry(accountId, retryDelay, {
+            quickCycle: true,
+            forceScan: true,
+            trigger: 'worker-first-round-fallback'
+          })
+          return
+        }
+
         await this.refreshPoolFromServer(accountId)
         this.removeExpiredLotteries(accountId)
         this.calculatePredictedProbabilities(accountId)
@@ -3128,13 +3153,13 @@ class LotteryManager {
       if (useSupermanFirstRound && accountData.firstRoundScanDone !== true) {
         const queueDrained = await this.waitPoolUploadIdle(accountId, 4200)
         if (queueDrained) {
-          accountData.callbacks.onLog('First-round page upload completed')
+          accountData.callbacks.onLog('✅ 首轮扫描结果已同步到共享池')
         }
         accountData.firstRoundScanDone = true
         if (this.clientFirstRoundScanDone !== true) {
           this.clientFirstRoundScanDone = true
         }
-        accountData.callbacks.onLog('First-round scan completed, switch to normal scan')
+        accountData.callbacks.onLog('✅ 首轮全量扫描完成，已切换常规调度')
       }
 
       if (scanOnly) {
@@ -3838,19 +3863,41 @@ class LotteryManager {
     if (!accountData || !lotteryInfo) return false
 
     const reuseCurrentRoom = options?.reuseCurrentRoom === true
+    const expectedRoomIds = Array.from(new Set(
+      [lotteryInfo.webRid, lotteryInfo.roomId]
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+    ))
+
+    const navigateToTarget = async (targetId) => {
+      if (!targetId) return
+      await ipcRenderer.invoke('navigate-to', {
+        accountId,
+        url: `https://live.douyin.com/${targetId}`
+      })
+    }
 
     this.updateAccountCurrentRoom(accountId, accountData, lotteryInfo, 'running')
 
     if (!reuseCurrentRoom) {
-      accountData.callbacks.onLog('🚪 正在进入直播间，等待福袋入口...')
-      await ipcRenderer.invoke('navigate-to', {
-        accountId,
-        url: `https://live.douyin.com/${lotteryInfo.webRid}`
+      accountData.callbacks.onLog('🔗 正在进入目标直播间...')
+      await navigateToTarget(expectedRoomIds[0] || '')
+    }
+
+    let ready = await this.waitForLiveRoomReady(accountId, 12000, {
+      expectedRoomIds
+    })
+
+    if (!ready && !reuseCurrentRoom && expectedRoomIds.length > 1) {
+      accountData.callbacks.onLog('⚠️ 首次房间标识进入失败，尝试备用房间ID重试...', 'warning')
+      await navigateToTarget(expectedRoomIds[1])
+      ready = await this.waitForLiveRoomReady(accountId, 12000, {
+        expectedRoomIds
       })
     }
 
-    const ready = await this.waitForLiveRoomReady(accountId)
     if (!ready) {
+      accountData.callbacks.onLog('⚠️ 直播间页面未就绪，暂不执行参与', 'warning')
       return false
     }
 
@@ -3858,7 +3905,7 @@ class LotteryManager {
   }
 
   /**
-   * executeLotteryParticipation 方法：执行超人模式参与动作，直接进入直播间并立即尝试参与。
+   * executeLotteryParticipation 方法：执行单次福袋参与流程（选袋→进房→UI参与→失败回退）。
    */
   async executeLotteryParticipation(accountId, accountData, lotteryInfo, config = {}, options = {}) {
     if (!accountData || !lotteryInfo) return
@@ -4225,8 +4272,8 @@ class LotteryManager {
   /**
    * waitForLiveRoomReady 方法：等待直播间页面就绪后再执行参与动作。
    */
-  async waitForLiveRoomReady(accountId, timeoutMs = 10000) {
-    return executeWaitForLiveRoomReady(this, accountId, timeoutMs)
+  async waitForLiveRoomReady(accountId, timeoutMs = 10000, options = {}) {
+    return executeWaitForLiveRoomReady(this, accountId, timeoutMs, options)
   }
 
   /**
@@ -4332,3 +4379,8 @@ class LotteryManager {
 }
 
 export default LotteryManager
+
+
+
+
+
