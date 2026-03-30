@@ -555,8 +555,8 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
           const poolBefore = manager.getAccountLotteryList(accountId).length
           manager.addLotteryInfoWithoutDuplicates(accountId, filteredList)
           const poolAfter = manager.getAccountLotteryList(accountId).length
-          emitScanMetric(manager, accountId, `category-batch-add:${category.name || category.categoryName || category.categoryId || 'unknown'}`, categoryRound.batches, {
-            batchTotal: Number(batchList.length || 0),
+          emitScanMetric(manager, accountId, 'all-batch-add', i + 1, {
+            batchTotal: Number(roomInfoList.length || 0),
             validLotteries: Number(filteredList.length || 0),
             poolBefore: Number(poolBefore || 0),
             poolAfter: Number(poolAfter || 0),
@@ -1126,6 +1126,8 @@ export async function getLotteryInfo(manager, roomInfoList, accountId, scanProfi
   await Promise.all(Array.from({ length: concurrency }, (_, i) => worker(i)))
   return { settled, stats }
 }
+
+
 
 
 
