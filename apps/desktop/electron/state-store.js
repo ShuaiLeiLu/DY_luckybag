@@ -116,7 +116,7 @@ function normalizeHistoryRecord(record = {}) {
     joinMode: String(record.joinMode || '').trim(),
     joinStatus: String(record.joinStatus || 'success').trim() || 'success',
     resultStatus: resultStatusText || (recordType === 'win' ? 'won' : 'pending'),
-    resultReason: String(record.resultReason || '').trim() || (recordType === 'win' ? '中奖' : '待开奖'),
+    resultReason: String(record.resultReason || '').trim() || (recordType === 'win' ? 'won' : 'pending_draw'),
     joinedAt,
     endTime: Math.max(0, toSafeNumber(record.endTime, 0)),
     rewardAmount,
@@ -125,7 +125,7 @@ function normalizeHistoryRecord(record = {}) {
 }
 
 function appendJsonLine(filePath, payload) {
-  fs.appendFileSync(filePath, ${JSON.stringify(payload)}\n, 'utf8')
+  fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, 'utf8')
 }
 
 function createStateStore(baseDir) {
@@ -136,7 +136,7 @@ function createStateStore(baseDir) {
   const winRecordsPath = path.join(stateDir, WIN_RECORDS_FILE_NAME)
   const db = new DatabaseSync(dbPath)
 
-  db.exec(
+  db.exec(`
     CREATE TABLE IF NOT EXISTS app_settings (
       setting_key TEXT PRIMARY KEY,
       setting_value TEXT NOT NULL,
@@ -161,18 +161,18 @@ function createStateStore(baseDir) {
     CREATE INDEX IF NOT EXISTS idx_runtime_events_created_at ON runtime_events(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_lottery_history_records_created_at ON lottery_history_records(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_lottery_history_records_type_created_at ON lottery_history_records(record_type, created_at DESC);
-  )
+  `)
 
   // Runtime timeline logs are session-only and should start fresh on every app launch.
   db.prepare('DELETE FROM runtime_events').run()
 
   function getSettings() {
-    const row = db.prepare(
+    const row = db.prepare(`
       SELECT setting_value
       FROM app_settings
       WHERE setting_key = 'desktop_settings'
       LIMIT 1
-    ).get()
+    `).get()
 
     const parsed = row ? safeParseJSON(row.setting_value, {}) : {}
     return normalizeSettings(parsed)
@@ -183,13 +183,13 @@ function createStateStore(baseDir) {
       ...getSettings(),
       ...(patch && typeof patch === 'object' ? patch : {})
     })
-    db.prepare(
+    db.prepare(`
       INSERT INTO app_settings (setting_key, setting_value, updated_at)
       VALUES ('desktop_settings', ?, ?)
       ON CONFLICT(setting_key) DO UPDATE
       SET setting_value = excluded.setting_value,
           updated_at = excluded.updated_at
-    ).run(JSON.stringify(merged), Date.now())
+    `).run(JSON.stringify(merged), Date.now())
     return merged
   }
 
@@ -204,10 +204,10 @@ function createStateStore(baseDir) {
       message: String(event.message || ''),
       createdAt: Date.now()
     }
-    const result = db.prepare(
+    const result = db.prepare(`
       INSERT INTO runtime_events (scope, level, message, created_at)
       VALUES (?, ?, ?, ?)
-    ).run(payload.scope, payload.level, payload.message, payload.createdAt)
+    `).run(payload.scope, payload.level, payload.message, payload.createdAt)
     return {
       id: Number(result.lastInsertRowid || 0),
       scope: payload.scope,
@@ -218,12 +218,12 @@ function createStateStore(baseDir) {
   }
 
   function listEvents(limit = 160) {
-    return db.prepare(
+    return db.prepare(`
       SELECT id, scope, level, message, created_at
       FROM runtime_events
       ORDER BY id DESC
       LIMIT ?
-    ).all(clampLimit(limit, 160, 500)).map((row) => ({
+    `).all(clampLimit(limit, 160, 500)).map((row) => ({
       id: Number(row.id || 0),
       scope: String(row.scope || 'desktop'),
       level: String(row.level || 'info'),
@@ -234,10 +234,10 @@ function createStateStore(baseDir) {
 
   function appendHistoryRecord(record = {}) {
     const payload = normalizeHistoryRecord(record)
-    const result = db.prepare(
+    const result = db.prepare(`
       INSERT INTO lottery_history_records (record_type, account_id, lottery_id, room_id, created_at, payload_json)
       VALUES (?, ?, ?, ?, ?, ?)
-    ).run(
+    `).run(
       payload.recordType,
       payload.accountId,
       payload.lotteryId,
@@ -257,19 +257,19 @@ function createStateStore(baseDir) {
     const normalizedType = String(options?.recordType || 'all').trim().toLowerCase()
     const safeLimit = clampLimit(limit, 200, 1000)
     const rows = normalizedType === 'join' || normalizedType === 'win'
-      ? db.prepare(
+      ? db.prepare(`
         SELECT id, record_type, created_at, payload_json
         FROM lottery_history_records
         WHERE record_type = ?
         ORDER BY id DESC
         LIMIT ?
-      ).all(normalizedType, safeLimit)
-      : db.prepare(
+      `).all(normalizedType, safeLimit)
+      : db.prepare(`
         SELECT id, record_type, created_at, payload_json
         FROM lottery_history_records
         ORDER BY id DESC
         LIMIT ?
-      ).all(safeLimit)
+      `).all(safeLimit)
 
     return rows.map((row) => normalizeHistoryRecord({
       ...safeParseJSON(row.payload_json, {}),

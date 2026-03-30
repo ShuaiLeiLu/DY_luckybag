@@ -17,6 +17,7 @@ declare global {
         downloadUpdate: () => Promise<UpdateSnapshot>
         installUpdate: () => Promise<{ success: boolean }>
         appendEvent: (event: Omit<RecoveryEvent, 'id' | 'createdAt'>) => Promise<{ success: boolean }>
+        appendHistoryRecord: (record: Partial<LotteryHistoryRecord>) => Promise<{ success: boolean; item?: LotteryHistoryRecord; error?: string }>
         onUpdateState: (handler: (snapshot: UpdateSnapshot) => void) => () => void
       }
     }

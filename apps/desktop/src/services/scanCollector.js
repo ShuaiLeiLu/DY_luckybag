@@ -523,8 +523,8 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
             break
           }
           const validLotteryInfoList = resList
-            .filter(item => item.status === 'fulfilled' && item.value)
-            .map(item => item.value)
+          .filter(item => item.status === 'fulfilled' && item.value)
+          .map(item => item.value)
           roundSummary.detailSuccess = validLotteryInfoList.length
 
           const filteredList = validLotteryInfoList
@@ -552,7 +552,16 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
               filterStats
             }
           )
+          const poolBefore = manager.getAccountLotteryList(accountId).length
           manager.addLotteryInfoWithoutDuplicates(accountId, filteredList)
+          const poolAfter = manager.getAccountLotteryList(accountId).length
+          emitScanMetric(manager, accountId, `category-batch-add:${category.name || category.categoryName || category.categoryId || 'unknown'}`, categoryRound.batches, {
+            batchTotal: Number(batchList.length || 0),
+            validLotteries: Number(filteredList.length || 0),
+            poolBefore: Number(poolBefore || 0),
+            poolAfter: Number(poolAfter || 0),
+            poolDelta: Number(poolAfter || 0) - Number(poolBefore || 0)
+          })
           manager.enqueuePoolCandidatesUpload(accountId, filteredList).catch(() => {})
           manager.calculatePredictedProbabilities(accountId)
           manager.sortLotteriesByProbability(accountId)
@@ -715,7 +724,16 @@ export async function startCollectLive(manager, accountId, scanProfile = null) {
               filterStats
             }
           )
+          const poolBefore = manager.getAccountLotteryList(accountId).length
           manager.addLotteryInfoWithoutDuplicates(accountId, filteredList)
+          const poolAfter = manager.getAccountLotteryList(accountId).length
+          emitScanMetric(manager, accountId, `category-batch-add:${category.name || category.categoryName || category.categoryId || 'unknown'}`, categoryRound.batches, {
+            batchTotal: Number(batchList.length || 0),
+            validLotteries: Number(filteredList.length || 0),
+            poolBefore: Number(poolBefore || 0),
+            poolAfter: Number(poolAfter || 0),
+            poolDelta: Number(poolAfter || 0) - Number(poolBefore || 0)
+          })
           manager.enqueuePoolCandidatesUpload(accountId, filteredList).catch(() => {})
         }, scanProfile)
 
@@ -818,6 +836,17 @@ export async function searchLiveRoomCategory(
               reason: categoryPermit.reason || 'rate_limited'
             }
           })
+          emitScanMetric(manager, accountId, `category:${category_name || category_id}`, i + 1, {
+            requestOk: false,
+            categoryId: String(category_id || ''),
+            categoryName: String(category_name || ''),
+            rawRooms: 0,
+            dedupRooms: 0,
+            detailRequested: 0,
+            validLotteries: 0,
+            hasMore: false,
+            error: `scan_permit_denied:${categoryPermit.reason || 'rate_limited'}`
+          })
           await manager.sleep(Math.min(12000, Math.max(600, Number(categoryPermit.retryAfterMs || 1200))))
           continue
         }
@@ -836,6 +865,17 @@ export async function searchLiveRoomCategory(
 
         if (!result.success || !result.roomInfoList) {
           noGrowthPages += 1
+          emitScanMetric(manager, accountId, `category:${category_name || category_id}`, i + 1, {
+            requestOk: false,
+            categoryId: String(category_id || ''),
+            categoryName: String(category_name || ''),
+            rawRooms: Number(rawRoomCount || 0),
+            dedupRooms: 0,
+            detailRequested: 0,
+            validLotteries: 0,
+            hasMore: false,
+            error: String(result?.error || 'request_failed')
+          })
           if (!result.success && isRiskErrorMessage(result.error)) {
             console.warn(`[scan] [${accountId}] 分类扫描命中风控: ${result.error}, category=${category_id}`)
             manager.applyScanRiskFeedback(accountId, { hardRiskCount: 1 }, accountData.callbacks.onLog)
@@ -887,6 +927,17 @@ export async function searchLiveRoomCategory(
           .filter(item => item.status === 'fulfilled' && item.value)
           .map(item => item.value)
 
+        emitScanMetric(manager, accountId, `category:${category_name || category_id}`, i + 1, {
+          requestOk: true,
+          categoryId: String(category_id || ''),
+          categoryName: String(category_name || ''),
+          rawRooms: Number(rawRoomCount || 0),
+          dedupRooms: Number(roomInfoList.length || 0),
+          detailRequested: Number(localClaim?.list?.length || 0),
+          localDedupSkipped: Number(localClaim?.skipped || 0),
+          validLotteries: Number(validLotteryInfoList.length || 0),
+          hasMore: result?.hasMore !== false
+        })
         // 每次分类请求先打印“扫到的候选福袋详情”（未经过条件筛选）
         logRequestDetail(
           manager,
@@ -1075,6 +1126,13 @@ export async function getLotteryInfo(manager, roomInfoList, accountId, scanProfi
   await Promise.all(Array.from({ length: concurrency }, (_, i) => worker(i)))
   return { settled, stats }
 }
+
+
+
+
+
+
+
 
 
 

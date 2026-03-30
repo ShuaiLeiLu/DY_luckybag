@@ -40,6 +40,7 @@ import type {
   DesktopSettings,
   DispatchSummary,
   LicenseSnapshot,
+  LotteryHistoryRecord,
   RecoveryEvent,
   UpdateSnapshot
 } from '@shared/models'
@@ -121,7 +122,7 @@ export default function App() {
   const [settings, setSettings] = useState<DesktopSettings>(defaultSettings)
   const [accounts, setAccounts] = useState<AccountSession[]>([])
   const [lotteriesByAccount, setLotteriesByAccount] = useState<Record<string, AnyRecord[]>>({})
-  const [historyRecords, setHistoryRecords] = useState<AnyRecord[]>([])
+  const [historyRecords, setHistoryRecords] = useState<LotteryHistoryRecord[]>([])
   const [dispatchSummary, setDispatchSummary] = useState<DispatchSummary>(emptyDispatchSummary)
   const [learningSummary, setLearningSummary] = useState<AnyRecord | null>(null)
   const [learningItems, setLearningItems] = useState<AnyRecord[]>([])
@@ -194,6 +195,30 @@ export default function App() {
     if (timer) {
       window.clearInterval(timer)
       loginTimersRef.current.delete(accountId)
+    }
+  })
+  const persistHistoryRecord = useEffectEvent(async (record: Partial<LotteryHistoryRecord> & AnyRecord) => {
+    const rewardAmount = Number(record.rewardAmount || 0)
+    const recordType: LotteryHistoryRecord['recordType'] = record.recordType === 'win' || String(record.resultStatus || '').trim().toLowerCase() === 'won' || rewardAmount > 0
+      ? 'win'
+      : 'join'
+    const createdAt = Number(record.createdAt || record.joinedAt || Date.now())
+    const normalizedRecord: Partial<LotteryHistoryRecord> = {
+      ...record,
+      recordType,
+      createdAt: Number.isFinite(createdAt) ? createdAt : Date.now()
+    }
+
+    try {
+      const saved = await window.electronAPI.desktop.appendHistoryRecord(normalizedRecord)
+      const nextRecord = saved?.item || normalizedRecord
+      startTransition(() => {
+        setHistoryRecords((current) => [nextRecord as LotteryHistoryRecord, ...current].slice(0, 240))
+      })
+    } catch (_) {
+      startTransition(() => {
+        setHistoryRecords((current) => [normalizedRecord as LotteryHistoryRecord, ...current].slice(0, 240))
+      })
     }
   })
 
@@ -321,6 +346,7 @@ export default function App() {
         type: event.level === 'success' ? 'success' : event.level === 'warning' ? 'warning' : event.level === 'error' ? 'error' : 'info',
         message: event.message
       })))
+      setHistoryRecords(Array.isArray(snapshot.historyRecords) ? snapshot.historyRecords : [])
     } catch (error) {
       addLog(`引导信息加载失败: ${String((error as Error)?.message || error)}`, 'warning')
     }
@@ -398,9 +424,7 @@ export default function App() {
           })
         },
         onHistoryRecord: (record: AnyRecord) => {
-          startTransition(() => {
-            setHistoryRecords((current) => [record, ...current].slice(0, 120))
-          })
+          void persistHistoryRecord(record)
         },
         onLog: (message: string, type: UiLogEntry['type']) => addLog(message, type),
         onTokenInvalid: ({ id, reason }: { id: string; reason: string }) => {
