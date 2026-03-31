@@ -143,6 +143,33 @@ export default function App() {
     replaceLogs
   } = useTimelineLogs()
 
+  const appendAccountLog = useEffectEvent(async (
+    accountId: string,
+    message: string,
+    type: UiLogEntry['type'] = 'info'
+  ) => {
+    const normalizedId = String(accountId || '').trim()
+    const normalizedMessage = String(message || '').trim()
+    if (!normalizedId || !normalizedMessage) return
+    const level = type === 'success'
+      ? 'success'
+      : type === 'warning'
+        ? 'warning'
+        : type === 'error'
+          ? 'error'
+          : 'info'
+    try {
+      await window.electronAPI.desktop.appendAccountLog({
+        accountId: normalizedId,
+        level,
+        message: normalizedMessage,
+        scope: 'desktop'
+      })
+    } catch (_) {
+      // Ignore account log persistence failures to avoid blocking runtime flow.
+    }
+  })
+
   const poolClientId = useMemo(() => resolvePoolClientId(), [])
   const activePoolServerUrl = useMemo(() => settings.poolServerUrl.trim() || FIXED_POOL_SERVER_URL, [settings.poolServerUrl])
   const poolFingerprint = useMemo(() => resolveLicenseFingerprint(), [])
@@ -426,7 +453,10 @@ export default function App() {
         onHistoryRecord: (record: AnyRecord) => {
           void persistHistoryRecord(record)
         },
-        onLog: (message: string, type: UiLogEntry['type']) => addLog(message, type),
+        onLog: (message: string, type: UiLogEntry['type']) => {
+          addLog(message, type)
+          void appendAccountLog(accountId, message, type)
+        },
         onTokenInvalid: ({ id, reason }: { id: string; reason: string }) => {
           addLog(`账号 ${id} 登录态失效: ${reason || '需要重新扫码登录'}`, 'warning')
           patchAccount(id, { state: 'waiting', actionActive: false })

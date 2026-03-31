@@ -35,6 +35,7 @@ const INVOKE_CHANNELS = new Set([
   'desktop:download-update',
   'desktop:install-update',
   'desktop:append-event',
+  'desktop:append-account-log',
   'desktop:append-history-record'
 ])
 
@@ -116,6 +117,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     appendEvent(event) {
       return invoke('desktop:append-event', event)
+    },
+    appendAccountLog(record) {
+      return invoke('desktop:append-account-log', record)
     },
     appendHistoryRecord(record) {
       return invoke('desktop:append-history-record', record)

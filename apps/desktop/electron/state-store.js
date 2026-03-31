@@ -5,6 +5,7 @@ const { DatabaseSync } = require('node:sqlite')
 const DESKTOP_CONFIG_PATH = path.resolve(__dirname, '..', 'config.json')
 const JOIN_RECORDS_FILE_NAME = 'lottery-join-records.jsonl'
 const WIN_RECORDS_FILE_NAME = 'lottery-win-records.jsonl'
+const ACCOUNT_LOGS_DIR_NAME = 'account-logs'
 const BUILTIN_DEFAULT_SETTINGS = Object.freeze({
   poolServerUrl: 'http://110.40.169.26:9090',
   updateFeedUrl: 'https://updates.example.com/dy-fudai/windows',
@@ -48,6 +49,42 @@ function clampLimit(limit, fallback = 160, max = 500) {
   const normalized = Math.floor(toSafeNumber(limit, fallback))
   if (!Number.isFinite(normalized) || normalized <= 0) return fallback
   return Math.min(max, normalized)
+}
+
+function normalizeEventLevel(raw) {
+  const normalized = String(raw || '').trim().toLowerCase()
+  if (normalized === 'warning') return 'warning'
+  if (normalized === 'error') return 'error'
+  if (normalized === 'success') return 'success'
+  if (normalized === 'debug') return 'debug'
+  return 'info'
+}
+
+function sanitizeFileSegment(raw, fallback = 'unknown') {
+  const normalized = String(raw || '')
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^[_.\s]+|[_.\s]+$/g, '')
+  return normalized || fallback
+}
+
+function pad2(value) {
+  return String(Math.max(0, Number(value) || 0)).padStart(2, '0')
+}
+
+function formatLocalDateParts(ms) {
+  const date = new Date(Math.max(0, Number(ms) || Date.now()))
+  const yyyy = String(date.getFullYear())
+  const MM = pad2(date.getMonth() + 1)
+  const dd = pad2(date.getDate())
+  const hh = pad2(date.getHours())
+  const mm = pad2(date.getMinutes())
+  const ss = pad2(date.getSeconds())
+  return {
+    day: `${yyyy}-${MM}-${dd}`,
+    ts: `${yyyy}-${MM}-${dd} ${hh}:${mm}:${ss}`
+  }
 }
 
 function mergeSettings(base, patch = {}) {
@@ -131,6 +168,8 @@ function appendJsonLine(filePath, payload) {
 function createStateStore(baseDir) {
   const stateDir = path.join(baseDir, 'state')
   ensureDir(stateDir)
+  const accountLogsDir = path.join(stateDir, ACCOUNT_LOGS_DIR_NAME)
+  ensureDir(accountLogsDir)
   const dbPath = path.join(stateDir, 'desktop.sqlite')
   const joinRecordsPath = path.join(stateDir, JOIN_RECORDS_FILE_NAME)
   const winRecordsPath = path.join(stateDir, WIN_RECORDS_FILE_NAME)
@@ -253,6 +292,38 @@ function createStateStore(baseDir) {
     return item
   }
 
+  function appendAccountLog(record = {}) {
+    const accountId = String(record.accountId || '').trim() || 'unknown'
+    const scope = String(record.scope || 'desktop').trim() || 'desktop'
+    const level = normalizeEventLevel(record.level)
+    const message = String(record.message || '').replace(/\r?\n+/g, ' ').trim()
+    if (!message) {
+      return { success: false, error: 'message_empty' }
+    }
+    const createdAt = Math.max(0, toSafeNumber(record.createdAt, Date.now()))
+    const dateParts = formatLocalDateParts(createdAt)
+    const fileDir = path.join(accountLogsDir, sanitizeFileSegment(accountId))
+    ensureDir(fileDir)
+    const filePath = path.join(fileDir, `${dateParts.day}.log`)
+    appendJsonLine(filePath, {
+      ts: dateParts.ts,
+      createdAt,
+      accountId,
+      scope,
+      level,
+      message
+    })
+    return {
+      success: true,
+      accountId,
+      scope,
+      level,
+      message,
+      createdAt,
+      filePath
+    }
+  }
+
   function listHistoryRecords(limit = 200, options = {}) {
     const normalizedType = String(options?.recordType || 'all').trim().toLowerCase()
     const safeLimit = clampLimit(limit, 200, 1000)
@@ -281,6 +352,7 @@ function createStateStore(baseDir) {
 
   return {
     dbPath,
+    accountLogsDir,
     historyFiles: {
       join: joinRecordsPath,
       win: winRecordsPath
@@ -290,6 +362,7 @@ function createStateStore(baseDir) {
     clearRuntimeEvents,
     appendEvent,
     listEvents,
+    appendAccountLog,
     appendHistoryRecord,
     listHistoryRecords
   }

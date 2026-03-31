@@ -135,6 +135,14 @@ function appendRuntimeEvent(level = 'info', message = '', scope = 'desktop') {
   }
 }
 
+function appendRuntimeAccountLog(accountId = '', level = 'info', message = '', scope = 'desktop') {
+  try {
+    return ensureStateStore().appendAccountLog({ accountId, level, message, scope })
+  } catch (_) {
+    return { success: false, error: 'append_account_log_failed' }
+  }
+}
+
 function listVisibleAccountWindows(excludeAccountId = '') {
   return Array.from(browserViews.entries())
     .filter(([accountId, browserData]) => {
@@ -1519,6 +1527,22 @@ ipcMain.handle('desktop:append-event', async (_event, payload = {}) => {
   try {
     const item = appendRuntimeEvent(payload.level, payload.message, payload.scope)
     return { success: true, item }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+ipcMain.handle('desktop:append-account-log', async (_event, payload = {}) => {
+  try {
+    const item = appendRuntimeAccountLog(
+      payload.accountId,
+      payload.level,
+      payload.message,
+      payload.scope
+    )
+    return item && item.success === false
+      ? { success: false, error: item.error || 'append_account_log_failed' }
+      : { success: true, item }
   } catch (error) {
     return { success: false, error: error.message }
   }
