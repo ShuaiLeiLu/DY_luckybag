@@ -1,7 +1,5 @@
 import {
   startTransition,
-  type ReactNode,
-  useDeferredValue,
   useEffect,
   useEffectEvent,
   useMemo,
@@ -22,16 +20,27 @@ import {
   formatRelative,
   mergeAccountModel,
   normalizeLicenseSnapshot,
-  sortAccounts,
-  statusText,
-  statusTone
+  sortAccounts
 } from './lib/runtime'
+import { StatCard, ClusterBadge } from './components/ui/StatusWidgets'
+import { AccountCard } from './features/accounts/AccountCard'
+import { buildLegacyConfig } from './features/accounts/legacyConfig'
+import { DOUYIN_LOGIN_PROMPT_SCRIPT } from './features/accounts/loginPrompt'
+import { LicenseDrawer } from './features/license/LicenseDrawer'
+import { LicenseGate } from './features/license/LicenseGate'
+import { formatAccessModeText, formatLicensePlanText, formatUpdateStatusText } from './features/license/presentation'
+import { useLicenseBinding } from './features/license/useLicenseBinding'
+import { SettingsDrawer } from './features/settings/SettingsDrawer'
+import { TaskDetailPanel } from './features/dashboard/TaskDetailPanel'
+import { TimelinePanel } from './features/dashboard/TimelinePanel'
+import { type UiLogEntry, useTimelineLogs } from './features/dashboard/useTimelineLogs'
 import type {
   AccountSession,
   BootstrapSnapshot,
   DesktopSettings,
   DispatchSummary,
   LicenseSnapshot,
+  LotteryHistoryRecord,
   RecoveryEvent,
   UpdateSnapshot
 } from '@shared/models'
@@ -43,12 +52,6 @@ type ServiceResult<T = AnyRecord> = {
   error?: unknown
 }
 
-type UiLogEntry = {
-  id: number
-  time: string
-  type: 'info' | 'warning' | 'error' | 'success'
-  message: string
-}
 
 const defaultSettings: DesktopSettings = {
   poolServerUrl: FIXED_POOL_SERVER_URL,
@@ -104,125 +107,12 @@ const emptyUpdate: UpdateSnapshot = {
   checkedAt: 0
 }
 
-let logSeq = 0
 
-const DOUYIN_LOGIN_PROMPT_SCRIPT = String.raw`
-(() => {
-  const normalize = (value) => String(value || '').replace(/\s+/g, '').trim();
-  const textOf = (node) => normalize(
-    node?.innerText
-    || node?.textContent
-    || node?.getAttribute?.('aria-label')
-    || node?.getAttribute?.('title')
-    || ''
-  );
-  const isVisible = (node) => {
-    if (!node || typeof node.getBoundingClientRect !== 'function') return false;
-    const style = window.getComputedStyle(node);
-    if (!style || style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') return false;
-    const rect = node.getBoundingClientRect();
-    return rect.width >= 18 && rect.height >= 18 && rect.bottom >= 0 && rect.right >= 0;
-  };
-  const clickNode = (node) => {
-    if (!node) return false;
-    try { node.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
-    try { node.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true, view: window })); } catch (_) {}
-    try { node.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window })); } catch (_) {}
-    try { node.click(); } catch (_) {}
-    try { node.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window })); } catch (_) {}
-    return true;
-  };
-  const bodyText = normalize(document.body?.innerText || '');
-  const hasQr = /扫码登录|二维码登录|打开抖音扫码登录|请使用抖音扫码/.test(bodyText)
-    || !!document.querySelector('img[src*="qrcode"], img[alt*="二维码"], [class*="qrcode"] img, [class*="qr"] canvas');
-
-  const nodes = Array.from(document.querySelectorAll('button,a,[role="button"],div,span')).filter(isVisible);
-  const pickNode = (patterns, options = {}) => {
-    let best = null;
-    let bestScore = -Infinity;
-    nodes.forEach((node) => {
-      const text = textOf(node);
-      if (!text) return;
-      if (!patterns.some((pattern) => pattern.test(text))) return;
-      const rect = node.getBoundingClientRect();
-      let score = rect.width * rect.height;
-      if (options.preferTopRight) {
-        score += Math.max(0, window.innerWidth - rect.left) * 0.6;
-        score += Math.max(0, 220 - rect.top);
-      }
-      if (options.preferCentered) {
-        const cx = rect.left + rect.width / 2;
-        const cy = rect.top + rect.height / 2;
-        score -= Math.abs(window.innerWidth / 2 - cx) * 0.2;
-        score -= Math.abs(window.innerHeight / 2 - cy) * 0.15;
-      }
-      if (score > bestScore) {
-        best = node;
-        bestScore = score;
-      }
-    });
-    return best;
-  };
-
-  const qrTab = pickNode([/扫码登录/, /二维码登录/, /^扫码$/], { preferCentered: true });
-  if (hasQr) {
-    if (qrTab) {
-      clickNode(qrTab);
-    }
-    return { ok: true, state: 'qr_ready', text: qrTab ? textOf(qrTab) : '' };
-  }
-
-  if (qrTab) {
-    clickNode(qrTab);
-    return { ok: true, state: 'qr_tab_clicked', text: textOf(qrTab) };
-  }
-
-  const loginNode = pickNode([/^登录$/, /立即登录/, /去登录/, /账号登录/, /手机号登录/], { preferTopRight: true })
-    || pickNode([/登录/], { preferTopRight: true });
-
-  if (loginNode) {
-    clickNode(loginNode);
-    return { ok: true, state: 'login_clicked', text: textOf(loginNode) };
-  }
-
-  return {
-    ok: false,
-    state: 'login_not_found',
-    text: bodyText.slice(0, 120)
-  };
-})()
-`
-
-function buildLegacyConfig(settings: DesktopSettings) {
-  return {
-    stayDuration: settings.stayDuration,
-    enableRedPacket: settings.enableRedPacket,
-    hitRate: settings.hitRate,
-    secondInspect: settings.secondInspect,
-    filterFanClub: settings.filterFanClub,
-    onlyPhysicalPrize: settings.onlyPhysicalPrize,
-    preferBigRedPacket: settings.preferBigRedPacket,
-    filterOnline: settings.filterOnline,
-    randomInteraction: { enabled: settings.randomInteraction },
-    closeLiveStream: { enabled: false },
-    participationCount: settings.participationCount,
-    singleAccountDuration: settings.singleAccountDuration,
-    poolServer: { url: settings.poolServerUrl }
-  }
-}
-
-function buildLogEntry(message: string, type: UiLogEntry['type'] = 'info'): UiLogEntry {
-  return {
-    id: ++logSeq,
-    time: new Date().toLocaleTimeString(),
-    type,
-    message: String(message || '')
-  }
-}
 
 function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
+
 
 export default function App() {
   const manager = useMemo(() => new LotteryManager(), [])
@@ -232,8 +122,7 @@ export default function App() {
   const [settings, setSettings] = useState<DesktopSettings>(defaultSettings)
   const [accounts, setAccounts] = useState<AccountSession[]>([])
   const [lotteriesByAccount, setLotteriesByAccount] = useState<Record<string, AnyRecord[]>>({})
-  const [historyRecords, setHistoryRecords] = useState<AnyRecord[]>([])
-  const [logs, setLogs] = useState<UiLogEntry[]>([])
+  const [historyRecords, setHistoryRecords] = useState<LotteryHistoryRecord[]>([])
   const [dispatchSummary, setDispatchSummary] = useState<DispatchSummary>(emptyDispatchSummary)
   const [learningSummary, setLearningSummary] = useState<AnyRecord | null>(null)
   const [learningItems, setLearningItems] = useState<AnyRecord[]>([])
@@ -242,36 +131,50 @@ export default function App() {
   const [licenseKey, setLicenseKey] = useState('')
   const [selectedAccountId, setSelectedAccountId] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [logQuery, setLogQuery] = useState('')
+  const [authDrawerOpen, setAuthDrawerOpen] = useState(false)
   const [licenseBusy, setLicenseBusy] = useState(false)
-  const deferredLogQuery = useDeferredValue(logQuery)
+  const {
+    filteredLogs,
+    logListRef,
+    logQuery,
+    setLogQuery,
+    handleLogListScroll,
+    addLog,
+    replaceLogs
+  } = useTimelineLogs()
 
-  const poolClientId = useMemo(() => resolvePoolClientId(), [])
-  const poolFingerprint = useMemo(() => resolveLicenseFingerprint(), [])
-
-  const selectedAccount = accounts.find((item) => item.id === selectedAccountId) || accounts[0] || null
-  const selectedLotteries = selectedAccount ? (lotteriesByAccount[selectedAccount.id] || []) : []
-  const filteredLogs = logs.filter((entry) => {
-    if (!deferredLogQuery.trim()) return true
-    return entry.message.toLowerCase().includes(deferredLogQuery.trim().toLowerCase())
-  })
-
-  const appendEvent = useEffectEvent(async (level: RecoveryEvent['level'], message: string, scope = 'desktop') => {
+  const appendAccountLog = useEffectEvent(async (
+    accountId: string,
+    message: string,
+    type: UiLogEntry['type'] = 'info'
+  ) => {
+    const normalizedId = String(accountId || '').trim()
+    const normalizedMessage = String(message || '').trim()
+    if (!normalizedId || !normalizedMessage) return
+    const level = type === 'success'
+      ? 'success'
+      : type === 'warning'
+        ? 'warning'
+        : type === 'error'
+          ? 'error'
+          : 'info'
     try {
-      await window.electronAPI.desktop.appendEvent({ level, message, scope })
+      await window.electronAPI.desktop.appendAccountLog({
+        accountId: normalizedId,
+        level,
+        message: normalizedMessage,
+        scope: 'desktop'
+      })
     } catch (_) {
-      // ignore
+      // Ignore account log persistence failures to avoid blocking runtime flow.
     }
   })
 
-  const addLog = useEffectEvent((message: string, type: UiLogEntry['type'] = 'info') => {
-    const entry = buildLogEntry(message, type)
-    startTransition(() => {
-      setLogs((current) => [...current.slice(-359), entry])
-    })
-    appendEvent(type === 'success' ? 'success' : type === 'warning' ? 'warning' : type === 'error' ? 'error' : 'info', message)
-  })
+  const poolClientId = useMemo(() => resolvePoolClientId(), [])
+  const activePoolServerUrl = useMemo(() => settings.poolServerUrl.trim() || FIXED_POOL_SERVER_URL, [settings.poolServerUrl])
+  const poolFingerprint = useMemo(() => resolveLicenseFingerprint(), [])
 
+  const selectedAccount = accounts.find((item) => item.id === selectedAccountId) || accounts[0] || null
   const syncRuntimeRef = (account: AccountSession) => {
     runtimeAccountsRef.current.set(account.id, {
       ...(runtimeAccountsRef.current.get(account.id) || {}),
@@ -321,6 +224,30 @@ export default function App() {
       loginTimersRef.current.delete(accountId)
     }
   })
+  const persistHistoryRecord = useEffectEvent(async (record: Partial<LotteryHistoryRecord> & AnyRecord) => {
+    const rewardAmount = Number(record.rewardAmount || 0)
+    const recordType: LotteryHistoryRecord['recordType'] = record.recordType === 'win' || String(record.resultStatus || '').trim().toLowerCase() === 'won' || rewardAmount > 0
+      ? 'win'
+      : 'join'
+    const createdAt = Number(record.createdAt || record.joinedAt || Date.now())
+    const normalizedRecord: Partial<LotteryHistoryRecord> = {
+      ...record,
+      recordType,
+      createdAt: Number.isFinite(createdAt) ? createdAt : Date.now()
+    }
+
+    try {
+      const saved = await window.electronAPI.desktop.appendHistoryRecord(normalizedRecord)
+      const nextRecord = saved?.item || normalizedRecord
+      startTransition(() => {
+        setHistoryRecords((current) => [nextRecord as LotteryHistoryRecord, ...current].slice(0, 240))
+      })
+    } catch (_) {
+      startTransition(() => {
+        setHistoryRecords((current) => [normalizedRecord as LotteryHistoryRecord, ...current].slice(0, 240))
+      })
+    }
+  })
 
   const ensureAccountLoginPrompt = useEffectEvent(async (accountId: string, nickname: string) => {
     let prompted = false
@@ -350,12 +277,33 @@ export default function App() {
 
   const refreshLicense = useEffectEvent(async () => {
     const baseUrl = settings.poolServerUrl.trim() || FIXED_POOL_SERVER_URL
-    const result = (await fetchLicenseStatus(baseUrl, {
+    const requestStatus = async (timeoutMs: number) => (await fetchLicenseStatus(baseUrl, {
       clientId: poolClientId,
       fingerprint: poolFingerprint,
-      timeoutMs: 3000
+      timeoutMs
     })) as ServiceResult<{ license?: AnyRecord }>
+
+    let result = await requestStatus(3000)
+    const firstError = String(result?.error || '')
+    if (!result?.ok && /timeout/i.test(firstError)) {
+      result = await requestStatus(9000)
+    }
+
     if (!result?.ok) {
+      const errorText = String(result?.error || '未知错误')
+      const keepCurrent = license.authorized
+        || license.unrestricted
+        || license.accessMode === 'unrestricted'
+        || license.accessMode === 'licensed'
+        || license.accessMode === 'trial'
+      if (keepCurrent) {
+        setLicense((current) => ({
+          ...current,
+          message: `授权服务请求超时：${errorText}（保持当前授权状态）`,
+          checkedAt: Date.now()
+        }))
+        return
+      }
       setLicense({
         ...emptyLicense,
         enabled: true,
@@ -363,7 +311,7 @@ export default function App() {
         accessMode: 'locked',
         requiresActivation: true,
         state: 'backend_unavailable',
-        message: `授权服务不可用: ${String(result?.error || 'unknown')}`,
+        message: `授权服务不可用：${errorText}`,
         checkedAt: Date.now()
       })
       return
@@ -372,7 +320,7 @@ export default function App() {
   })
 
   const refreshDispatch = useEffectEvent(async () => {
-    const poolServerUrl = settings.poolServerUrl.trim() || FIXED_POOL_SERVER_URL
+    const poolServerUrl = activePoolServerUrl
     manager.setPoolServerConfig({ url: poolServerUrl }, { silent: true })
     const result = (await manager.fetchPoolTaskDebugSnapshot(buildLegacyConfig(settings), { limit: 50 })) as ServiceResult<{
       summary?: AnyRecord
@@ -419,14 +367,13 @@ export default function App() {
         ...(snapshot.settings || {})
       })
       setUpdateState(snapshot.update || emptyUpdate)
-      startTransition(() => {
-        setLogs((snapshot.events || []).map((event) => ({
-          id: event.id,
-          time: new Date(event.createdAt).toLocaleTimeString(),
-          type: event.level === 'success' ? 'success' : event.level === 'warning' ? 'warning' : event.level === 'error' ? 'error' : 'info',
-          message: event.message
-        })))
-      })
+      replaceLogs((snapshot.events || []).map((event) => ({
+        id: event.id,
+        time: new Date(event.createdAt).toLocaleTimeString(),
+        type: event.level === 'success' ? 'success' : event.level === 'warning' ? 'warning' : event.level === 'error' ? 'error' : 'info',
+        message: event.message
+      })))
+      setHistoryRecords(Array.isArray(snapshot.historyRecords) ? snapshot.historyRecords : [])
     } catch (error) {
       addLog(`引导信息加载失败: ${String((error as Error)?.message || error)}`, 'warning')
     }
@@ -476,7 +423,7 @@ export default function App() {
           patchAccount(accountId, { state: 'waiting', actionActive: false })
           return
         }
-        await window.electronAPI.invoke('navigate-to', { accountId, url: 'https://live.douyin.com/' })
+        await window.electronAPI.invoke('navigate-to', { accountId, url: 'https://www.douyin.com' })
       }
 
       await window.electronAPI.desktop.setAccountMonitoring(accountId, true)
@@ -504,11 +451,12 @@ export default function App() {
           })
         },
         onHistoryRecord: (record: AnyRecord) => {
-          startTransition(() => {
-            setHistoryRecords((current) => [record, ...current].slice(0, 120))
-          })
+          void persistHistoryRecord(record)
         },
-        onLog: (message: string, type: UiLogEntry['type']) => addLog(message, type),
+        onLog: (message: string, type: UiLogEntry['type']) => {
+          addLog(message, type)
+          void appendAccountLog(accountId, message, type)
+        },
         onTokenInvalid: ({ id, reason }: { id: string; reason: string }) => {
           addLog(`账号 ${id} 登录态失效: ${reason || '需要重新扫码登录'}`, 'warning')
           patchAccount(id, { state: 'waiting', actionActive: false })
@@ -556,7 +504,7 @@ export default function App() {
       }
       patchAccount(accountId, { state: 'opened', actionActive: false })
       await window.electronAPI.desktop.setAccountMonitoring(accountId, false)
-      await window.electronAPI.invoke('navigate-to', { accountId, url: 'https://live.douyin.com/' })
+      await window.electronAPI.invoke('navigate-to', { accountId, url: 'https://www.douyin.com' })
       await window.electronAPI.desktop.showAccountWindow(accountId).catch(() => {})
       void ensureAccountLoginPrompt(accountId, runtime.nickname || accountId)
       stopLoginPolling(accountId)
@@ -713,9 +661,12 @@ export default function App() {
   const totalWins = accounts.reduce((sum, account) => sum + Number(account.todayLotteryWinCount || 0), 0)
   const totalDiamonds = accounts.reduce((sum, account) => sum + Number(account.todayEarnedDiamonds || 0), 0)
   const totalParticipation = accounts.reduce((sum, account) => sum + Number(account.participationCount || 0), 0)
+  const accessModeText = formatAccessModeText(license.accessMode)
+  const updateStatusText = formatUpdateStatusText(updateState.status)
+  const licensePlanText = formatLicensePlanText(license)
 
   async function handleStartTrial() {
-    const poolServerUrl = settings.poolServerUrl.trim() || FIXED_POOL_SERVER_URL
+    const poolServerUrl = activePoolServerUrl
     setLicenseBusy(true)
     try {
       const result = (await startLicenseTrial(poolServerUrl, {
@@ -725,19 +676,36 @@ export default function App() {
         timeoutMs: 3000
       })) as ServiceResult<{ license?: AnyRecord }>
       if (!result?.ok) {
-        addLog(`试用开启失败: ${String(result?.error || 'unknown')}`, 'error')
+        const errorText = String(result?.data?.license?.message || result?.error || '未知错误')
+        const message = `试用开启失败：${errorText}`
+        setLicense((current) => ({
+          ...current,
+          message,
+          checkedAt: Date.now()
+        }))
+        addLog(message, 'error')
+        await refreshLicense()
         return
       }
       const nextLicense = normalizeLicenseSnapshot(result.data?.license || {})
       setLicense(nextLicense)
-      addLog(nextLicense.authorized ? '设备试用已开启，完整功能已解锁 3 天' : nextLicense.message, nextLicense.authorized ? 'success' : 'warning')
+      addLog(nextLicense.authorized ? '试用已开启' : nextLicense.message, nextLicense.authorized ? 'success' : 'warning')
+    } catch (error) {
+      const errorText = String((error as Error)?.message || error || '未知错误')
+      const message = `试用开启失败：${errorText}`
+      setLicense((current) => ({
+        ...current,
+        message,
+        checkedAt: Date.now()
+      }))
+      addLog(message, 'error')
     } finally {
       setLicenseBusy(false)
     }
   }
 
   async function handleActivate() {
-    const poolServerUrl = settings.poolServerUrl.trim() || FIXED_POOL_SERVER_URL
+    const poolServerUrl = activePoolServerUrl
     if (!licenseKey.trim()) {
       addLog('请输入授权码', 'warning')
       return
@@ -753,17 +721,82 @@ export default function App() {
         timeoutMs: 3000
       })) as ServiceResult<{ license?: AnyRecord }>
       if (!result?.ok) {
-        addLog(`授权激活失败: ${String(result?.data?.license?.message || result?.error || 'unknown')}`, 'error')
+        const errorText = String(result?.data?.license?.message || result?.error || '未知错误')
+        const message = `授权激活失败：${errorText}`
+        setLicense((current) => ({
+          ...current,
+          message,
+          checkedAt: Date.now()
+        }))
+        addLog(message, 'error')
+        await refreshLicense()
         return
       }
       const nextLicense = normalizeLicenseSnapshot(result.data?.license || {})
       setLicense(nextLicense)
       setLicenseKey('')
-      addLog(nextLicense.authorized ? '授权激活成功，完整功能已解锁' : nextLicense.message, nextLicense.authorized ? 'success' : 'warning')
+      addLog(nextLicense.authorized ? '授权激活成功' : nextLicense.message, nextLicense.authorized ? 'success' : 'warning')
+    } catch (error) {
+      const errorText = String((error as Error)?.message || error || '未知错误')
+      const message = `授权激活失败：${errorText}`
+      setLicense((current) => ({
+        ...current,
+        message,
+        checkedAt: Date.now()
+      }))
+      addLog(message, 'error')
     } finally {
       setLicenseBusy(false)
     }
   }
+
+  const handleAccountWindowVisibility = useEffectEvent(async (account: AccountSession, visible: boolean) => {
+    const accountName = account.nickname || account.id
+    const actionText = visible ? '显示窗口' : '隐藏窗口'
+
+    try {
+      const requestVisibility = async () => {
+        return visible
+          ? (await window.electronAPI.desktop.showAccountWindow(account.id) as AnyRecord)
+          : (await window.electronAPI.desktop.hideAccountWindow(account.id) as AnyRecord)
+      }
+
+      let result = await requestVisibility()
+      if (!result?.success && visible && String(result?.error || '').includes('browser_window_not_found')) {
+        const launch = await window.electronAPI.invoke('launch-browser', { accountId: account.id, visible: true })
+        if (!launch?.success) {
+          addLog('[' + accountName + '] 窗口不存在且重建失败 - ' + String(launch?.error || 'unknown_error'), 'warning')
+          return
+        }
+        await window.electronAPI.invoke('navigate-to', { accountId: account.id, url: 'https://www.douyin.com' }).catch(() => {})
+        result = await requestVisibility()
+      }
+
+      if (!result?.success) {
+        addLog('[' + accountName + '] ' + actionText + '失败：' + String(result?.error || 'unknown_error'), 'warning')
+        return
+      }
+      addLog('[' + accountName + '] 已' + actionText, 'info')
+    } catch (error) {
+      addLog('[' + accountName + '] ' + actionText + '失败：' + String((error as Error)?.message || error || 'unknown_error'), 'error')
+    }
+  })
+
+  const {
+    bindBusy,
+    bindSession,
+    bindMiniAppCodeUrl,
+    refreshBindSessionStatus
+  } = useLicenseBinding({
+    poolServerUrl: activePoolServerUrl,
+    poolClientId,
+    poolFingerprint,
+    appVersion: bootstrap?.appVersion || '3.0.0',
+    autoCreateEnabled: authDrawerOpen,
+    onOpenAuthDrawer: () => setAuthDrawerOpen(true),
+    onLicenseRefresh: refreshLicense,
+    onLog: addLog
+  })
 
   const gateLocked = license.accessMode === 'locked' && license.requiresActivation
 
@@ -773,6 +806,8 @@ export default function App() {
         <LicenseGate
           license={license}
           licenseKey={licenseKey}
+          accessModeText={accessModeText}
+          serverUrl={FIXED_POOL_SERVER_URL}
           onLicenseKeyChange={setLicenseKey}
           onStartTrial={handleStartTrial}
           onActivate={handleActivate}
@@ -782,42 +817,37 @@ export default function App() {
         />
       ) : (
         <main className="flex min-h-full flex-col gap-4 2xl:h-full 2xl:min-h-0">
-          <section className="glass rounded-[28px] p-4 sm:p-5">
-            <div className="flex flex-col gap-4 2xl:flex-row 2xl:items-start 2xl:justify-between">
-              <div className="space-y-3">
-                <div className="inline-flex items-center gap-3 rounded-full border border-emerald-400/20 bg-emerald-500/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-emerald-200">
-                  Hidden Execution Pool
-                </div>
-                <div>
-                  <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-3xl">抖娃福袋工作台</h1>
-                  <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-300">
-                    服务端统一派单，本地执行账号默认隐藏运行。你现在看到的是新的调度台壳层，适合几十账号同时在线的高密度场景。
-                  </p>
+          <section className="glass rounded-[26px] p-3 sm:p-4">
+            <div className="flex flex-col gap-2 2xl:flex-row 2xl:items-end 2xl:justify-between">
+              <div className="flex flex-col gap-1.5 2xl:pr-4">
+                <h1 className="relative -top-3 text-2xl font-semibold tracking-tight text-white sm:text-3xl">抖娃福袋工作台</h1>
+                <div className="flex flex-wrap items-center gap-2 text-sm text-slate-300">
+                  <button className="w-full rounded-full bg-emerald-400 px-4 py-2 font-semibold text-slate-950 transition hover:bg-emerald-300 sm:w-auto" onClick={addAccount}>
+                    添加账号
+                  </button>
+                  <button className="w-full rounded-full border border-slate-600/70 px-4 py-2 transition hover:border-slate-400 hover:bg-slate-800/60 sm:w-auto" onClick={() => setSettingsOpen(true)}>
+                    设置中心
+                  </button>
+                  <button className="w-full rounded-full border border-cyan-500/50 bg-cyan-500/10 px-4 py-2 text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-500/20 sm:w-auto" onClick={() => setAuthDrawerOpen(true)}>
+                    授权中心
+                  </button>
+                  <button className="w-full rounded-full border border-slate-600/70 px-4 py-2 transition hover:border-slate-400 hover:bg-slate-800/60 sm:w-auto" onClick={() => void window.electronAPI.desktop.checkForUpdates()}>
+                    检查更新
+                  </button>
+                  <span className="w-full rounded-full border border-cyan-400/20 bg-cyan-500/10 px-3 py-2 text-cyan-100 sm:w-auto">
+                    {license.accessMode === 'trial' ? `试用剩余 ${formatRelative(license.trialRemainingSec)}` : license.message}
+                  </span>
+                  <span className="w-full rounded-full border border-slate-700 px-3 py-2 text-slate-300 sm:w-auto">
+                    版本 {bootstrap?.appVersion || updateState.currentVersion}
+                  </span>
                 </div>
               </div>
-              <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-4">
+              <div className="grid gap-2 sm:grid-cols-2 2xl:grid-cols-4">
                 <StatCard label="在线账号" value={String(runningCount)} tone="emerald" helper={`${accounts.length} 个账号已接入`} />
                 <StatCard label="候选可领" value={String(dispatchSummary.availableCandidates)} tone="cyan" helper={dispatchSummary.connected ? '共享池已连接' : dispatchSummary.error || '等待连接'} />
-                <StatCard label="今日参与" value={String(totalParticipation)} tone="amber" helper={license.licensePlan || '未授权'} />
+                <StatCard label="今日参与" value={String(totalParticipation)} tone="amber" helper={licensePlanText} />
                 <StatCard label="今日收益" value={`${totalDiamonds}`} tone="violet" helper={`中奖 ${totalWins} 次`} />
               </div>
-            </div>
-            <div className="mt-5 flex flex-wrap items-center gap-3 text-sm text-slate-300">
-              <button className="w-full rounded-full bg-emerald-400 px-4 py-2 font-semibold text-slate-950 transition hover:bg-emerald-300 sm:w-auto" onClick={addAccount}>
-                添加账号
-              </button>
-              <button className="w-full rounded-full border border-slate-600/70 px-4 py-2 transition hover:border-slate-400 hover:bg-slate-800/60 sm:w-auto" onClick={() => setSettingsOpen(true)}>
-                设置中心
-              </button>
-              <button className="w-full rounded-full border border-slate-600/70 px-4 py-2 transition hover:border-slate-400 hover:bg-slate-800/60 sm:w-auto" onClick={() => void window.electronAPI.desktop.checkForUpdates()}>
-                检查更新
-              </button>
-              <span className="w-full rounded-full border border-cyan-400/20 bg-cyan-500/10 px-3 py-2 text-cyan-100 sm:w-auto">
-                {license.accessMode === 'trial' ? `试用剩余 ${formatRelative(license.trialRemainingSec)}` : license.message}
-              </span>
-              <span className="w-full rounded-full border border-slate-700 px-3 py-2 text-slate-300 sm:w-auto">
-                版本 {bootstrap?.appVersion || updateState.currentVersion}
-              </span>
             </div>
           </section>
 
@@ -825,8 +855,8 @@ export default function App() {
             <div className="grid gap-4 2xl:min-h-0">
               <div className="glass rounded-[26px] p-4">
                 <div className="flex flex-wrap items-center gap-3 text-sm text-slate-300">
-                  <ClusterBadge label="授权模式" value={license.accessMode} />
-                  <ClusterBadge label="更新状态" value={updateState.status} />
+                  <ClusterBadge label="授权模式" value={accessModeText} />
+                  <ClusterBadge label="更新状态" value={updateStatusText} />
                   <ClusterBadge label="候选活跃" value={String(dispatchSummary.activeCandidates)} />
                   <ClusterBadge label="候选有效" value={String(dispatchSummary.validCandidates)} />
                   <ClusterBadge label="学习桶" value={String(learningItems.length)} />
@@ -846,14 +876,8 @@ export default function App() {
                     <AccountCard
                       key={account.id}
                       account={account}
-                      topLotteries={(lotteriesByAccount[account.id] || []).slice(0, 3)}
                       selected={selectedAccount?.id === account.id}
                       onSelect={() => setSelectedAccountId(account.id)}
-                      onRoleChange={(value) => {
-                        patchAccount(account.id, { scanRole: value })
-                        const runtime = runtimeAccountsRef.current.get(account.id)
-                        if (runtime) runtime.scanRole = value
-                      }}
                       onToggle={() => {
                         if (account.actionActive) {
                           void stopAccount(account.id)
@@ -862,8 +886,8 @@ export default function App() {
                         }
                       }}
                       onRelogin={() => void startAccountWithLogin(account.id, true)}
-                      onInspect={() => void window.electronAPI.desktop.showAccountWindow(account.id)}
-                      onHide={() => void window.electronAPI.desktop.hideAccountWindow(account.id)}
+                      onInspect={() => void handleAccountWindowVisibility(account, true)}
+                      onHide={() => void handleAccountWindowVisibility(account, false)}
                       onDelete={() => void removeAccount(account.id)}
                     />
                   ))}
@@ -877,93 +901,16 @@ export default function App() {
             </div>
 
             <div className="grid gap-4 xl:grid-cols-2 2xl:min-h-0 2xl:grid-cols-1">
-              <aside className="glass flex flex-col rounded-[26px] p-4 2xl:min-h-0">
-                <div className="mb-4">
-                  <h2 className="text-lg font-semibold text-white">任务详情</h2>
-                  <p className="text-sm text-slate-400">选中账号后查看当前租约、候选池和派单细节。</p>
-                </div>
-                <div className="space-y-3">
-                  <DetailRow label="账号" value={selectedAccount?.nickname || '未选择'} />
-                  <DetailRow label="角色" value={selectedAccount?.scanRole || '-'} />
-                  <DetailRow label="状态" value={selectedAccount ? statusText(selectedAccount.runtimeState) : '-'} />
-                  <DetailRow label="当前任务" value={selectedAccount?.currentTaskLotteryName || selectedAccount?.currentTaskLabel || '暂无'} />
-                  <DetailRow label="主播" value={selectedAccount?.currentTaskAnchor || '-'} />
-                  <DetailRow label="租约剩余" value={selectedAccount?.currentTaskLeaseRemainingSec ? formatRelative(selectedAccount.currentTaskLeaseRemainingSec) : '-'} />
-                </div>
-
-                <div className="mt-4">
-                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">候选样本</div>
-                  <div className="scrollbar-thin max-h-72 space-y-2 overflow-auto pr-1">
-                    {selectedLotteries.map((item, index) => (
-                      <div key={`${item.roomId || item.webRid || 'room'}-${item.lottery_id || item.lotteryId || index}`} className="rounded-2xl border border-slate-700/70 bg-slate-900/50 p-3">
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <div className="font-medium text-white">{item.lotteryName || item.prize_name || '未命名福袋'}</div>
-                            <div className="mt-1 text-xs text-slate-400">{item.authorNickname || item.roomTitle || '未知主播'}</div>
-                          </div>
-                          <div className="text-right text-xs text-cyan-200">
-                            <div>{Number(item.simpleProbability || item.predictedProbability || 0).toFixed(2)}%</div>
-                            <div className="mt-1 text-slate-500">#{index + 1}</div>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                    {selectedLotteries.length === 0 ? (
-                      <div className="rounded-2xl border border-dashed border-slate-700/80 p-4 text-sm text-slate-500">
-                        当前账号还没有候选池样本。
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-
-                <div className="mt-4">
-                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">最近回放</div>
-                  <div className="scrollbar-thin max-h-44 space-y-2 overflow-auto pr-1">
-                    {historyRecords.slice(0, 8).map((item, index) => (
-                      <div key={`${item.accountId || selectedAccount?.id || 'history'}-${index}`} className="rounded-2xl border border-slate-700/70 bg-slate-900/50 p-3 text-sm text-slate-300">
-                        <div className="font-medium text-white">{item.lotteryName || '已参与任务'}</div>
-                        <div className="mt-1 text-xs text-slate-500">{item.authorNickname || item.nickname || '未知主播'}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </aside>
-
-              <aside className="glass flex flex-col rounded-[26px] p-4 2xl:min-h-0">
-                <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <h2 className="text-lg font-semibold text-white">运行时间线</h2>
-                    <p className="text-sm text-slate-400">这里保留执行过程、异常恢复和授权更新。</p>
-                  </div>
-                  <input
-                    value={logQuery}
-                    onChange={(event) => setLogQuery(event.target.value)}
-                    placeholder="筛选日志"
-                    className="w-full rounded-full border border-slate-700/80 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-400/60 sm:w-40"
-                  />
-                </div>
-                <div className="scrollbar-thin flex-1 space-y-2 overflow-auto pr-1">
-                  {filteredLogs.map((entry) => (
-                    <div key={entry.id} className="rounded-2xl border border-slate-700/70 bg-slate-950/55 p-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <span className={`rounded-full border px-2 py-1 text-[11px] uppercase tracking-[0.18em] ${
-                          entry.type === 'success'
-                            ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200'
-                            : entry.type === 'warning'
-                              ? 'border-amber-400/20 bg-amber-500/10 text-amber-200'
-                              : entry.type === 'error'
-                                ? 'border-rose-400/20 bg-rose-500/10 text-rose-200'
-                                : 'border-slate-400/20 bg-slate-500/10 text-slate-200'
-                        }`}>
-                          {entry.type}
-                        </span>
-                        <span className="text-xs text-slate-500">{entry.time}</span>
-                      </div>
-                      <div className="mt-2 text-sm leading-6 text-slate-200">{entry.message}</div>
-                    </div>
-                  ))}
-                </div>
-              </aside>
+              <TaskDetailPanel
+                selectedAccount={selectedAccount}
+              />
+              <TimelinePanel
+                logQuery={logQuery}
+                logs={filteredLogs}
+                logListRef={logListRef}
+                onLogQueryChange={setLogQuery}
+                onLogListScroll={handleLogListScroll}
+              />
             </div>
           </section>
         </main>
@@ -973,6 +920,7 @@ export default function App() {
         open={settingsOpen}
         settings={settings}
         updateState={updateState}
+        updateStatusText={updateStatusText}
         learningSummary={learningSummary}
         onClose={() => setSettingsOpen(false)}
         onChange={(patch) => void persistSettings({ ...settings, ...patch })}
@@ -980,396 +928,23 @@ export default function App() {
         onInstallUpdate={() => void window.electronAPI.desktop.installUpdate()}
         onDownloadUpdate={() => void window.electronAPI.desktop.downloadUpdate()}
       />
-    </div>
-  )
-}
 
-function StatCard(props: { label: string; value: string; helper: string; tone: 'emerald' | 'cyan' | 'amber' | 'violet' }) {
-  const toneMap = {
-    emerald: 'from-emerald-400/20 to-emerald-500/5 border-emerald-300/20 text-emerald-100',
-    cyan: 'from-cyan-400/20 to-cyan-500/5 border-cyan-300/20 text-cyan-100',
-    amber: 'from-amber-300/20 to-amber-500/5 border-amber-300/20 text-amber-100',
-    violet: 'from-violet-400/20 to-violet-500/5 border-violet-300/20 text-violet-100'
-  }
-  return (
-    <div className={`min-w-0 rounded-[22px] border bg-gradient-to-br px-4 py-3 ${toneMap[props.tone]}`}>
-      <div className="text-xs uppercase tracking-[0.24em] text-slate-400">{props.label}</div>
-      <div className="mt-2 text-3xl font-semibold text-white">{props.value}</div>
-      <div className="mt-1 text-xs text-slate-400">{props.helper}</div>
-    </div>
-  )
-}
-
-function ClusterBadge(props: { label: string; value: string }) {
-  return (
-    <div className="rounded-full border border-slate-700/80 bg-slate-950/45 px-3 py-2">
-      <span className="text-slate-500">{props.label}</span>
-      <span className="ml-2 font-medium text-slate-100">{props.value}</span>
-    </div>
-  )
-}
-
-function DetailRow(props: { label: string; value: string }) {
-  return (
-    <div className="flex flex-col items-start gap-2 rounded-2xl border border-slate-700/70 bg-slate-950/45 px-3 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
-      <span className="text-slate-400">{props.label}</span>
-      <span className="max-w-full break-all text-left text-slate-100 sm:max-w-[58%] sm:text-right">{props.value}</span>
-    </div>
-  )
-}
-
-function AccountCard(props: {
-  account: AccountSession
-  topLotteries: AnyRecord[]
-  selected: boolean
-  onSelect: () => void
-  onRoleChange: (value: AccountSession['scanRole']) => void
-  onToggle: () => void
-  onRelogin: () => void
-  onInspect: () => void
-  onHide: () => void
-  onDelete: () => void
-}) {
-  return (
-    <div
-      className={`rounded-[24px] border p-4 transition ${
-        props.selected
-          ? 'border-cyan-300/40 bg-cyan-500/10 shadow-[0_0_0_1px_rgba(34,211,238,0.16)]'
-          : 'border-slate-700/80 bg-slate-950/50 hover:border-slate-500'
-      }`}
-    >
-      <button className="w-full text-left" onClick={props.onSelect}>
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <div className="text-base font-semibold text-white">{props.account.nickname}</div>
-            <div className="mt-1 text-xs text-slate-500">{props.account.id}</div>
-          </div>
-          <span className={`self-start rounded-full border px-3 py-1 text-xs font-semibold ${statusTone(props.account.runtimeState)}`}>
-            {statusText(props.account.runtimeState)}
-          </span>
-        </div>
-      </button>
-
-      <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-        <Metric label="今日参与" value={String(props.account.participationCount)} />
-        <Metric label="今日收益" value={String(props.account.todayEarnedDiamonds)} />
-        <Metric label="任务阶段" value={props.account.currentTaskStage || '空闲'} />
-        <Metric label="租约" value={props.account.currentTaskLeaseRemainingSec ? `${props.account.currentTaskLeaseRemainingSec}s` : '-'} />
-      </div>
-
-      <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-slate-700/80 bg-slate-950/55 px-3 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
-        <span className="text-slate-400">角色</span>
-        <select
-          value={props.account.scanRole}
-          onChange={(event) => props.onRoleChange(event.target.value as AccountSession['scanRole'])}
-          className="w-full rounded-full border border-slate-700/80 bg-slate-900 px-3 py-2 text-slate-100 outline-none sm:w-auto"
-        >
-          <option value="scanner">Scanner</option>
-          <option value="worker">Worker</option>
-        </select>
-      </div>
-
-      <div className="mt-4 space-y-2">
-        {props.topLotteries.length > 0 ? props.topLotteries.map((item, index) => (
-          <div key={`${props.account.id}-${index}`} className="rounded-2xl border border-slate-700/70 bg-slate-950/45 px-3 py-2 text-sm text-slate-300">
-            <div className="truncate text-white">{item.lotteryName || item.prize_name || '候选任务'}</div>
-            <div className="mt-1 truncate text-xs text-slate-500">{item.authorNickname || '未知主播'}</div>
-          </div>
-        )) : (
-          <div className="rounded-2xl border border-dashed border-slate-700/80 px-3 py-4 text-sm text-slate-500">
-            当前还没有候选样本。
-          </div>
-        )}
-      </div>
-
-      <div className="mt-4 grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
-        <button className="rounded-full bg-emerald-400 px-3 py-2 font-semibold text-slate-950 transition hover:bg-emerald-300" onClick={props.onToggle}>
-          {props.account.actionActive ? '暂停' : '启动'}
-        </button>
-        <button className="rounded-full border border-slate-600/80 px-3 py-2 text-slate-100 transition hover:bg-slate-800/60" onClick={props.onRelogin}>
-          重新扫码
-        </button>
-        <button className="rounded-full border border-slate-600/80 px-3 py-2 text-slate-100 transition hover:bg-slate-800/60" onClick={props.onInspect}>
-          显示窗口
-        </button>
-        <button className="rounded-full border border-slate-600/80 px-3 py-2 text-slate-100 transition hover:bg-slate-800/60" onClick={props.onHide}>
-          隐藏窗口
-        </button>
-      </div>
-      <button className="mt-2 w-full rounded-full border border-rose-400/20 bg-rose-500/10 px-3 py-2 text-sm text-rose-200 transition hover:bg-rose-500/20" onClick={props.onDelete}>
-        删除账号
-      </button>
-    </div>
-  )
-}
-
-function Metric(props: { label: string; value: string }) {
-  return (
-    <div className="rounded-2xl border border-slate-700/70 bg-slate-950/45 px-3 py-3">
-      <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{props.label}</div>
-      <div className="mt-2 truncate text-lg font-semibold text-white">{props.value}</div>
-    </div>
-  )
-}
-
-function LicenseGate(props: {
-  license: LicenseSnapshot
-  licenseKey: string
-  onLicenseKeyChange: (value: string) => void
-  onStartTrial: () => void
-  onActivate: () => void
-  busy: boolean
-  clientId: string
-  fingerprint: string
-}) {
-  return (
-    <div className="grid gap-4 lg:h-full lg:grid-cols-[minmax(0,1.05fr)_minmax(280px,420px)]">
-      <section className="glass flex min-h-[320px] flex-col justify-between rounded-[32px] p-5 sm:p-6 xl:p-8">
-        <div>
-          <div className="inline-flex items-center gap-3 rounded-full border border-cyan-400/20 bg-cyan-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.28em] text-cyan-100">
-            Service Dispatch Edition
-          </div>
-          <h1 className="mt-6 max-w-xl text-3xl font-semibold leading-tight text-white sm:text-4xl">
-            3 天设备试用 + 正式授权
-            <br />
-            进入新的桌面调度台
-          </h1>
-          <p className="mt-4 max-w-2xl text-sm leading-7 text-slate-300">
-            当前版本采用服务端统一派单、客户端隐藏执行池和高密度账号调度面板。试用期内完整开放，多账号、派单、执行和学习视图都可以直接体验。
-          </p>
-        </div>
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          <FeaturePanel title="服务端派单" description="候选池统一筛选，客户端只管执行和回传。" />
-          <FeaturePanel title="隐藏执行池" description="几十账号默认隐藏运行，人工检查时再拉起窗口。" />
-          <FeaturePanel title="授权状态机" description="试用、激活、过期和锁定全部由服务端状态驱动。" />
-        </div>
-      </section>
-
-      <section className="glass flex flex-col rounded-[32px] p-5 sm:p-6">
-        <div>
-          <h2 className="text-2xl font-semibold text-white">设备接入</h2>
-          <p className="mt-2 text-sm text-slate-400">{props.license.message || '请先开始试用或输入授权码。'}</p>
-        </div>
-
-        <div className="mt-4 grid gap-3 text-sm text-slate-300 sm:grid-cols-2">
-          <DeviceField label="Pool Server" value={FIXED_POOL_SERVER_URL} />
-          <DeviceField label="Client ID" value={props.clientId} />
-          <DeviceField label="Fingerprint" value={props.fingerprint} />
-          <DeviceField label="Access Mode" value={props.license.accessMode} />
-        </div>
-
-        <div className="mt-4 rounded-[24px] border border-cyan-400/20 bg-cyan-500/10 p-4 text-sm text-cyan-100">
-          服务端地址已写死到代码中，当前版本统一使用旧配置，不再支持在界面中修改。
-        </div>
-
-        <div className="mt-6 rounded-[24px] border border-amber-400/20 bg-amber-500/10 p-4 text-sm text-amber-100">
-          <div className="font-semibold">试用说明</div>
-          <div className="mt-1 text-amber-100/80">每台设备首次安装可获得 3 天完整试用。试用结束后需要正式授权才能进入主调度台。</div>
-        </div>
-
-        <button
-          className="mt-5 rounded-2xl bg-emerald-400 px-4 py-3 font-semibold text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
-          disabled={props.busy}
-          onClick={props.onStartTrial}
-        >
-          {props.busy ? '处理中...' : '开始 3 天试用'}
-        </button>
-
-        <label className="mt-6 text-xs uppercase tracking-[0.2em] text-slate-500">授权码</label>
-        <input
-          value={props.licenseKey}
-          onChange={(event) => props.onLicenseKeyChange(event.target.value)}
-          className="mt-2 rounded-2xl border border-slate-700/80 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-400/70"
-          placeholder="输入正式授权码"
-        />
-        <button
-          className="mt-4 rounded-2xl border border-cyan-400/30 bg-cyan-500/10 px-4 py-3 font-semibold text-cyan-100 transition hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-60"
-          disabled={props.busy}
-          onClick={props.onActivate}
-        >
-          {props.busy ? '处理中...' : '激活正式授权'}
-        </button>
-      </section>
-    </div>
-  )
-}
-
-function FeaturePanel(props: { title: string; description: string }) {
-  return (
-    <div className="rounded-[24px] border border-slate-700/70 bg-slate-950/55 p-4">
-      <div className="text-sm font-semibold text-white">{props.title}</div>
-      <div className="mt-2 text-sm leading-6 text-slate-400">{props.description}</div>
-    </div>
-  )
-}
-
-function DeviceField(props: { label: string; value: string }) {
-  return (
-    <div className="rounded-2xl border border-slate-700/70 bg-slate-950/55 px-3 py-3">
-      <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{props.label}</div>
-      <div className="mt-2 break-all text-sm text-slate-100">{props.value || '-'}</div>
-    </div>
-  )
-}
-
-function SettingsDrawer(props: {
-  open: boolean
-  settings: DesktopSettings
-  updateState: UpdateSnapshot
-  learningSummary: AnyRecord | null
-  onClose: () => void
-  onChange: (patch: Partial<DesktopSettings>) => void
-  onNestedChange: (updater: (settings: DesktopSettings) => DesktopSettings) => void
-  onInstallUpdate: () => void
-  onDownloadUpdate: () => void
-}) {
-  return (
-    <div className={`pointer-events-none fixed inset-3 z-20 transition duration-300 md:inset-y-4 md:left-auto md:right-4 md:w-[380px] ${props.open ? 'translate-x-0 opacity-100' : 'translate-x-[110%] opacity-0'}`}>
-      <div className="glass pointer-events-auto flex h-full flex-col rounded-[30px] p-5">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-xl font-semibold text-white">设置中心</h2>
-            <p className="mt-1 text-sm text-slate-400">修改服务端、筛选阈值和更新通道。</p>
-          </div>
-          <button className="rounded-full border border-slate-700/80 px-3 py-2 text-sm text-slate-200 transition hover:bg-slate-800/60" onClick={props.onClose}>
-            关闭
-          </button>
-        </div>
-
-        <div className="scrollbar-thin mt-5 flex-1 space-y-5 overflow-auto pr-1">
-          <Panel title="服务端">
-            <StaticField label="Pool Server URL" value={FIXED_POOL_SERVER_URL} />
-            <Input label="Update Feed URL" value={props.settings.updateFeedUrl} onChange={(value) => props.onChange({ updateFeedUrl: value })} />
-          </Panel>
-
-          <Panel title="筛选">
-            <SwitchRow
-              label="过滤粉丝团"
-              checked={props.settings.filterFanClub.enabled}
-              onChange={(checked) => props.onNestedChange((settings) => ({ ...settings, filterFanClub: { enabled: checked } }))}
-            />
-            <SwitchRow
-              label="只抢实物"
-              checked={props.settings.onlyPhysicalPrize.enabled}
-              onChange={(checked) => props.onNestedChange((settings) => ({ ...settings, onlyPhysicalPrize: { enabled: checked } }))}
-            />
-            <SwitchRow
-              label="优先大红包"
-              checked={props.settings.preferBigRedPacket.enabled}
-              onChange={(checked) => props.onNestedChange((settings) => ({
-                ...settings,
-                preferBigRedPacket: { ...settings.preferBigRedPacket, enabled: checked }
-              }))}
-            />
-            <RangeInput
-              label="大红包阈值"
-              value={String(props.settings.preferBigRedPacket.threshold)}
-              onChange={(value) => props.onNestedChange((settings) => ({
-                ...settings,
-                preferBigRedPacket: {
-                  ...settings.preferBigRedPacket,
-                  threshold: Number(value || 40)
-                }
-              }))}
-            />
-            <RangeInput
-              label="命中率下限"
-              value={String(props.settings.hitRate.value)}
-              onChange={(value) => props.onNestedChange((settings) => ({
-                ...settings,
-                hitRate: {
-                  ...settings.hitRate,
-                  value: Number(value || 0.08)
-                }
-              }))}
-            />
-          </Panel>
-
-          <Panel title="执行">
-            <SwitchRow
-              label="自动抢红包"
-              checked={props.settings.enableRedPacket}
-              onChange={(checked) => props.onChange({ enableRedPacket: checked })}
-            />
-            <SwitchRow
-              label="随机互动"
-              checked={props.settings.randomInteraction}
-              onChange={(checked) => props.onChange({ randomInteraction: checked })}
-            />
-            <RangeInput
-              label="抢后停留（秒）"
-              value={String(props.settings.stayDuration)}
-              onChange={(value) => props.onChange({ stayDuration: Number(value || 18) })}
-            />
-          </Panel>
-
-          <Panel title="更新与学习">
-            <DetailRow label="更新状态" value={props.updateState.status} />
-            <DetailRow label="当前版本" value={props.updateState.currentVersion} />
-            <DetailRow label="最新版本" value={props.updateState.latestVersion || '-'} />
-            <DetailRow label="学习反馈数" value={String(props.learningSummary?.feedbackCount || 0)} />
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              <button className="rounded-2xl border border-cyan-400/20 bg-cyan-500/10 px-3 py-3 text-sm text-cyan-100 transition hover:bg-cyan-500/20" onClick={props.onDownloadUpdate}>
-                下载更新
-              </button>
-              <button className="rounded-2xl border border-emerald-400/20 bg-emerald-500/10 px-3 py-3 text-sm text-emerald-100 transition hover:bg-emerald-500/20" onClick={props.onInstallUpdate}>
-                安装更新
-              </button>
-            </div>
-          </Panel>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function Panel(props: { title: string; children: ReactNode }) {
-  return (
-    <section className="rounded-[24px] border border-slate-700/70 bg-slate-950/55 p-4">
-      <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-300">{props.title}</h3>
-      <div className="mt-4 space-y-3">{props.children}</div>
-    </section>
-  )
-}
-
-function Input(props: { label: string; value: string; onChange: (value: string) => void }) {
-  return (
-    <label className="block">
-      <div className="mb-2 text-xs uppercase tracking-[0.16em] text-slate-500">{props.label}</div>
-      <input
-        value={props.value}
-        onChange={(event) => props.onChange(event.target.value)}
-        className="w-full rounded-2xl border border-slate-700/80 bg-slate-900/80 px-3 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-400/60"
+      <LicenseDrawer
+        open={authDrawerOpen}
+        license={license}
+        accessModeText={accessModeText}
+        licenseKey={licenseKey}
+        licenseBusy={licenseBusy}
+        bindBusy={bindBusy}
+        bindSession={bindSession}
+        miniAppCodeUrl={bindMiniAppCodeUrl}
+        onLicenseKeyChange={setLicenseKey}
+        onStartTrial={() => void handleStartTrial()}
+        onActivate={() => void handleActivate()}
+        onRefreshBindStatus={() => void refreshBindSessionStatus(true)}
+        onClose={() => setAuthDrawerOpen(false)}
       />
-    </label>
-  )
-}
-
-function StaticField(props: { label: string; value: string }) {
-  return (
-    <div>
-      <div className="mb-2 text-xs uppercase tracking-[0.16em] text-slate-500">{props.label}</div>
-      <div className="w-full rounded-2xl border border-slate-700/80 bg-slate-900/55 px-3 py-3 text-sm text-slate-100">
-        {props.value}
-      </div>
     </div>
   )
 }
 
-function RangeInput(props: { label: string; value: string; onChange: (value: string) => void }) {
-  return <Input {...props} />
-}
-
-function SwitchRow(props: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
-  return (
-    <button
-      className="flex w-full items-center justify-between rounded-2xl border border-slate-700/80 bg-slate-900/80 px-3 py-3 text-sm text-slate-200 transition hover:border-slate-500"
-      onClick={() => props.onChange(!props.checked)}
-    >
-      <span>{props.label}</span>
-      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${props.checked ? 'bg-emerald-400 text-slate-950' : 'bg-slate-700 text-slate-200'}`}>
-        {props.checked ? 'ON' : 'OFF'}
-      </span>
-    </button>
-  )
-}

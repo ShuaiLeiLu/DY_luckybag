@@ -1,4 +1,4 @@
-import { calcAdaptiveScanProfile, createScanRiskState, updateScanRiskState } from './scanRiskPolicy'
+﻿import { calcAdaptiveScanProfile, createScanRiskState, updateScanRiskState } from './scanRiskPolicy'
 import {
   getRedPacketAveragePerWinner as getLotteryAveragePerWinner,
   isPhysicalPrizeLottery
@@ -2266,35 +2266,30 @@ class LotteryManager {
    */
   getPoolNoTaskRetryPlan(accountId, preferQuickScan = false) {
     const streak = this.getPoolNoTaskStreak(accountId)
-    const candidateCount = this.getGlobalLotteryCandidateCount()
     const scanner = this.isScannerAccount(accountId)
     const showMessage = streak <= 1
+    const accountData = this.accounts.get(accountId)
+    const firstRoundPending = accountData?.firstRoundScanDone !== true
 
-    if (!scanner && streak >= 3 && candidateCount <= SCAN_POOL_REFILL_RESERVE_THRESHOLD) {
+    if (firstRoundPending) {
+      const retryDelay = preferQuickScan
+        ? this.randomBetween(1200, 1900)
+        : this.randomBetween(1500, 2300)
       return {
-        retryDelay: this.randomBetween(1600, 2600),
+        retryDelay,
         forceScan: true,
-        message: '📋 服务端当前没有可分配任务，短补一轮扫描后继续请求共享池...',
+        message: `当前账号尚未完成首轮扫描，${Math.ceil(retryDelay / 1000)}秒后继续补扫...`,
         silent: !showMessage
       }
     }
 
-    if (scanner) {
-      return {
-        retryDelay: preferQuickScan ? this.randomBetween(2200, 3200) : this.randomBetween(3200, 5200),
-        forceScan: false,
-        message: `📋 服务端当前没有可分配任务，${Math.ceil((preferQuickScan ? 2600 : 4200) / 1000)}秒后继续请求共享池...`,
-        silent: !showMessage
-      }
-    }
-
-    const retryDelay = preferQuickScan
-      ? this.randomBetween(3500, 5200)
-      : this.randomBetween(5000, 8000)
+    const retryDelay = scanner
+      ? (preferQuickScan ? this.randomBetween(1800, 2600) : this.randomBetween(2200, 3400))
+      : (preferQuickScan ? this.randomBetween(1400, 2200) : this.randomBetween(1800, 2800))
     return {
       retryDelay,
-      forceScan: false,
-      message: `📋 服务端当前没有可分配任务，${Math.ceil(retryDelay / 1000)}秒后继续请求共享池...`,
+      forceScan: true,
+      message: `服务端当前暂无可分配任务，${Math.ceil(retryDelay / 1000)}秒后继续请求共享池...`,
       silent: !showMessage
     }
   }
@@ -2465,7 +2460,10 @@ class LotteryManager {
       }))
       return
     }
-    this.scheduleAccountTask(accountId, delayMs, () => this.searchLiveRoom(accountId, { quickCycle }))
+    this.scheduleAccountTask(accountId, delayMs, () => this.searchLiveRoom(accountId, {
+      quickCycle,
+      forceScanner: forceScan
+    }))
   }
 
   /**
@@ -2953,7 +2951,17 @@ class LotteryManager {
       const scanAssignment = await this.refreshPoolScanAssignment(scanOnly || quickCycle)
       const scanPlan = forceScanner ? forcedScanPlan : this.getNormalScanPlan(accountId, scanAssignment)
       const isScanner = forceScanner || !!scanPlan
-      if (isScanner && this.activeScanAccountId && this.activeScanAccountId !== accountId) {
+      const activeScannerId = String(this.activeScanAccountId || '').trim()
+      if (activeScannerId && activeScannerId !== accountId) {
+        const activeExists = this.accounts.has(activeScannerId)
+        const activePaused = activeExists ? this.isPaused(activeScannerId) : true
+        const activeStillAssigned = forceScanner ? true : this.scanPlanByAccount.has(activeScannerId)
+        if (!activeExists || activePaused || !activeStillAssigned) {
+          this.logger.debug('[' + accountId + '] release stale active scanner slot: ' + activeScannerId)
+          this.activeScanAccountId = ''
+        }
+      }
+      if (!forceScanner && isScanner && this.activeScanAccountId && this.activeScanAccountId !== accountId) {
         this.logScanRoleIfChanged(accountId, 'worker')
         if (!scanOnly) {
           this.scheduleSelectionOrScanRetry(accountId, 1800, { quickCycle, trigger: 'scan-slot-busy' })
@@ -2966,6 +2974,21 @@ class LotteryManager {
         if (scanOnly) {
           return
         }
+
+        const firstRoundPending = accountData.firstRoundScanDone !== true
+        if (firstRoundPending && !forceScanner) {
+          const retryDelay = quickCycle
+            ? this.randomBetween(480, 900)
+            : this.randomBetween(700, 1200)
+          accountData.callbacks.onLog('⚠️ 当前账号未完成首轮扫描，先补一轮本地扫描再继续派单...')
+          this.scheduleSelectionOrScanRetry(accountId, retryDelay, {
+            quickCycle: true,
+            forceScan: true,
+            trigger: 'worker-first-round-fallback'
+          })
+          return
+        }
+
         await this.refreshPoolFromServer(accountId)
         this.removeExpiredLotteries(accountId)
         this.calculatePredictedProbabilities(accountId)
@@ -2979,12 +3002,20 @@ class LotteryManager {
       }
 
       const baseScanProfile = this.getAdaptiveScanProfile(accountId)
+      const fallbackCategories = this.resolveAssignedCategoryList(null)
+      const forcedCategories = this.resolveAssignedCategoryList(scanAssignment)
+      const forcedCategoryPlans = this.resolveAssignedCategoryPlans(scanAssignment)
+      const forcedHasCategories = (Array.isArray(forcedCategories) && forcedCategories.length > 0) ||
+        (Array.isArray(forcedCategoryPlans) && forcedCategoryPlans.length > 0)
+      const forcedAllScanEnabled = scanAssignment ? (scanAssignment.allScanEnabled !== false) : true
       const activeScanPlan = forceScanner ? (forcedScanPlan || {
-        kind: 'all',
+        kind: forcedAllScanEnabled ? 'all' : 'category',
         mode: 'forced',
-        allScanEnabled: scanAssignment ? (scanAssignment.allScanEnabled !== false) : true,
-        assignedCategories: this.resolveAssignedCategoryList(scanAssignment),
-        assignedCategoryPlans: this.resolveAssignedCategoryPlans(scanAssignment),
+        allScanEnabled: forcedAllScanEnabled || !forcedHasCategories,
+        assignedCategories: forcedHasCategories ? forcedCategories : fallbackCategories,
+        assignedCategoryPlans: forcedCategoryPlans.length > 0
+          ? forcedCategoryPlans
+          : (forcedHasCategories ? forcedCategories : fallbackCategories),
         budget: scanAssignment?.budget || null,
         shardKey: `forced:${accountId}`,
         workerIndex: 0,
@@ -2996,38 +3027,7 @@ class LotteryManager {
       let scanProfile = scanOnly && deepScan
         ? this.getDeepScanProfile(baseScanProfile, { deadlineMs })
         : { ...baseScanProfile }
-      const useSupermanFirstRound = clientAllowsAllScan &&
-        activeScanPlan?.kind === 'all' &&
-        !scanOnly &&
-        quickCycle &&
-        this.clientFirstRoundScanDone !== true
-      if (!scanOnly && quickCycle && this.clientFirstRoundScanDone !== true && clientAllowsAllScan && !useSupermanFirstRound) {
-        accountData.callbacks.onLog('🧭 本客户端已有其他空闲账号承担首轮全站扫描，当前账号先等待共享池结果')
-        await this.refreshPoolFromServer(accountId)
-        this.removeExpiredLotteries(accountId)
-        this.calculatePredictedProbabilities(accountId)
-        this.sortLotteriesByProbability(accountId)
-        this.emitLotteryListUpdate(accountData)
-        this.scheduleAccountTask(accountId, 600, () => this.start(accountId, {
-          preferQuickScan: true,
-          trigger: 'first-round-wait-pool'
-        }))
-        return
-      }
-      if (!scanOnly && quickCycle && accountData.firstRoundScanDone !== true && !clientAllowsAllScan) {
-        accountData.firstRoundScanDone = true
-        accountData.callbacks.onLog('🧭 当前客户端无全站首轮扫描职责，本轮跳过启动快扫，下一轮进入分类分片扫描')
-        await this.refreshPoolFromServer(accountId)
-        this.removeExpiredLotteries(accountId)
-        this.calculatePredictedProbabilities(accountId)
-        this.sortLotteriesByProbability(accountId)
-        this.emitLotteryListUpdate(accountData)
-        this.scheduleAccountTask(accountId, 600, () => this.start(accountId, {
-          preferQuickScan: true,
-          trigger: 'skip-first-round'
-        }))
-        return
-      }
+      const useSupermanFirstRound = !scanOnly && quickCycle && accountData.firstRoundScanDone !== true
       if (useSupermanFirstRound) {
         const FIRST_ROUND_BUDGET_MS = 45000
         const firstRoundDeadlineMs = deadlineMs > 0
@@ -3108,12 +3108,13 @@ class LotteryManager {
       this.emitLotteryListUpdate(accountData)
 
       // 2. 按逻辑：先全站，再按分类采集补充池子
-      if (allScanEnabled) {
+      const runAllScanThisRound = allScanEnabled || useSupermanFirstRound
+      if (runAllScanThisRound) {
         await this.searchLiveByAll(accountId, scanProfile.allTimes, scanProfile)
       }
       if (this.isPaused(accountId) || !(await this.isBrowserAlive(accountId))) return
       const afterAllProfile = this.getAdaptiveScanProfile(accountId)
-      if (allScanEnabled && !useSupermanFirstRound && afterAllProfile.level >= 2 && afterAllProfile.cooldownRemainMs > 0) {
+      if (runAllScanThisRound && !useSupermanFirstRound && afterAllProfile.level >= 2 && afterAllProfile.cooldownRemainMs > 0) {
         const waitMs = Math.min(afterAllProfile.cooldownRemainMs + 800, 60000)
         if (!scanOnly) {
           accountData.callbacks.onLog(`🛡️ 全站扫描后命中风控冷却，${Math.ceil(waitMs / 1000)}秒后继续`, 'warning')
@@ -3149,14 +3150,16 @@ class LotteryManager {
       this.sortLotteriesByProbability(accountId)
       this.emitLotteryListUpdate(accountData)
 
-      if (useSupermanFirstRound && this.clientFirstRoundScanDone !== true) {
+      if (useSupermanFirstRound && accountData.firstRoundScanDone !== true) {
         const queueDrained = await this.waitPoolUploadIdle(accountId, 4200)
         if (queueDrained) {
-          accountData.callbacks.onLog('☁️ 首轮页级上报完成')
+          accountData.callbacks.onLog('✅ 首轮扫描结果已同步到共享池')
         }
-        this.clientFirstRoundScanDone = true
         accountData.firstRoundScanDone = true
-        accountData.callbacks.onLog('✅ 首轮扫描完成，后续切换常规扫描')
+        if (this.clientFirstRoundScanDone !== true) {
+          this.clientFirstRoundScanDone = true
+        }
+        accountData.callbacks.onLog('✅ 首轮全量扫描完成，已切换常规调度')
       }
 
       if (scanOnly) {
@@ -3860,19 +3863,41 @@ class LotteryManager {
     if (!accountData || !lotteryInfo) return false
 
     const reuseCurrentRoom = options?.reuseCurrentRoom === true
+    const expectedRoomIds = Array.from(new Set(
+      [lotteryInfo.webRid, lotteryInfo.roomId]
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+    ))
+
+    const navigateToTarget = async (targetId) => {
+      if (!targetId) return
+      await ipcRenderer.invoke('navigate-to', {
+        accountId,
+        url: `https://live.douyin.com/${targetId}`
+      })
+    }
 
     this.updateAccountCurrentRoom(accountId, accountData, lotteryInfo, 'running')
 
     if (!reuseCurrentRoom) {
-      accountData.callbacks.onLog('🚪 正在进入直播间，等待福袋入口...')
-      await ipcRenderer.invoke('navigate-to', {
-        accountId,
-        url: `https://live.douyin.com/${lotteryInfo.webRid}`
+      accountData.callbacks.onLog('🔗 正在进入目标直播间...')
+      await navigateToTarget(expectedRoomIds[0] || '')
+    }
+
+    let ready = await this.waitForLiveRoomReady(accountId, 12000, {
+      expectedRoomIds
+    })
+
+    if (!ready && !reuseCurrentRoom && expectedRoomIds.length > 1) {
+      accountData.callbacks.onLog('⚠️ 首次房间标识进入失败，尝试备用房间ID重试...', 'warning')
+      await navigateToTarget(expectedRoomIds[1])
+      ready = await this.waitForLiveRoomReady(accountId, 12000, {
+        expectedRoomIds
       })
     }
 
-    const ready = await this.waitForLiveRoomReady(accountId)
     if (!ready) {
+      accountData.callbacks.onLog('⚠️ 直播间页面未就绪，暂不执行参与', 'warning')
       return false
     }
 
@@ -3880,7 +3905,7 @@ class LotteryManager {
   }
 
   /**
-   * executeLotteryParticipation 方法：执行超人模式参与动作，直接进入直播间并立即尝试参与。
+   * executeLotteryParticipation 方法：执行单次福袋参与流程（选袋→进房→UI参与→失败回退）。
    */
   async executeLotteryParticipation(accountId, accountData, lotteryInfo, config = {}, options = {}) {
     if (!accountData || !lotteryInfo) return
@@ -4247,8 +4272,8 @@ class LotteryManager {
   /**
    * waitForLiveRoomReady 方法：等待直播间页面就绪后再执行参与动作。
    */
-  async waitForLiveRoomReady(accountId, timeoutMs = 10000) {
-    return executeWaitForLiveRoomReady(this, accountId, timeoutMs)
+  async waitForLiveRoomReady(accountId, timeoutMs = 10000, options = {}) {
+    return executeWaitForLiveRoomReady(this, accountId, timeoutMs, options)
   }
 
   /**
@@ -4354,3 +4379,8 @@ class LotteryManager {
 }
 
 export default LotteryManager
+
+
+
+
+

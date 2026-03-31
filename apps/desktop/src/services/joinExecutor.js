@@ -223,6 +223,158 @@ async function clickVisibleSelector(manager, accountId, selector, timeoutMs) {
   return { success: true, ...res.result }
 }
 
+async function clickLotteryEntryFallback(manager, accountId, timeoutMs = 12000) {
+  const res = await executeScriptSafely(manager, accountId, `
+    (() => new Promise((resolve) => {
+      const timeoutMs = ${Math.max(1200, Number(timeoutMs || 12000))};
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const isVisible = (el) => {
+        if (!el || typeof el.getBoundingClientRect !== 'function') return false;
+        const style = window.getComputedStyle(el);
+        if (!style || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || '1') <= 0.02) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width >= 10 && rect.height >= 10;
+      };
+      const clickNode = (el) => {
+        if (!el) return false;
+        try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+        try { if (typeof el.click === 'function') el.click(); } catch (_) {}
+        return true;
+      };
+      const start = Date.now();
+      const tick = () => {
+        const bySelectors = [
+          '.dVxrjT_h',
+          '[class*="lottery"]',
+          '[class*="benefit"]',
+          '[data-e2e*="lottery"]',
+          '[data-e2e*="benefit"]'
+        ].flatMap((selector) => Array.from(document.querySelectorAll(selector)));
+        const byText = Array.from(document.querySelectorAll('button,a,[role="button"],div,span'));
+        const candidates = [];
+        const seen = new Set();
+        [...bySelectors, ...byText].forEach((node) => {
+          if (!isVisible(node)) return;
+          if (seen.has(node)) return;
+          seen.add(node);
+          const text = normalize(node.innerText || node.textContent || node.getAttribute?.('aria-label') || node.getAttribute?.('title') || '');
+          const className = String(node.className || '');
+          const hitText = /(福袋|红包|福利|抽奖|开箱|宝箱|口令)/.test(text);
+          const hitClass = /(lottery|benefit|melon|packet)/i.test(className);
+          if (!hitText && !hitClass) return;
+          const rect = node.getBoundingClientRect();
+          const nearTopLeft = rect.top <= 280 && rect.left <= 320;
+          const score = (hitText ? 5 : 0) + (hitClass ? 3 : 0) + (nearTopLeft ? 4 : 0) + Math.min(2, (rect.width * rect.height) / 5000);
+          candidates.push({ node, text, className, score });
+        });
+
+        candidates.sort((a, b) => b.score - a.score);
+        const picked = candidates[0];
+        if (picked && clickNode(picked.node)) {
+          resolve({ ok: true, text: picked.text.slice(0, 60), className: picked.className.slice(0, 120) });
+          return;
+        }
+
+        if (Date.now() - start >= timeoutMs) {
+          resolve({ ok: false, sample: normalize(document.body?.innerText || '').slice(0, 180) });
+          return;
+        }
+        setTimeout(tick, 220);
+      };
+      tick();
+    }))()
+  `, timeoutMs + 1800)
+
+  if (isBrowserGoneResult(res)) {
+    return { success: false, error: '浏览器已关闭，停止参与', code: 'BROWSER_NOT_FOUND' }
+  }
+  if (res?.code === 'EXECUTE_TIMEOUT') {
+    return { success: false, error: '页面脚本超时', code: 'EXECUTE_TIMEOUT' }
+  }
+  if (!res?.success || !res?.result || typeof res.result !== 'object') {
+    return { success: false, error: '执行脚本失败', code: 'FALLBACK_ENTRY_FAILED' }
+  }
+  if (res.result.ok !== true) {
+    return {
+      success: false,
+      error: '未找到福袋入口',
+      code: 'LOTTERY_ENTRY_NOT_FOUND',
+      sample: String(res.result.sample || '')
+    }
+  }
+  return { success: true, ...res.result }
+}
+
+async function clickLotteryJoinFallback(manager, accountId, timeoutMs = 10000) {
+  const res = await executeScriptSafely(manager, accountId, `
+    (() => new Promise((resolve) => {
+      const timeoutMs = ${Math.max(1200, Number(timeoutMs || 10000))};
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const isVisible = (el) => {
+        if (!el || typeof el.getBoundingClientRect !== 'function') return false;
+        const style = window.getComputedStyle(el);
+        if (!style || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || '1') <= 0.02) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width >= 10 && rect.height >= 10;
+      };
+      const clickNode = (el) => {
+        if (!el) return false;
+        try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+        try { if (typeof el.click === 'function') el.click(); } catch (_) {}
+        return true;
+      };
+      const actionRe = /(立即参与|参与抽奖|参与福袋|马上参与|点击参与|去参与|报名)/;
+      const rejectRe = /(粉丝团|会员|等级|专属|仅限|门槛)/;
+      const start = Date.now();
+      const tick = () => {
+        const root = document.querySelector('#lottery_close_cotainer') || document;
+        const nodes = Array.from(root.querySelectorAll('button,[role="button"],a,div,span')).filter(isVisible);
+        const candidates = nodes
+          .map((node) => {
+            const text = normalize(node.innerText || node.textContent || node.getAttribute?.('aria-label') || '');
+            if (!actionRe.test(text) || rejectRe.test(text)) return null;
+            const rect = node.getBoundingClientRect();
+            const score = (root !== document ? 4 : 0) + Math.min(2, (rect.width * rect.height) / 5000);
+            return { node, text, score };
+          })
+          .filter(Boolean)
+          .sort((a, b) => b.score - a.score);
+
+        if (candidates.length > 0 && clickNode(candidates[0].node)) {
+          resolve({ ok: true, text: candidates[0].text.slice(0, 60) });
+          return;
+        }
+
+        if (Date.now() - start >= timeoutMs) {
+          resolve({ ok: false, sample: normalize(document.body?.innerText || '').slice(0, 180) });
+          return;
+        }
+        setTimeout(tick, 220);
+      };
+      tick();
+    }))()
+  `, timeoutMs + 1800)
+
+  if (isBrowserGoneResult(res)) {
+    return { success: false, error: '浏览器已关闭，停止参与', code: 'BROWSER_NOT_FOUND' }
+  }
+  if (res?.code === 'EXECUTE_TIMEOUT') {
+    return { success: false, error: '页面脚本超时', code: 'EXECUTE_TIMEOUT' }
+  }
+  if (!res?.success || !res?.result || typeof res.result !== 'object') {
+    return { success: false, error: '执行脚本失败', code: 'FALLBACK_JOIN_FAILED' }
+  }
+  if (res.result.ok !== true) {
+    return {
+      success: false,
+      error: '未找到参与按钮',
+      code: 'JOIN_BUTTON_NOT_FOUND',
+      sample: String(res.result.sample || '')
+    }
+  }
+  return { success: true, ...res.result }
+}
+
 async function runSecondInspect(manager, accountId, lotteryInfo, config = {}) {
   if (config?.secondInspect?.enabled !== true || !lotteryInfo) {
     return { passed: true }
@@ -268,35 +420,49 @@ async function runSecondInspect(manager, accountId, lotteryInfo, config = {}) {
  * @param {number} timeoutMs 超时时间
  * @returns {Promise<boolean>}
  */
-export async function waitForLiveRoomReady(manager, accountId, timeoutMs = 10000) {
+export async function waitForLiveRoomReady(manager, accountId, timeoutMs = 10000, options = {}) {
   const start = Date.now()
+  const expectedRoomIds = Array.from(new Set(
+    (Array.isArray(options?.expectedRoomIds) ? options.expectedRoomIds : [])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+  ))
+  const expectedTargetUrl = expectedRoomIds.length > 0 ? `https://live.douyin.com/${expectedRoomIds[0]}` : 'https://live.douyin.com'
   let reloadedOnce = false
+  let redirectedToTarget = false
 
   while (Date.now() - start < timeoutMs) {
     if (!manager.accounts.has(accountId) || manager.isPaused(accountId)) return false
     const result = await executeScriptSafely(manager, accountId, `
       (() => {
+        const expectedRoomIds = ${JSON.stringify(expectedRoomIds)};
         const href = String(location.href || '');
         const hrefOk = href.includes('live.douyin.com');
+        const pathMatch = href.match(/live\.douyin\.com\/([^/?#]+)/i);
+        const currentRoomKey = pathMatch ? String(decodeURIComponent(pathMatch[1] || '')).trim() : '';
+        const expectedMatch = expectedRoomIds.length === 0 || expectedRoomIds.includes(currentRoomKey);
         const stateOk = document.readyState === 'interactive' || document.readyState === 'complete';
         const body = document.body;
         const style = body ? window.getComputedStyle(body) : null;
         const visible = !!body && style && style.display !== 'none' && style.visibility !== 'hidden';
-        const text = String(body?.innerText || '').replace(/\\s+/g, '');
+        const text = String(body?.innerText || '').replace(/\s+/g, '');
         const elementCount = document.querySelectorAll('body *').length;
         const interactiveCount = document.querySelectorAll('button, a, input, textarea, [role="button"]').length;
-        const errorLike = /(服务器开小差了|点击刷新重试|加载失败|刷新重试|请稍后重试|网络错误|页面走丢了|服务异常)/.test(text);
-        const liveMarker = /(直播|福袋|关注|聊天|弹幕|在线|说点什么)/.test(text);
-        const ready = hrefOk && stateOk && visible && !errorLike && (
+        const errorLike = /(页面不存在|暂时不可用|网络错误|加载失败|系统繁忙|请求失败|访问受限|服务器开小差)/.test(text);
+        const liveMarker = /(直播|福袋|红包|在线|说点什么|聊天室|小时榜|本场)/.test(text);
+        const roomMismatch = hrefOk && expectedRoomIds.length > 0 && !expectedMatch;
+        const ready = hrefOk && expectedMatch && stateOk && visible && !errorLike && (
           liveMarker ||
           text.length >= 80 ||
           (elementCount >= 40 && interactiveCount >= 3)
         );
-        const blankLike = hrefOk && stateOk && visible && text.length < 20 && elementCount <= 8 && interactiveCount <= 1;
+        const blankLike = hrefOk && expectedMatch && stateOk && visible && text.length < 20 && elementCount <= 8 && interactiveCount <= 1;
         return {
           ready,
           blankLike,
           errorLike,
+          roomMismatch,
+          currentRoomKey,
           href,
           sample: text.slice(0, 120),
           textLength: text.length,
@@ -312,8 +478,25 @@ export async function waitForLiveRoomReady(manager, accountId, timeoutMs = 10000
     const snapshot = result?.success && result?.result && typeof result.result === 'object'
       ? result.result
       : null
+
     if (snapshot?.ready === true) {
       return true
+    }
+
+    if (!redirectedToTarget && snapshot?.roomMismatch === true) {
+      redirectedToTarget = true
+      try {
+        manager.accounts.get(accountId)?.callbacks?.onLog?.('⚠️ 当前页面与目标直播间不一致，正在切回目标房间...', 'warning')
+      } catch (_) {
+        // ignore
+      }
+      try {
+        await manager.ipc.invoke('navigate-to', { accountId, url: expectedTargetUrl })
+      } catch (_) {
+        // ignore
+      }
+      await manager.sleep(900)
+      continue
     }
 
     if (
@@ -325,16 +508,16 @@ export async function waitForLiveRoomReady(manager, accountId, timeoutMs = 10000
       try {
         manager.accounts.get(accountId)?.callbacks?.onLog?.(
           snapshot?.errorLike === true
-            ? '⚠️ 直播页加载异常，自动重载一次...'
-            : '⚠️ 直播页疑似白板，自动重载一次...',
+            ? '⚠️ 页面疑似错误态，正在重载直播间...'
+            : '⚠️ 页面疑似白板，正在重载直播间...',
           'warning'
         )
       } catch (_) {
         // ignore
       }
-      const targetUrl = String(snapshot?.href || '').includes('live.douyin.com')
-        ? String(snapshot.href)
-        : 'https://live.douyin.com'
+      const targetUrl = snapshot?.roomMismatch === true
+        ? expectedTargetUrl
+        : (String(snapshot?.href || '').includes('live.douyin.com') ? String(snapshot.href) : expectedTargetUrl)
       try {
         await manager.ipc.invoke('navigate-to', { accountId, url: targetUrl })
       } catch (_) {
@@ -344,17 +527,11 @@ export async function waitForLiveRoomReady(manager, accountId, timeoutMs = 10000
       continue
     }
 
-    await manager.sleep(snapshot?.blankLike || snapshot?.errorLike ? 520 : 350)
+    await manager.sleep(snapshot?.blankLike || snapshot?.errorLike || snapshot?.roomMismatch ? 560 : 360)
   }
   return false
 }
 
-/**
- * 关闭直播画面渲染，使用最保守的静音/暂停策略，避免切房后页面进入白板态。
- * @param {object} manager LotteryManager 实例
- * @param {string} accountId 账号ID
- * @returns {Promise<object>}
- */
 export async function closeLiveStreamRendering(manager, accountId) {
   return { ok: true, disabled: true }
 }
@@ -387,28 +564,31 @@ export async function ensureCloseLiveStreamRendering(manager, accountId) {
  * @returns {Promise<{success:boolean, confirmed?:boolean, error?:string, code?:string}>}
  */
 export async function joinLotteryByUI(manager, accountId, remainingTime = 30, options = {}) {
-  const waitEntryResult = await waitForVisibleSelector(manager, accountId, '.dVxrjT_h', 20000)
-  if (!waitEntryResult?.success) {
-    if (waitEntryResult?.code === 'ACCOUNT_STOPPED' || waitEntryResult?.code === 'BROWSER_NOT_FOUND') {
-      return { success: false, error: waitEntryResult.error, code: waitEntryResult.code }
-    }
-    const suffix = waitEntryResult?.sample ? `（面板采样: ${String(waitEntryResult.sample).slice(0, 80)}）` : ''
-    return {
-      success: false,
-      error: `${waitEntryResult.error || '等待福袋出现失败'}${suffix}`,
-      code: 'LOTTERY_ENTRY_NOT_FOUND'
-    }
+  const waitEntryResult = await waitForVisibleSelector(manager, accountId, '.dVxrjT_h', 7000)
+  let entryReady = waitEntryResult?.success === true
+
+  if (entryReady) {
+    const clickEntryResult = await clickVisibleSelector(manager, accountId, '.dVxrjT_h', 7000)
+    entryReady = clickEntryResult?.success === true
   }
-  const clickEntryResult = await clickVisibleSelector(manager, accountId, '.dVxrjT_h', 10000)
-  if (!clickEntryResult?.success) {
-    if (clickEntryResult?.code === 'ACCOUNT_STOPPED' || clickEntryResult?.code === 'BROWSER_NOT_FOUND') {
-      return { success: false, error: clickEntryResult.error, code: clickEntryResult.code }
+
+  if (!entryReady) {
+    try {
+      manager.accounts.get(accountId)?.callbacks?.onLog?.('⚠️ 默认福袋入口未命中，切换通用入口识别...', 'warning')
+    } catch (_) {
+      // ignore
     }
-    const suffix = clickEntryResult?.sample ? `（面板采样: ${String(clickEntryResult.sample).slice(0, 80)}）` : ''
-    return {
-      success: false,
-      error: `${clickEntryResult.error || '等待福袋出现失败'}${suffix}`,
-      code: 'LOTTERY_ENTRY_CLICK_FAILED'
+    const fallbackEntry = await clickLotteryEntryFallback(manager, accountId, 12000)
+    if (!fallbackEntry?.success) {
+      if (fallbackEntry?.code === 'ACCOUNT_STOPPED' || fallbackEntry?.code === 'BROWSER_NOT_FOUND') {
+        return { success: false, error: fallbackEntry.error, code: fallbackEntry.code }
+      }
+      const suffix = fallbackEntry?.sample ? ` 页面片段: ${String(fallbackEntry.sample).slice(0, 80)}...` : ''
+      return {
+        success: false,
+        error: `${fallbackEntry.error || '未找到福袋入口'}${suffix}`,
+        code: fallbackEntry.code || 'LOTTERY_ENTRY_NOT_FOUND'
+      }
     }
   }
 
@@ -426,15 +606,24 @@ export async function joinLotteryByUI(manager, accountId, remainingTime = 30, op
     }
   }
 
-  const clickJoinResult = await clickVisibleSelector(manager, accountId, '#lottery_close_cotainer div[role="button"]', 10000)
+  const clickJoinResult = await clickVisibleSelector(manager, accountId, '#lottery_close_cotainer div[role="button"]', 6000)
   if (!clickJoinResult?.success) {
-    const suffix = clickJoinResult?.sample ? `（面板采样: ${String(clickJoinResult.sample).slice(0, 80)}）` : ''
-    return {
-      success: false,
-      error: `点击参与福袋失败${suffix}`,
-      code: clickJoinResult.code || 'JOIN_BUTTON_NOT_FOUND'
+    try {
+      manager.accounts.get(accountId)?.callbacks?.onLog?.('⚠️ 默认参与按钮未命中，切换通用按钮识别...', 'warning')
+    } catch (_) {
+      // ignore
+    }
+    const fallbackJoin = await clickLotteryJoinFallback(manager, accountId, 8000)
+    if (!fallbackJoin?.success) {
+      const suffix = fallbackJoin?.sample ? ` 页面片段: ${String(fallbackJoin.sample).slice(0, 80)}...` : ''
+      return {
+        success: false,
+        error: `点击参与失败${suffix}`,
+        code: fallbackJoin.code || clickJoinResult.code || 'JOIN_BUTTON_NOT_FOUND'
+      }
     }
   }
+
   return {
     success: true,
     confirmed: false,
@@ -442,11 +631,6 @@ export async function joinLotteryByUI(manager, accountId, remainingTime = 30, op
   }
 }
 
-/**
- * 判断接口返回是否可视为“已参与成功”。
- * @param {object} result 接口响应
- * @returns {boolean}
- */
 export function isAttendSuccessLike(result) {
   if (!result) return false
   if (result.success === true) return true
@@ -747,3 +931,6 @@ export async function joinRedPacketByUI(manager, accountId) {
     return { clickedCount: 0, skippedRestrictedCount: 0, mode: 'exception' }
   }
 }
+
+
+

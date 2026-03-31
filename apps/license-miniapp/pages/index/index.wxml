@@ -47,12 +47,12 @@
         <view class="action-header">
           <view class="action-title-box">
             <image class="icon-image icon-zap" src="/assets/zap.svg" mode="aspectFit"></image>
-            <text class="action-title">延长授权时长</text>
+            <text class="action-title">观看广告后签到</text>
           </view>
           <text class="action-desc">{{ rewardSubtitleText }}</text>
         </view>
 
-        <view class="btn-ad {{ rewardLoading || rewardDisabled || !bindReady ? 'btn-disabled' : '' }}" hover-class="{{ rewardLoading || rewardDisabled || !bindReady ? '' : 'btn-hover' }}" bindtap="handleDailySignin">
+        <view class="btn-ad {{ rewardLoading || rewardDisabled ? 'btn-disabled' : '' }}" hover-class="{{ rewardLoading || rewardDisabled ? '' : 'btn-hover' }}" bindtap="handleDailySignin">
           <view class="shimmer"></view>
           <image class="icon-image icon-key-button" src="/assets/key-white.svg" mode="aspectFit"></image>
           <text class="btn-text">{{ rewardButtonText }}</text>
@@ -91,7 +91,9 @@
       <view class="grant-mask__ring grant-mask__ring--outer"></view>
       <view class="grant-mask__ring grant-mask__ring--inner"></view>
       <text class="grant-mask__title">正在完成签到...</text>
-      <text class="grant-mask__desc">系统正在同步 1 天授权时长，请稍候</text>
+      <text class="grant-mask__desc">{{ grantMaskText }}</text>
     </view>
   </view>
 </view>
+
+

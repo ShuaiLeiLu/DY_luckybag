@@ -55,4 +55,3 @@ npm run server:docker:up
 - 根目录只保留仓库级入口、通用脚本和文档。
 - 桌面端构建产物输出到 `apps/desktop/dist` 和 `apps/desktop/dist-electron`。
 - 服务端配置文件位于 `apps/pool-server/config.json`。
-- `超人福袋助手_1.0.10/` 仅作为本地参考资源，已被 git 忽略。

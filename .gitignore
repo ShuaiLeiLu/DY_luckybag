@@ -18,6 +18,8 @@ tokens.json
 *.token
 *.session
 apps/pool-server/config.json
+apps/desktop/config.json
+apps/license-miniapp/config.local.js
 
 # Logs
 *.log
@@ -43,6 +45,9 @@ lerna-debug.log*
 *.temp
 .cache/
 .temp/
+.tmp/
+.npm-cache/
+.electron-cache/
 
 # Env files
 .env
@@ -65,3 +70,16 @@ Desktop.ini
 # Keep example configs
 !*.example.json
 !apps/desktop/tokens.example.json
+
+# Local backend container data
+apps/pool-server/mysql-data/
+apps/pool-server/mysql-data-local/
+apps/pool-server/redis-data/
+
+# Local Go SDK and caches
+.tools/
+.go-build-cache/
+.go-workspace/
+
+# Local extracted reference copies
+dy_fudai-main/

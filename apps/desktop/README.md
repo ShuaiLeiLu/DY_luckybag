@@ -1,4 +1,4 @@
-# Desktop App
+﻿# Desktop App
 
 Windows 桌面端在这个目录下独立维护。
 
@@ -29,3 +29,9 @@ npm run desktop:test
 npm run desktop:electron:dev
 npm run desktop:electron:build:win
 ```
+
+## 配置文件
+
+- `apps/desktop/config.json`：桌面端默认配置（实际生效文件）
+- `apps/desktop/config.example.json`：配置模板
+- `apps/desktop/tokens.example.json`：Token 示例模板

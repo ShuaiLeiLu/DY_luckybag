@@ -2,10 +2,12 @@ const fs = require('fs')
 const path = require('path')
 const { DatabaseSync } = require('node:sqlite')
 
-const FIXED_POOL_SERVER_URL = 'http://110.40.169.26:9090'
-
-const DEFAULT_SETTINGS = Object.freeze({
-  poolServerUrl: FIXED_POOL_SERVER_URL,
+const DESKTOP_CONFIG_PATH = path.resolve(__dirname, '..', 'config.json')
+const JOIN_RECORDS_FILE_NAME = 'lottery-join-records.jsonl'
+const WIN_RECORDS_FILE_NAME = 'lottery-win-records.jsonl'
+const ACCOUNT_LOGS_DIR_NAME = 'account-logs'
+const BUILTIN_DEFAULT_SETTINGS = Object.freeze({
+  poolServerUrl: 'http://110.40.169.26:9090',
   updateFeedUrl: 'https://updates.example.com/dy-fudai/windows',
   stayDuration: 18,
   enableRedPacket: true,
@@ -33,18 +35,144 @@ function safeParseJSON(raw, fallback) {
   }
 }
 
-function normalizeSettings(raw = {}) {
+function asPlainObject(value, fallback = {}) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value
+  return fallback
+}
+
+function toSafeNumber(value, fallback = 0) {
+  const next = Number(value)
+  return Number.isFinite(next) ? next : fallback
+}
+
+function clampLimit(limit, fallback = 160, max = 500) {
+  const normalized = Math.floor(toSafeNumber(limit, fallback))
+  if (!Number.isFinite(normalized) || normalized <= 0) return fallback
+  return Math.min(max, normalized)
+}
+
+function normalizeEventLevel(raw) {
+  const normalized = String(raw || '').trim().toLowerCase()
+  if (normalized === 'warning') return 'warning'
+  if (normalized === 'error') return 'error'
+  if (normalized === 'success') return 'success'
+  if (normalized === 'debug') return 'debug'
+  return 'info'
+}
+
+function sanitizeFileSegment(raw, fallback = 'unknown') {
+  const normalized = String(raw || '')
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^[_.\s]+|[_.\s]+$/g, '')
+  return normalized || fallback
+}
+
+function pad2(value) {
+  return String(Math.max(0, Number(value) || 0)).padStart(2, '0')
+}
+
+function formatLocalDateParts(ms) {
+  const date = new Date(Math.max(0, Number(ms) || Date.now()))
+  const yyyy = String(date.getFullYear())
+  const MM = pad2(date.getMonth() + 1)
+  const dd = pad2(date.getDate())
+  const hh = pad2(date.getHours())
+  const mm = pad2(date.getMinutes())
+  const ss = pad2(date.getSeconds())
   return {
-    ...DEFAULT_SETTINGS,
-    ...(raw && typeof raw === 'object' ? raw : {}),
-    poolServerUrl: FIXED_POOL_SERVER_URL
+    day: `${yyyy}-${MM}-${dd}`,
+    ts: `${yyyy}-${MM}-${dd} ${hh}:${mm}:${ss}`
   }
+}
+
+function mergeSettings(base, patch = {}) {
+  const next = asPlainObject(patch, {})
+  return {
+    ...base,
+    ...next,
+    hitRate: { ...base.hitRate, ...asPlainObject(next.hitRate) },
+    secondInspect: { ...base.secondInspect, ...asPlainObject(next.secondInspect) },
+    filterFanClub: { ...base.filterFanClub, ...asPlainObject(next.filterFanClub) },
+    onlyPhysicalPrize: { ...base.onlyPhysicalPrize, ...asPlainObject(next.onlyPhysicalPrize) },
+    preferBigRedPacket: { ...base.preferBigRedPacket, ...asPlainObject(next.preferBigRedPacket) },
+    filterOnline: { ...base.filterOnline, ...asPlainObject(next.filterOnline) },
+    participationCount: { ...base.participationCount, ...asPlainObject(next.participationCount) },
+    singleAccountDuration: { ...base.singleAccountDuration, ...asPlainObject(next.singleAccountDuration) },
+    scanConfig: { ...base.scanConfig, ...asPlainObject(next.scanConfig) }
+  }
+}
+
+function loadDesktopConfigDefaults() {
+  try {
+    if (!fs.existsSync(DESKTOP_CONFIG_PATH)) return {}
+    const raw = fs.readFileSync(DESKTOP_CONFIG_PATH, 'utf8')
+    return asPlainObject(safeParseJSON(raw, {}), {})
+  } catch (_) {
+    return {}
+  }
+}
+
+const DEFAULT_SETTINGS = Object.freeze(mergeSettings(BUILTIN_DEFAULT_SETTINGS, loadDesktopConfigDefaults()))
+
+function normalizeSettings(raw = {}) {
+  return mergeSettings(DEFAULT_SETTINGS, raw)
+}
+
+function normalizeHistoryRecord(record = {}) {
+  const joinedAt = Math.max(0, toSafeNumber(record.joinedAt, 0))
+  const createdAt = Math.max(0, toSafeNumber(record.createdAt, joinedAt || Date.now()))
+  const rewardAmount = Math.max(0, toSafeNumber(record.rewardAmount, 0))
+  const resultStatusText = String(record.resultStatus || '').trim()
+  const rawType = String(record.recordType || '').trim().toLowerCase()
+  const recordType = rawType === 'win' || resultStatusText.toLowerCase() === 'won' || rewardAmount > 0 ? 'win' : 'join'
+
+  return {
+    id: Math.max(0, toSafeNumber(record.id, 0)),
+    recordType,
+    accountId: String(record.accountId || '').trim(),
+    accountNickname: String(record.accountNickname || '').trim(),
+    roomId: String(record.roomId || '').trim(),
+    webRid: String(record.webRid || '').trim(),
+    lotteryId: String(record.lotteryId || record.lottery_id || '').trim(),
+    authorNickname: String(record.authorNickname || '').trim(),
+    lotteryName: String(record.lotteryName || record.prize_name || '').trim(),
+    predictedProbability: toSafeNumber(record.predictedProbability, 0),
+    predictedJoinTotal: Math.max(0, toSafeNumber(record.predictedJoinTotal, 0)),
+    joinTotal: Math.max(0, toSafeNumber(record.joinTotal, 0)),
+    luckyCount: Math.max(0, toSafeNumber(record.luckyCount, 0)),
+    onlineTotal: Math.max(0, toSafeNumber(record.onlineTotal, 0)),
+    totalAmount: Math.max(0, toSafeNumber(record.totalAmount, record.total_amount || 0)),
+    prizeType: record.prizeType ?? null,
+    prizeInfo: asPlainObject(record.prizeInfo, {}),
+    conditions: Array.isArray(record.conditions) ? record.conditions : [],
+    remainingSec: Math.max(0, toSafeNumber(record.remainingSec, 0)),
+    serverScore: toSafeNumber(record.serverScore, 0),
+    startTime: Math.max(0, toSafeNumber(record.startTime, 0)),
+    joinMode: String(record.joinMode || '').trim(),
+    joinStatus: String(record.joinStatus || 'success').trim() || 'success',
+    resultStatus: resultStatusText || (recordType === 'win' ? 'won' : 'pending'),
+    resultReason: String(record.resultReason || '').trim() || (recordType === 'win' ? 'won' : 'pending_draw'),
+    joinedAt,
+    endTime: Math.max(0, toSafeNumber(record.endTime, 0)),
+    rewardAmount,
+    createdAt
+  }
+}
+
+function appendJsonLine(filePath, payload) {
+  fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, 'utf8')
 }
 
 function createStateStore(baseDir) {
   const stateDir = path.join(baseDir, 'state')
   ensureDir(stateDir)
+  const accountLogsDir = path.join(stateDir, ACCOUNT_LOGS_DIR_NAME)
+  ensureDir(accountLogsDir)
   const dbPath = path.join(stateDir, 'desktop.sqlite')
+  const joinRecordsPath = path.join(stateDir, JOIN_RECORDS_FILE_NAME)
+  const winRecordsPath = path.join(stateDir, WIN_RECORDS_FILE_NAME)
   const db = new DatabaseSync(dbPath)
 
   db.exec(`
@@ -60,7 +188,22 @@ function createStateStore(baseDir) {
       message TEXT NOT NULL,
       created_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS lottery_history_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      record_type TEXT NOT NULL,
+      account_id TEXT NOT NULL,
+      lottery_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      payload_json TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_runtime_events_created_at ON runtime_events(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_lottery_history_records_created_at ON lottery_history_records(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_lottery_history_records_type_created_at ON lottery_history_records(record_type, created_at DESC);
   `)
+
+  // Runtime timeline logs are session-only and should start fresh on every app launch.
+  db.prepare('DELETE FROM runtime_events').run()
 
   function getSettings() {
     const row = db.prepare(`
@@ -89,6 +232,10 @@ function createStateStore(baseDir) {
     return merged
   }
 
+  function clearRuntimeEvents() {
+    db.prepare('DELETE FROM runtime_events').run()
+  }
+
   function appendEvent(event = {}) {
     const payload = {
       scope: String(event.scope || 'desktop'),
@@ -115,7 +262,7 @@ function createStateStore(baseDir) {
       FROM runtime_events
       ORDER BY id DESC
       LIMIT ?
-    `).all(Math.max(1, Math.min(500, Number(limit) || 160))).map((row) => ({
+    `).all(clampLimit(limit, 160, 500)).map((row) => ({
       id: Number(row.id || 0),
       scope: String(row.scope || 'desktop'),
       level: String(row.level || 'info'),
@@ -124,12 +271,100 @@ function createStateStore(baseDir) {
     })).reverse()
   }
 
+  function appendHistoryRecord(record = {}) {
+    const payload = normalizeHistoryRecord(record)
+    const result = db.prepare(`
+      INSERT INTO lottery_history_records (record_type, account_id, lottery_id, room_id, created_at, payload_json)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      payload.recordType,
+      payload.accountId,
+      payload.lotteryId,
+      payload.roomId,
+      payload.createdAt,
+      JSON.stringify(payload)
+    )
+    const item = {
+      ...payload,
+      id: Number(result.lastInsertRowid || 0)
+    }
+    appendJsonLine(item.recordType === 'win' ? winRecordsPath : joinRecordsPath, item)
+    return item
+  }
+
+  function appendAccountLog(record = {}) {
+    const accountId = String(record.accountId || '').trim() || 'unknown'
+    const scope = String(record.scope || 'desktop').trim() || 'desktop'
+    const level = normalizeEventLevel(record.level)
+    const message = String(record.message || '').replace(/\r?\n+/g, ' ').trim()
+    if (!message) {
+      return { success: false, error: 'message_empty' }
+    }
+    const createdAt = Math.max(0, toSafeNumber(record.createdAt, Date.now()))
+    const dateParts = formatLocalDateParts(createdAt)
+    const fileDir = path.join(accountLogsDir, sanitizeFileSegment(accountId))
+    ensureDir(fileDir)
+    const filePath = path.join(fileDir, `${dateParts.day}.log`)
+    appendJsonLine(filePath, {
+      ts: dateParts.ts,
+      createdAt,
+      accountId,
+      scope,
+      level,
+      message
+    })
+    return {
+      success: true,
+      accountId,
+      scope,
+      level,
+      message,
+      createdAt,
+      filePath
+    }
+  }
+
+  function listHistoryRecords(limit = 200, options = {}) {
+    const normalizedType = String(options?.recordType || 'all').trim().toLowerCase()
+    const safeLimit = clampLimit(limit, 200, 1000)
+    const rows = normalizedType === 'join' || normalizedType === 'win'
+      ? db.prepare(`
+        SELECT id, record_type, created_at, payload_json
+        FROM lottery_history_records
+        WHERE record_type = ?
+        ORDER BY id DESC
+        LIMIT ?
+      `).all(normalizedType, safeLimit)
+      : db.prepare(`
+        SELECT id, record_type, created_at, payload_json
+        FROM lottery_history_records
+        ORDER BY id DESC
+        LIMIT ?
+      `).all(safeLimit)
+
+    return rows.map((row) => normalizeHistoryRecord({
+      ...safeParseJSON(row.payload_json, {}),
+      id: Number(row.id || 0),
+      recordType: String(row.record_type || ''),
+      createdAt: Number(row.created_at || 0)
+    })).reverse()
+  }
+
   return {
     dbPath,
+    accountLogsDir,
+    historyFiles: {
+      join: joinRecordsPath,
+      win: winRecordsPath
+    },
     getSettings,
     saveSettings,
+    clearRuntimeEvents,
     appendEvent,
-    listEvents
+    listEvents,
+    appendAccountLog,
+    appendHistoryRecord,
+    listHistoryRecords
   }
 }
 
