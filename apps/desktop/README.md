@@ -32,6 +32,5 @@ npm run desktop:electron:build:win
 
 ## 配置文件
 
-- `apps/desktop/config.json`：桌面端默认配置（实际生效文件）
-- `apps/desktop/config.example.json`：配置模板
+- `config.json`（仓库根目录）：统一配置文件，桌面端读取 `desktop` 节点
 - `apps/desktop/tokens.example.json`：Token 示例模板

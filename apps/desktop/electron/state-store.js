@@ -2,13 +2,14 @@ const fs = require('fs')
 const path = require('path')
 const { DatabaseSync } = require('node:sqlite')
 
-const DESKTOP_CONFIG_PATH = path.resolve(__dirname, '..', 'config.json')
+const PROJECT_CONFIG_PATH = path.resolve(__dirname, '..', '..', '..', 'config.json')
 const JOIN_RECORDS_FILE_NAME = 'lottery-join-records.jsonl'
 const WIN_RECORDS_FILE_NAME = 'lottery-win-records.jsonl'
 const ACCOUNT_LOGS_DIR_NAME = 'account-logs'
 const BUILTIN_DEFAULT_SETTINGS = Object.freeze({
-  poolServerUrl: 'http://110.40.169.26:9090',
+  poolServerUrl: 'http://127.0.0.1:9090',
   updateFeedUrl: 'https://updates.example.com/dy-fudai/windows',
+  noticeMarkdown: '',
   stayDuration: 18,
   enableRedPacket: true,
   randomInteraction: true,
@@ -106,9 +107,10 @@ function mergeSettings(base, patch = {}) {
 
 function loadDesktopConfigDefaults() {
   try {
-    if (!fs.existsSync(DESKTOP_CONFIG_PATH)) return {}
-    const raw = fs.readFileSync(DESKTOP_CONFIG_PATH, 'utf8')
-    return asPlainObject(safeParseJSON(raw, {}), {})
+    if (!fs.existsSync(PROJECT_CONFIG_PATH)) return {}
+    const raw = fs.readFileSync(PROJECT_CONFIG_PATH, 'utf8')
+    const parsed = asPlainObject(safeParseJSON(raw, {}), {})
+    return asPlainObject(parsed.desktop, {})
   } catch (_) {
     return {}
   }
@@ -163,6 +165,29 @@ function normalizeHistoryRecord(record = {}) {
 
 function appendJsonLine(filePath, payload) {
   fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, 'utf8')
+}
+
+function purgeJsonlByAccount(filePath, accountId) {
+  const targetId = String(accountId || '').trim()
+  if (!targetId) return { removed: 0, kept: 0 }
+  if (!fs.existsSync(filePath)) return { removed: 0, kept: 0 }
+  const raw = fs.readFileSync(filePath, 'utf8')
+  if (!raw.trim()) return { removed: 0, kept: 0 }
+  const lines = raw.split('\n').filter(Boolean)
+  const kept = []
+  let removed = 0
+  for (const line of lines) {
+    const parsed = safeParseJSON(line, null)
+    const recordAccountId = String(parsed?.accountId || '').trim()
+    if (recordAccountId && recordAccountId === targetId) {
+      removed += 1
+      continue
+    }
+    kept.push(line)
+  }
+  const nextRaw = kept.length > 0 ? `${kept.join('\n')}\n` : ''
+  fs.writeFileSync(filePath, nextRaw, 'utf8')
+  return { removed, kept: kept.length }
 }
 
 function createStateStore(baseDir) {
@@ -233,42 +258,21 @@ function createStateStore(baseDir) {
   }
 
   function clearRuntimeEvents() {
-    db.prepare('DELETE FROM runtime_events').run()
+    // runtime timeline switched to session-only memory; no DB persistence.
   }
 
   function appendEvent(event = {}) {
-    const payload = {
+    return {
+      id: Date.now(),
       scope: String(event.scope || 'desktop'),
       level: String(event.level || 'info'),
       message: String(event.message || ''),
       createdAt: Date.now()
     }
-    const result = db.prepare(`
-      INSERT INTO runtime_events (scope, level, message, created_at)
-      VALUES (?, ?, ?, ?)
-    `).run(payload.scope, payload.level, payload.message, payload.createdAt)
-    return {
-      id: Number(result.lastInsertRowid || 0),
-      scope: payload.scope,
-      level: payload.level,
-      message: payload.message,
-      createdAt: payload.createdAt
-    }
   }
 
-  function listEvents(limit = 160) {
-    return db.prepare(`
-      SELECT id, scope, level, message, created_at
-      FROM runtime_events
-      ORDER BY id DESC
-      LIMIT ?
-    `).all(clampLimit(limit, 160, 500)).map((row) => ({
-      id: Number(row.id || 0),
-      scope: String(row.scope || 'desktop'),
-      level: String(row.level || 'info'),
-      message: String(row.message || ''),
-      createdAt: Number(row.created_at || 0)
-    })).reverse()
+  function listEvents(_limit = 160) {
+    return []
   }
 
   function appendHistoryRecord(record = {}) {
@@ -350,6 +354,51 @@ function createStateStore(baseDir) {
     })).reverse()
   }
 
+  function purgeAccountData(accountId) {
+    const targetId = String(accountId || '').trim()
+    if (!targetId) {
+      return { success: false, error: 'account_id_required' }
+    }
+
+    const historyDeleteResult = db.prepare(`
+      DELETE FROM lottery_history_records
+      WHERE account_id = ?
+    `).run(targetId)
+
+    const accountLogDir = path.join(accountLogsDir, sanitizeFileSegment(targetId))
+    let removedLogFiles = 0
+    let removedLogBytes = 0
+    if (fs.existsSync(accountLogDir)) {
+      const entries = fs.readdirSync(accountLogDir)
+      for (const entry of entries) {
+        const filePath = path.join(accountLogDir, entry)
+        try {
+          const stat = fs.statSync(filePath)
+          if (stat.isFile()) {
+            removedLogFiles += 1
+            removedLogBytes += Number(stat.size || 0)
+          }
+        } catch (_) {
+          // ignore stat errors
+        }
+      }
+      fs.rmSync(accountLogDir, { recursive: true, force: true })
+    }
+
+    const joinPurge = purgeJsonlByAccount(joinRecordsPath, targetId)
+    const winPurge = purgeJsonlByAccount(winRecordsPath, targetId)
+
+    return {
+      success: true,
+      accountId: targetId,
+      deletedHistoryRows: Number(historyDeleteResult?.changes || 0),
+      deletedAccountLogFiles: removedLogFiles,
+      deletedAccountLogBytes: removedLogBytes,
+      deletedJoinJsonlRows: Number(joinPurge.removed || 0),
+      deletedWinJsonlRows: Number(winPurge.removed || 0)
+    }
+  }
+
   return {
     dbPath,
     accountLogsDir,
@@ -364,7 +413,8 @@ function createStateStore(baseDir) {
     listEvents,
     appendAccountLog,
     appendHistoryRecord,
-    listHistoryRecords
+    listHistoryRecords,
+    purgeAccountData
   }
 }
 

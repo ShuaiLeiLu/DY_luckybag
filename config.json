@@ -1,0 +1,100 @@
+{
+  "desktop": {
+    "poolServerUrl": "http://127.0.0.1:9090",
+    "updateFeedUrl": "https://updates.example.com/dy-fudai/windows",
+    "noticeMarkdown": "# 系统公告\n\n- 欢迎使用新版服务端派单工作台。\n- **今日维护窗口**：凌晨 `02:30 - 03:00`，期间可能短暂断连。\n- 建议先完成“小程序绑定”，再批量添加执行账号。\n\n如需帮助，请联系运维同学。",
+    "stayDuration": 18,
+    "enableRedPacket": true,
+    "randomInteraction": true,
+    "hitRate": {
+      "enabled": true,
+      "value": 0.08
+    },
+    "secondInspect": {
+      "enabled": true,
+      "value": 0.05
+    },
+    "filterFanClub": {
+      "enabled": true
+    },
+    "onlyPhysicalPrize": {
+      "enabled": false
+    },
+    "preferBigRedPacket": {
+      "enabled": true,
+      "threshold": 40
+    },
+    "filterOnline": {
+      "enabled": false,
+      "value": 0
+    },
+    "participationCount": {
+      "enabled": false,
+      "value": 120
+    },
+    "singleAccountDuration": {
+      "enabled": false,
+      "value": 6
+    },
+    "scanConfig": {
+      "countPerPage": 15,
+      "pagesPerCategory": 12,
+      "allCount": 24
+    }
+  },
+  "miniapp": {
+    "baseUrl": "http://127.0.0.1:9090",
+    "rewardedVideoAdUnitId": "adunit-3258e3a8e5773f65",
+    "signinRewardDays": 1,
+    "adUnlockDays": 1
+  },
+  "poolServer": {
+    "server": {
+      "host": "0.0.0.0",
+      "port": 9090,
+      "maxBodyBytes": 6291456
+    },
+    "pool": {
+      "topCacheMax": 2500,
+      "ttlGraceSec": 8,
+      "maxBatchSize": 1000,
+      "topRefreshMS": 400,
+      "expireSweepMS": 500,
+      "shards": 64
+    },
+    "license": {
+      "enabled": true,
+      "unrestricted": false,
+      "host": "192.168.3.47",
+      "adminToken": "0UevuhsEJZY3TMTLvittxud7iwgE4EFuCxfNrsO8",
+      "adUnlockDays": 1,
+      "miniAppEnabled": true,
+      "miniAppAppId": "wx91a036cbc18bfd39",
+      "miniAppAppSecret": "a8d0f9fa3dbf50ca41f674caa219f22f",
+      "miniAppSessionSecret": "1a7af707955d8c5485e23b26ffc45969e792e598db0670cf6563a7c589b81daf",
+      "miniAppSessionTTLMin": 1440,
+      "miniAppPagePath": "pages/index/index",
+      "miniAppEnvVersion": "release",
+      "port": 3306,
+      "user": "root",
+      "password": "Lushuailei0825",
+      "database": "dy_fudai_prod",
+      "params": "charset=utf8mb4\u0026parseTime=true\u0026loc=Local",
+      "maxOpenConns": 8,
+      "maxIdleConns": 4,
+      "connMaxLifetimeMin": 30
+    },
+    "redis": {
+      "enabled": true,
+      "addr": "192.168.3.47:6379",
+      "password": "",
+      "db": 0,
+      "prefix": "lottery_pool",
+      "poolSize": 120,
+      "minIdleConns": 16,
+      "dialTimeoutMS": 2000,
+      "readTimeoutMS": 3000,
+      "writeTimeoutMS": 3000
+    }
+  }
+}

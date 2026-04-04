@@ -8,10 +8,8 @@ export type TimelineLogEntry = {
 }
 
 export type TimelinePanelProps = {
-  logQuery: string
   logs: TimelineLogEntry[]
   logListRef: RefObject<HTMLDivElement | null>
-  onLogQueryChange: (value: string) => void
   onLogListScroll: () => void
 }
 
@@ -22,17 +20,11 @@ export type TimelinePanelProps = {
 export function TimelinePanel(props: TimelinePanelProps) {
   return (
     <aside className="glass flex flex-col rounded-[26px] p-3 2xl:min-h-0">
-      <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+      <div className="mb-2">
         <div>
-          <h2 className="text-base font-semibold text-white">运行时间线</h2>
-          <p className="text-xs text-slate-400">这里保留执行过程、异常恢复和授权更新。</p>
+          <h2 className="text-base font-semibold text-white">日志</h2>
+          <p className="text-xs text-slate-400">仅展示本次运行会话日志。</p>
         </div>
-        <input
-          value={props.logQuery}
-          onChange={(event) => props.onLogQueryChange(event.target.value)}
-          placeholder="筛选日志"
-          className="w-full rounded-full border border-slate-700/80 bg-slate-950/60 px-3 py-1.5 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-400/60 sm:w-32"
-        />
       </div>
       <div
         ref={props.logListRef}

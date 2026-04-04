@@ -144,6 +144,23 @@ func loadConfigFile(path string) (fileConfig, bool, error) {
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return cfg, false, nil
 	}
+
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		return cfg, false, err
+	}
+	if len(root) == 0 {
+		return cfg, false, nil
+	}
+
+	if rawPoolServer, ok := root["poolServer"]; ok && len(rawPoolServer) > 0 {
+		if err := json.Unmarshal(rawPoolServer, &cfg); err != nil {
+			return cfg, false, err
+		}
+		return cfg, true, nil
+	}
+
+	// 兼容旧配置：直接使用 server/pool/license/redis 作为根结构。
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, false, err
 	}
@@ -157,7 +174,7 @@ func resolveConfigPath() string {
 	}
 	candidates := []string{
 		"config.json",
-		"apps/pool-server/config.json",
+		"../../config.json",
 	}
 	for _, p := range candidates {
 		if st, err := os.Stat(p); err == nil && !st.IsDir() {
@@ -1661,17 +1678,23 @@ func main() {
 
 		res := svc.UpsertBatch(req.SourceID, req.Candidates)
 		svc.RefreshTop(false)
+		baseProfile, _ := svc.Profile()
+		debugSnapshot, _ := svc.TaskDebug(baseProfile, pool.ClaimOwner{}, 1)
+		summary := debugSnapshot.Summary
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":               true,
-			"received":         res.Received,
-			"accepted":         res.Accepted,
-			"inserted":         res.Inserted,
-			"updated":          res.Updated,
-			"ignoredExpired":   res.IgnoredExpired,
-			"ignoredOlder":     res.IgnoredOlder,
-			"invalid":          res.Invalid,
-			"activeCandidates": res.ActiveCandidates,
-			"profileVersion":   res.ProfileVersion,
+			"ok":                  true,
+			"generatedAt":         summary.GeneratedAtMS,
+			"received":            res.Received,
+			"accepted":            res.Accepted,
+			"inserted":            res.Inserted,
+			"updated":             res.Updated,
+			"ignoredExpired":      res.IgnoredExpired,
+			"ignoredOlder":        res.IgnoredOlder,
+			"invalid":             res.Invalid,
+			"activeCandidates":    summary.ActiveCandidates,
+			"validCandidates":     summary.ValidCandidates,
+			"availableCandidates": summary.AvailableCandidates,
+			"profileVersion":      res.ProfileVersion,
 		})
 	})
 

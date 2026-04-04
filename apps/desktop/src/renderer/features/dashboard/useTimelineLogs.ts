@@ -1,9 +1,7 @@
 ﻿import {
   startTransition,
-  useDeferredValue,
   useEffect,
   useEffectEvent,
-  useMemo,
   useRef,
   useState
 } from 'react'
@@ -35,16 +33,7 @@ export function useTimelineLogs() {
   const logListRef = useRef<HTMLDivElement | null>(null)
   const logAutoFollowRef = useRef(true)
   const [logs, setLogs] = useState<UiLogEntry[]>([])
-  const [logQuery, setLogQuery] = useState('')
-  const deferredLogQuery = useDeferredValue(logQuery)
-
-  const filteredLogs = useMemo(() => {
-    const keyword = deferredLogQuery.trim().toLowerCase()
-    if (!keyword) return logs
-    return logs.filter((entry) => entry.message.toLowerCase().includes(keyword))
-  }, [logs, deferredLogQuery])
-
-  const latestFilteredLogId = filteredLogs.length > 0 ? filteredLogs[filteredLogs.length - 1].id : 0
+  const latestLogId = logs.length > 0 ? logs[logs.length - 1].id : 0
 
   const handleLogListScroll = useEffectEvent(() => {
     const container = logListRef.current
@@ -54,11 +43,6 @@ export function useTimelineLogs() {
   })
 
   useEffect(() => {
-    if (!deferredLogQuery.trim()) return
-    logAutoFollowRef.current = true
-  }, [deferredLogQuery])
-
-  useEffect(() => {
     if (!logAutoFollowRef.current) return
     const raf = window.requestAnimationFrame(() => {
       const container = logListRef.current
@@ -66,41 +50,19 @@ export function useTimelineLogs() {
       container.scrollTop = container.scrollHeight
     })
     return () => window.cancelAnimationFrame(raf)
-  }, [latestFilteredLogId, deferredLogQuery])
-
-  const appendEvent = useEffectEvent(async (message: string, type: UiLogEntry['type']) => {
-    const level = type === 'success' ? 'success' : type === 'warning' ? 'warning' : type === 'error' ? 'error' : 'info'
-    try {
-      await window.electronAPI.desktop.appendEvent({ level, message, scope: 'desktop' })
-    } catch (_) {
-      // ignore
-    }
-  })
+  }, [latestLogId])
 
   const addLog = useEffectEvent((message: string, type: UiLogEntry['type'] = 'info') => {
     const entry = buildLogEntry(message, type)
     startTransition(() => {
       setLogs((current) => [...current.slice(-359), entry])
     })
-    appendEvent(message, type)
-  })
-
-  const replaceLogs = useEffectEvent((entries: UiLogEntry[]) => {
-    const nextMax = entries.reduce((max, entry) => Math.max(max, Number(entry.id || 0)), 0)
-    logSeq = Math.max(logSeq, nextMax)
-    startTransition(() => {
-      setLogs(entries)
-    })
   })
 
   return {
     logs,
-    filteredLogs,
-    logQuery,
-    setLogQuery,
     logListRef,
     handleLogListScroll,
-    addLog,
-    replaceLogs
+    addLog
   }
 }

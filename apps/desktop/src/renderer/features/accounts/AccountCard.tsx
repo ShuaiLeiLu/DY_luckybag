@@ -40,6 +40,10 @@ export function AccountCard(props: AccountCardProps) {
       <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
         <Metric label="今日参与" value={String(props.account.participationCount)} />
         <Metric label="今日收益" value={String(props.account.todayEarnedDiamonds)} />
+        <Metric label="本轮提交" value={String(props.account.scanUploadSubmitted || 0)} />
+        <Metric label="本轮有效" value={String(props.account.scanUploadAccepted || 0)} />
+        <Metric label="候选池总量" value={String(props.account.poolActiveCandidates || 0)} />
+        <Metric label="候选池有效" value={String(props.account.poolValidCandidates || 0)} />
         <Metric label="任务阶段" value={props.account.currentTaskStage || '空闲'} />
         <Metric label="租约" value={props.account.currentTaskLeaseRemainingSec ? `${props.account.currentTaskLeaseRemainingSec}s` : '-'} />
       </div>

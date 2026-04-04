@@ -25,6 +25,18 @@ declare global {
           createdAt?: number
         }) => Promise<{ success: boolean; item?: unknown; error?: string }>
         appendHistoryRecord: (record: Partial<LotteryHistoryRecord>) => Promise<{ success: boolean; item?: LotteryHistoryRecord; error?: string }>
+        purgeAccountData: (accountId: string) => Promise<{
+          success: boolean
+          result?: {
+            accountId: string
+            deletedHistoryRows: number
+            deletedAccountLogFiles: number
+            deletedAccountLogBytes: number
+            deletedJoinJsonlRows: number
+            deletedWinJsonlRows: number
+          }
+          error?: string
+        }>
         onUpdateState: (handler: (snapshot: UpdateSnapshot) => void) => () => void
       }
     }

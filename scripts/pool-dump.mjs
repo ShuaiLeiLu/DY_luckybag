@@ -1,4 +1,29 @@
-const baseUrl = (process.env.POOL_SERVER_URL || process.env.DY_POOL_SERVER_URL || 'http://127.0.0.1:9090').replace(/\/+$/, '')
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const ROOT = path.resolve(__dirname, '..')
+const DEFAULT_BASE_URL = 'http://127.0.0.1:9090'
+
+function resolveBaseUrl() {
+  const envUrl = String(process.env.POOL_SERVER_URL || process.env.DY_POOL_SERVER_URL || '').trim()
+  if (envUrl) return envUrl.replace(/\/+$/, '')
+  try {
+    const raw = fs.readFileSync(path.resolve(ROOT, 'config.json'), 'utf8')
+    const parsed = JSON.parse(raw)
+    const fromDesktop = String(parsed?.desktop?.poolServerUrl || '').trim()
+    if (fromDesktop) return fromDesktop.replace(/\/+$/, '')
+    const fromMiniapp = String(parsed?.miniapp?.baseUrl || '').trim()
+    if (fromMiniapp) return fromMiniapp.replace(/\/+$/, '')
+  } catch (_) {
+    // ignore
+  }
+  return DEFAULT_BASE_URL
+}
+
+const baseUrl = resolveBaseUrl()
 const limit = Number(process.env.POOL_DUMP_LIMIT || 5000)
 
 async function main() {

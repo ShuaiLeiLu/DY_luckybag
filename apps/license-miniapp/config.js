@@ -1,70 +1,26 @@
-const defaults = require('./config.example')
+const DEFAULTS = {
+  BASE_URL: 'http://127.0.0.1:9090',
+  REWARDED_VIDEO_AD_UNIT_ID: '',
+  SIGNIN_REWARD_DAYS: 1,
+  AD_UNLOCK_DAYS: 1
+}
 
-let localOverrides = {}
+function asObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+}
+
+let rootConfig = {}
 try {
-  localOverrides = require('./config.local')
-} catch (error) {
-  if (!error || error.code !== 'MODULE_NOT_FOUND') {
-    throw error
-  }
+  rootConfig = require('../../config.json')
+} catch (_) {
+  rootConfig = {}
 }
 
-function isPlainObject(value) {
-  return Object.prototype.toString.call(value) === '[object Object]'
-}
-
-function readStoredEnv() {
-  try {
-    if (typeof wx !== 'undefined' && wx && typeof wx.getStorageSync === 'function') {
-      const raw = wx.getStorageSync('miniappActiveEnv')
-      return String(raw || '').trim()
-    }
-  } catch (_) {}
-  return ''
-}
-
-function writeStoredEnv(nextEnv) {
-  try {
-    if (typeof wx !== 'undefined' && wx && typeof wx.setStorageSync === 'function') {
-      wx.setStorageSync('miniappActiveEnv', String(nextEnv || '').trim())
-      return true
-    }
-  } catch (_) {}
-  return false
-}
-
-const defaultEnvs = isPlainObject(defaults.ENVIRONMENTS) ? defaults.ENVIRONMENTS : {}
-const localEnvs = isPlainObject(localOverrides.ENVIRONMENTS) ? localOverrides.ENVIRONMENTS : {}
-const environments = {
-  ...defaultEnvs,
-  ...localEnvs
-}
-
-const configuredEnv = String(localOverrides.ACTIVE_ENV || '').trim()
-const storedEnv = readStoredEnv()
-const defaultEnv = String(defaults.ACTIVE_ENV || '').trim()
-const activeEnv = configuredEnv || storedEnv || defaultEnv || 'local'
-
-const envProfile = isPlainObject(environments[activeEnv]) ? environments[activeEnv] : {}
-
-const merged = {
-  ...defaults,
-  ...localOverrides,
-  ENVIRONMENTS: environments,
-  ACTIVE_ENV: activeEnv,
-  ...envProfile
-}
+const miniappConfig = asObject(asObject(rootConfig).miniapp)
 
 module.exports = {
-  ...merged,
-  getAvailableEnvs() {
-    return Object.keys(environments)
-  },
-  setActiveEnv(nextEnv) {
-    const target = String(nextEnv || '').trim()
-    if (!target || !isPlainObject(environments[target])) {
-      return false
-    }
-    return writeStoredEnv(target)
-  }
+  BASE_URL: String(miniappConfig.baseUrl || DEFAULTS.BASE_URL).trim() || DEFAULTS.BASE_URL,
+  REWARDED_VIDEO_AD_UNIT_ID: String(miniappConfig.rewardedVideoAdUnitId || DEFAULTS.REWARDED_VIDEO_AD_UNIT_ID),
+  SIGNIN_REWARD_DAYS: Math.max(1, Number(miniappConfig.signinRewardDays || DEFAULTS.SIGNIN_REWARD_DAYS)),
+  AD_UNLOCK_DAYS: Math.max(1, Number(miniappConfig.adUnlockDays || DEFAULTS.AD_UNLOCK_DAYS))
 }

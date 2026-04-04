@@ -29,9 +29,9 @@ function parseArgs(argv) {
 function normalizeConfigPath(inputPath) {
   const candidate = String(inputPath || '').trim()
   if (candidate) return path.resolve(process.cwd(), candidate)
-  const local = path.resolve(ROOT, 'apps', 'pool-server', 'config.json')
+  const local = path.resolve(ROOT, 'config.json')
   if (fs.existsSync(local)) return local
-  return path.resolve(ROOT, 'apps', 'pool-server', 'config.example.json')
+  return path.resolve(ROOT, 'config.json')
 }
 
 function readJSON(filePath) {
@@ -40,8 +40,10 @@ function readJSON(filePath) {
 }
 
 function resolveLicenseMysql(config) {
-  const license = (config && typeof config === 'object' && config.license && typeof config.license === 'object')
-    ? config.license
+  const root = (config && typeof config === 'object') ? config : {}
+  const poolServer = (root.poolServer && typeof root.poolServer === 'object') ? root.poolServer : root
+  const license = (poolServer && typeof poolServer === 'object' && poolServer.license && typeof poolServer.license === 'object')
+    ? poolServer.license
     : {}
   const env = process.env
   return {
@@ -60,6 +62,14 @@ function ensureMysqlClient() {
     const reason = probe.error ? probe.error.message : (probe.stderr || probe.stdout || 'unknown')
     throw new Error(`未找到 mysql 客户端，请先安装 MySQL Client。原因: ${String(reason).trim()}`)
   }
+}
+
+function resolveDatabaseSQLName(database) {
+  const name = String(database || '').trim()
+  if (!/^[A-Za-z0-9_]+$/.test(name)) {
+    throw new Error(`数据库名不合法: ${database}`)
+  }
+  return `\`${name}\``
 }
 
 function main() {
@@ -93,7 +103,9 @@ function main() {
   }
 
   ensureMysqlClient()
-  const sqlText = fs.readFileSync(sqlPath, 'utf8')
+  const sqlTemplate = fs.readFileSync(sqlPath, 'utf8')
+  const dbNameSQL = resolveDatabaseSQLName(mysql.database)
+  const sqlText = sqlTemplate.replaceAll('__LICENSE_DB__', dbNameSQL)
   const mysqlArgs = [
     '-h', mysql.host,
     '-P', String(mysql.port),

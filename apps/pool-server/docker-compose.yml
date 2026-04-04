@@ -13,4 +13,4 @@ services:
       # REDIS_PASSWORD: ""
       # REDIS_DB: "0"
     volumes:
-      - ./config.json:/app/config.json:ro
+      - ../../config.json:/app/config.json:ro

@@ -54,4 +54,4 @@ npm run server:docker:up
 
 - 根目录只保留仓库级入口、通用脚本和文档。
 - 桌面端构建产物输出到 `apps/desktop/dist` 和 `apps/desktop/dist-electron`。
-- 服务端配置文件位于 `apps/pool-server/config.json`。
+- 全项目统一配置文件为根目录 `config.json`。

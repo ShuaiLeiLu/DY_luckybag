@@ -31,14 +31,14 @@ function clamp(num, min, max) {
 export function calcAdaptiveScanProfile(state, scanConfig) {
   const safeState = state || createScanRiskState()
   const level = Math.max(0, Number(safeState.level || 0))
-  const safeScan = scanConfig || { countPerPage: 15, pagesPerCategory: 12, allCount: 24 }
+  const safeScan = scanConfig || { countPerPage: 15, pagesPerCategory: 5, allCount: 24 }
   const baseAllCount = clamp(safeScan.allCount || 24, 12, 24)
   const baseCountPerPage = clamp(safeScan.countPerPage || 15, 10, 20)
-  const basePagesPerCategory = clamp(safeScan.pagesPerCategory || 12, 6, 80)
+  const basePagesPerCategory = clamp(safeScan.pagesPerCategory || 5, 5, 80)
 
   const levelProfiles = {
     0: {
-      allTimes: 14,
+      allTimes: 10,
       allCount: baseAllCount,
       pagesPerCategory: basePagesPerCategory,
       countPerPage: baseCountPerPage,
@@ -48,9 +48,9 @@ export function calcAdaptiveScanProfile(state, scanConfig) {
       categoryNoGrowthBreakPages: 8,
       detailConcurrency: 3,
       detailRoomCap: 12,
-      itemGapMs: 220,
-      cycleDelayMinMs: 1200,
-      cycleDelayMaxMs: 2200
+      itemGapMs: 420,
+      cycleDelayMinMs: 1800,
+      cycleDelayMaxMs: 3200
     },
     1: {
       allTimes: 10,
@@ -63,9 +63,9 @@ export function calcAdaptiveScanProfile(state, scanConfig) {
       categoryNoGrowthBreakPages: 6,
       detailConcurrency: 2,
       detailRoomCap: 10,
-      itemGapMs: 320,
-      cycleDelayMinMs: 1800,
-      cycleDelayMaxMs: 3000
+      itemGapMs: 620,
+      cycleDelayMinMs: 2400,
+      cycleDelayMaxMs: 3800
     },
     2: {
       allTimes: 8,
@@ -78,9 +78,9 @@ export function calcAdaptiveScanProfile(state, scanConfig) {
       categoryNoGrowthBreakPages: 5,
       detailConcurrency: 2,
       detailRoomCap: 8,
-      itemGapMs: 480,
-      cycleDelayMinMs: 2800,
-      cycleDelayMaxMs: 4200
+      itemGapMs: 900,
+      cycleDelayMinMs: 3400,
+      cycleDelayMaxMs: 5200
     },
     3: {
       allTimes: 6,
@@ -93,9 +93,9 @@ export function calcAdaptiveScanProfile(state, scanConfig) {
       categoryNoGrowthBreakPages: 4,
       detailConcurrency: 1,
       detailRoomCap: 6,
-      itemGapMs: 700,
-      cycleDelayMinMs: 4500,
-      cycleDelayMaxMs: 7000
+      itemGapMs: 1300,
+      cycleDelayMinMs: 5200,
+      cycleDelayMaxMs: 8000
     }
   }
   const profile = levelProfiles[level] || levelProfiles[3]

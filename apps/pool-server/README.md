@@ -16,10 +16,10 @@ go run ./cmd/poolserver
 服务端按以下顺序查找配置：
 
 1. `POOL_CONFIG_FILE`
-2. 当前目录 `config.json`
-3. 仓库根目录 `apps/pool-server/config.json`
+2. 仓库根目录 `config.json`
+3. 当前目录 `config.json`（兼容旧路径）
 
-示例配置见 [config.example.json](/Users/lushuailei/PycharmProjects/dy_fudai/apps/pool-server/config.example.json)。
+统一配置读取 `config.json` 的 `poolServer` 节点。
 
 ## 常用命令
 
@@ -47,6 +47,5 @@ apps/pool-server/
 ├── Dockerfile
 ├── docker-compose.yml
 ├── docker-compose.redis.yml
-├── config.example.json
 └── README.md
 ```

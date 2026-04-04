@@ -16,7 +16,6 @@ export type UseLicenseBindingOptions = {
   poolFingerprint: string
   appVersion: string
   autoCreateEnabled?: boolean
-  onOpenAuthDrawer: () => void
   onLicenseRefresh: () => Promise<void>
   onLog: (message: string, type?: UiLogLevel) => void
 }
@@ -79,7 +78,6 @@ export function useLicenseBinding(options: UseLicenseBindingOptions): UseLicense
     poolFingerprint,
     appVersion,
     autoCreateEnabled = false,
-    onOpenAuthDrawer,
     onLicenseRefresh,
     onLog
   } = options
@@ -194,7 +192,6 @@ export function useLicenseBinding(options: UseLicenseBindingOptions): UseLicense
       const nextSession = normalizeBindSession(result.data?.session || null)
       await applyBindSession(nextSession)
       setBindCodeVersion((current) => current + 1)
-      onOpenAuthDrawer()
 
       if (hasBindReference(nextSession)) {
         onLog('小程序码已自动生成，请扫码完成绑定', 'info')
@@ -208,7 +205,7 @@ export function useLicenseBinding(options: UseLicenseBindingOptions): UseLicense
     } finally {
       setBindBusy(false)
     }
-  }, [appVersion, applyBindSession, normalizedPoolServerUrl, onLog, onOpenAuthDrawer, poolClientId, poolFingerprint])
+  }, [appVersion, applyBindSession, normalizedPoolServerUrl, onLog, poolClientId, poolFingerprint])
 
   useEffect(() => {
     if (isBindSessionFinished(bindSession)) return

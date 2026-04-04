@@ -32,7 +32,17 @@ export function createAccountModel(base: Partial<AccountSession> & AnyRecord = {
     todayLotteryWinCount: Number(base.todayLotteryWinCount || 0),
     todayRedPacketWinCount: Number(base.todayRedPacketWinCount || 0),
     todayLotteryWonDiamonds: Number(base.todayLotteryWonDiamonds || 0),
-    todayRedPacketWonDiamonds: Number(base.todayRedPacketWonDiamonds || 0)
+    todayRedPacketWonDiamonds: Number(base.todayRedPacketWonDiamonds || 0),
+    scanUploadSubmitted: Number(base.scanUploadSubmitted || 0),
+    scanUploadAccepted: Number(base.scanUploadAccepted || 0),
+    scanUploadOk: base.scanUploadOk === true,
+    scanUploadSkipped: String(base.scanUploadSkipped || ''),
+    scanUploadError: String(base.scanUploadError || ''),
+    scanUploadAt: Number(base.scanUploadAt || 0),
+    poolActiveCandidates: Number(base.poolActiveCandidates || 0),
+    poolValidCandidates: Number(base.poolValidCandidates || 0),
+    poolAvailableCandidates: Number(base.poolAvailableCandidates || 0),
+    poolSummaryAt: Number(base.poolSummaryAt || 0)
   }
 }
 

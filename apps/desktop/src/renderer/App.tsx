@@ -26,7 +26,6 @@ import { StatCard, ClusterBadge } from './components/ui/StatusWidgets'
 import { AccountCard } from './features/accounts/AccountCard'
 import { buildLegacyConfig } from './features/accounts/legacyConfig'
 import { DOUYIN_LOGIN_PROMPT_SCRIPT } from './features/accounts/loginPrompt'
-import { LicenseDrawer } from './features/license/LicenseDrawer'
 import { LicenseGate } from './features/license/LicenseGate'
 import { formatAccessModeText, formatLicensePlanText, formatUpdateStatusText } from './features/license/presentation'
 import { useLicenseBinding } from './features/license/useLicenseBinding'
@@ -56,6 +55,7 @@ type ServiceResult<T = AnyRecord> = {
 const defaultSettings: DesktopSettings = {
   poolServerUrl: FIXED_POOL_SERVER_URL,
   updateFeedUrl: 'https://updates.example.com/dy-fudai/windows',
+  noticeMarkdown: '',
   stayDuration: 18,
   enableRedPacket: true,
   randomInteraction: true,
@@ -113,6 +113,53 @@ function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
+function simplifyRuntimeLogMessage(message: string) {
+  const raw = String(message || '').trim()
+  if (!raw) return { keep: false, message: '' }
+
+  const hiddenPatterns = [
+    /^━━━━━━━━/,
+    /^📊 排序说明/,
+    /^•/,
+    /^   /,
+    /^💬 等待开奖随机弹幕:/,
+    /^🎲 等待开奖阶段已启用随机弹幕互动$/,
+    /^🔎 抢后停留期间优先扫描后续福袋/
+  ]
+  if (hiddenPatterns.some((pattern) => pattern.test(raw))) {
+    return { keep: false, message: '' }
+  }
+
+  const replaced = raw
+    .replace(/^🎯 选择目标福袋:\s*/, '已选目标福袋：')
+    .replace(/^🎯 选择最优福袋:\s*/, '已选目标福袋：')
+    .replace(/^🔗 正在进入目标直播间\.\.\.$/, '正在进入目标直播间')
+    .replace(/^✅ 已进入直播间，等待福袋入口并立即执行参与\.\.\.$/, '已进入直播间，准备参与福袋')
+    .replace(/^↪️ /, '')
+    .replace(/^ℹ️ /, '')
+    .replace(/^✅ /, '')
+    .replace(/^⚠️ /, '')
+    .replace(/^⏱️ /, '')
+    .replace(/^⏳ /, '')
+    .replace(/^📡 /, '')
+    .replace(/^🔄 /, '')
+    .replace(/^🧧 /, '')
+    .replace(/^🔐 /, '')
+
+  return { keep: true, message: replaced }
+}
+
+function buildRuntimeLogDedupKey(message: string) {
+  const secMatch = message.match(/剩余(\d+)秒/)
+  if (secMatch) {
+    const sec = Number(secMatch[1] || 0)
+    if (sec > 10 && sec % 10 !== 0) {
+      return `countdown:${Math.floor(sec / 10) * 10}`
+    }
+  }
+  return message
+}
+
 
 export default function App() {
   const manager = useMemo(() => new LotteryManager(), [])
@@ -131,16 +178,14 @@ export default function App() {
   const [licenseKey, setLicenseKey] = useState('')
   const [selectedAccountId, setSelectedAccountId] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [authDrawerOpen, setAuthDrawerOpen] = useState(false)
+  const [forceShowMainWhenLocked, setForceShowMainWhenLocked] = useState(false)
   const [licenseBusy, setLicenseBusy] = useState(false)
+  const lastRuntimeLogRef = useRef<Map<string, { key: string; at: number }>>(new Map())
   const {
-    filteredLogs,
+    logs,
     logListRef,
-    logQuery,
-    setLogQuery,
     handleLogListScroll,
-    addLog,
-    replaceLogs
+    addLog
   } = useTimelineLogs()
 
   const appendAccountLog = useEffectEvent(async (
@@ -171,7 +216,7 @@ export default function App() {
   })
 
   const poolClientId = useMemo(() => resolvePoolClientId(), [])
-  const activePoolServerUrl = useMemo(() => settings.poolServerUrl.trim() || FIXED_POOL_SERVER_URL, [settings.poolServerUrl])
+  const activePoolServerUrl = FIXED_POOL_SERVER_URL
   const poolFingerprint = useMemo(() => resolveLicenseFingerprint(), [])
 
   const selectedAccount = accounts.find((item) => item.id === selectedAccountId) || accounts[0] || null
@@ -258,7 +303,8 @@ export default function App() {
       const result = await window.electronAPI.invoke('execute-script', {
         accountId,
         script: DOUYIN_LOGIN_PROMPT_SCRIPT,
-        timeoutMs: 6000
+        timeoutMs: 6000,
+        label: 'login.ensure_prompt'
       }).catch(() => null)
       if (!result?.success) continue
       const payload = result.result || {}
@@ -276,7 +322,7 @@ export default function App() {
   })
 
   const refreshLicense = useEffectEvent(async () => {
-    const baseUrl = settings.poolServerUrl.trim() || FIXED_POOL_SERVER_URL
+    const baseUrl = FIXED_POOL_SERVER_URL
     const requestStatus = async (timeoutMs: number) => (await fetchLicenseStatus(baseUrl, {
       clientId: poolClientId,
       fingerprint: poolFingerprint,
@@ -320,8 +366,7 @@ export default function App() {
   })
 
   const refreshDispatch = useEffectEvent(async () => {
-    const poolServerUrl = activePoolServerUrl
-    manager.setPoolServerConfig({ url: poolServerUrl }, { silent: true })
+    manager.setPoolServerConfig({ url: FIXED_POOL_SERVER_URL }, { silent: true })
     const result = (await manager.fetchPoolTaskDebugSnapshot(buildLegacyConfig(settings), { limit: 50 })) as ServiceResult<{
       summary?: AnyRecord
     }>
@@ -364,15 +409,10 @@ export default function App() {
       setBootstrap(snapshot)
       setSettings({
         ...defaultSettings,
-        ...(snapshot.settings || {})
+        ...(snapshot.settings || {}),
+        poolServerUrl: FIXED_POOL_SERVER_URL
       })
       setUpdateState(snapshot.update || emptyUpdate)
-      replaceLogs((snapshot.events || []).map((event) => ({
-        id: event.id,
-        time: new Date(event.createdAt).toLocaleTimeString(),
-        type: event.level === 'success' ? 'success' : event.level === 'warning' ? 'warning' : event.level === 'error' ? 'error' : 'info',
-        message: event.message
-      })))
       setHistoryRecords(Array.isArray(snapshot.historyRecords) ? snapshot.historyRecords : [])
     } catch (error) {
       addLog(`引导信息加载失败: ${String((error as Error)?.message || error)}`, 'warning')
@@ -423,7 +463,7 @@ export default function App() {
           patchAccount(accountId, { state: 'waiting', actionActive: false })
           return
         }
-        await window.electronAPI.invoke('navigate-to', { accountId, url: 'https://www.douyin.com' })
+        void window.electronAPI.invoke('navigate-to', { accountId, url: 'https://www.douyin.com' }).catch(() => {})
       }
 
       await window.electronAPI.desktop.setAccountMonitoring(accountId, true)
@@ -433,7 +473,7 @@ export default function App() {
         scanRole: runtime.scanRole || 'worker'
       })
       manager.setScanConfig(settings.scanConfig)
-      manager.setPoolServerConfig({ url: settings.poolServerUrl }, { silent: true })
+      manager.setPoolServerConfig({ url: FIXED_POOL_SERVER_URL }, { silent: true })
       manager.startAccount(runtime, buildLegacyConfig(settings), {
         onStatusUpdate: (update: AnyRecord) => {
           patchAccount(accountId, {
@@ -441,6 +481,36 @@ export default function App() {
             state: String(update.state || runtime.state || 'running'),
             actionActive: update.actionActive === undefined ? true : update.actionActive === true
           })
+
+          const hasPoolSummary = update && (
+            Object.prototype.hasOwnProperty.call(update, 'poolActiveCandidates') ||
+            Object.prototype.hasOwnProperty.call(update, 'poolValidCandidates') ||
+            Object.prototype.hasOwnProperty.call(update, 'poolAvailableCandidates')
+          )
+          if (hasPoolSummary) {
+            setDispatchSummary((current) => ({
+              ...current,
+              enabled: true,
+              connected: true,
+              error: '',
+              activeCandidates: Number(
+                update.poolActiveCandidates !== undefined
+                  ? update.poolActiveCandidates
+                  : current.activeCandidates
+              ),
+              validCandidates: Number(
+                update.poolValidCandidates !== undefined
+                  ? update.poolValidCandidates
+                  : current.validCandidates
+              ),
+              availableCandidates: Number(
+                update.poolAvailableCandidates !== undefined
+                  ? update.poolAvailableCandidates
+                  : current.availableCandidates
+              ),
+              updatedAt: Number(update.poolSummaryAt || Date.now())
+            }))
+          }
         },
         onLotteryListUpdate: ({ accountId: nextId, list }: { accountId: string; list: AnyRecord[] }) => {
           startTransition(() => {
@@ -454,12 +524,34 @@ export default function App() {
           void persistHistoryRecord(record)
         },
         onLog: (message: string, type: UiLogEntry['type']) => {
-          addLog(message, type)
-          void appendAccountLog(accountId, message, type)
+          const simplified = simplifyRuntimeLogMessage(message)
+          if (!simplified.keep) return
+          const dedupKey = buildRuntimeLogDedupKey(simplified.message)
+          const now = Date.now()
+          const prev = lastRuntimeLogRef.current.get(accountId)
+          if (prev && prev.key === dedupKey && now - prev.at < 2200) {
+            return
+          }
+          lastRuntimeLogRef.current.set(accountId, { key: dedupKey, at: now })
+          addLog(simplified.message, type)
+          void appendAccountLog(accountId, simplified.message, type)
         },
-        onTokenInvalid: ({ id, reason }: { id: string; reason: string }) => {
-          addLog(`账号 ${id} 登录态失效: ${reason || '需要重新扫码登录'}`, 'warning')
+        onTokenInvalid: async ({ id, reason }: { id: string; reason: string }) => {
+          const runtimeSnapshot = runtimeAccountsRef.current.get(id)
+          const accountName = runtimeSnapshot?.nickname || id
+          addLog(`账号 ${accountName} 登录态失效: ${reason || '需要重新扫码登录'}`, 'warning')
+          stopLoginPolling(id)
           patchAccount(id, { state: 'waiting', actionActive: false })
+
+          await window.electronAPI.desktop.setAccountMonitoring(id, false).catch(() => {})
+          await window.electronAPI.invoke('clear-account-cache', id).catch(() => {})
+          await window.electronAPI.invoke('delete-token', id).catch(() => {})
+          await manager.stopAccount(id).catch(() => {})
+
+          addLog(`账号 ${accountName} 正在切换到扫码登录...`, 'info')
+          window.setTimeout(() => {
+            startAccountWithLogin(id, true)
+          }, 180)
         }
       }, {
         reuseLoggedInBrowser: options.reuseLoggedInBrowser === true,
@@ -572,6 +664,8 @@ export default function App() {
     stopLoginPolling(accountId)
     await window.electronAPI.desktop.setAccountMonitoring(accountId, false).catch(() => {})
     await window.electronAPI.invoke('delete-token', accountId).catch(() => {})
+    const purgeResult: { success: boolean; result?: AnyRecord; error?: string } =
+      await window.electronAPI.desktop.purgeAccountData(accountId).catch(() => ({ success: false, error: 'invoke_failed' }))
     startTransition(() => {
       setAccounts((current) => current.filter((item) => item.id !== accountId))
       setLotteriesByAccount((current) => {
@@ -579,18 +673,25 @@ export default function App() {
         delete next[accountId]
         return next
       })
+      setHistoryRecords((current) => current.filter((item) => item.accountId !== accountId))
     })
+    if (purgeResult?.success) {
+      addLog(`账号 ${accountId} 已彻底删除（历史${purgeResult?.result?.deletedHistoryRows || 0}条，日志文件${purgeResult?.result?.deletedAccountLogFiles || 0}个）`, 'success')
+    } else {
+      addLog(`账号 ${accountId} 已删除，但本地记录清理失败: ${String(purgeResult?.error || 'unknown')}`, 'warning')
+    }
   })
 
   const persistSettings = useEffectEvent(async (nextSettings: DesktopSettings) => {
-    setSettings(nextSettings)
-    manager.setScanConfig(nextSettings.scanConfig)
-    manager.setPoolServerConfig({ url: nextSettings.poolServerUrl }, { silent: true })
+    const normalizedSettings: DesktopSettings = {
+      ...nextSettings,
+      poolServerUrl: FIXED_POOL_SERVER_URL
+    }
+    setSettings(normalizedSettings)
+    manager.setScanConfig(normalizedSettings.scanConfig)
+    manager.setPoolServerConfig({ url: FIXED_POOL_SERVER_URL }, { silent: true })
     try {
-      await window.electronAPI.desktop.saveSettings({
-        ...nextSettings,
-        poolServerUrl: nextSettings.poolServerUrl.trim()
-      })
+      await window.electronAPI.desktop.saveSettings(normalizedSettings)
     } catch (_) {
       // ignore
     }
@@ -782,38 +883,43 @@ export default function App() {
     }
   })
 
+  const gateLocked = license.accessMode === 'locked' && license.requiresActivation
+
   const {
     bindBusy,
     bindSession,
     bindMiniAppCodeUrl,
+    createBindSession,
     refreshBindSessionStatus
   } = useLicenseBinding({
     poolServerUrl: activePoolServerUrl,
     poolClientId,
     poolFingerprint,
     appVersion: bootstrap?.appVersion || '3.0.0',
-    autoCreateEnabled: authDrawerOpen,
-    onOpenAuthDrawer: () => setAuthDrawerOpen(true),
+    autoCreateEnabled: gateLocked,
     onLicenseRefresh: refreshLicense,
     onLog: addLog
   })
 
-  const gateLocked = license.accessMode === 'locked' && license.requiresActivation
+  const showGate = gateLocked && !forceShowMainWhenLocked
 
   return (
     <div className="h-full w-full overflow-auto p-3 sm:p-4 md:p-5">
-      {gateLocked ? (
+      {showGate ? (
         <LicenseGate
           license={license}
           licenseKey={licenseKey}
-          accessModeText={accessModeText}
-          serverUrl={FIXED_POOL_SERVER_URL}
+          announcementMarkdown={settings.noticeMarkdown}
+          bindBusy={bindBusy}
+          bindSession={bindSession}
+          miniAppCodeUrl={bindMiniAppCodeUrl}
           onLicenseKeyChange={setLicenseKey}
           onStartTrial={handleStartTrial}
           onActivate={handleActivate}
+          onCreateBindSession={() => void createBindSession()}
+          onRefreshBindStatus={() => void refreshBindSessionStatus(true)}
+          onBackToMain={() => setForceShowMainWhenLocked(true)}
           busy={licenseBusy}
-          clientId={poolClientId}
-          fingerprint={poolFingerprint}
         />
       ) : (
         <main className="flex min-h-full flex-col gap-4 2xl:h-full 2xl:min-h-0">
@@ -828,9 +934,11 @@ export default function App() {
                   <button className="w-full rounded-full border border-slate-600/70 px-4 py-2 transition hover:border-slate-400 hover:bg-slate-800/60 sm:w-auto" onClick={() => setSettingsOpen(true)}>
                     设置中心
                   </button>
-                  <button className="w-full rounded-full border border-cyan-500/50 bg-cyan-500/10 px-4 py-2 text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-500/20 sm:w-auto" onClick={() => setAuthDrawerOpen(true)}>
-                    授权中心
-                  </button>
+                  {gateLocked ? (
+                    <button className="w-full rounded-full border border-cyan-500/50 bg-cyan-500/10 px-4 py-2 text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-500/20 sm:w-auto" onClick={() => setForceShowMainWhenLocked(false)}>
+                      返回锁定页
+                    </button>
+                  ) : null}
                   <button className="w-full rounded-full border border-slate-600/70 px-4 py-2 transition hover:border-slate-400 hover:bg-slate-800/60 sm:w-auto" onClick={() => void window.electronAPI.desktop.checkForUpdates()}>
                     检查更新
                   </button>
@@ -900,15 +1008,13 @@ export default function App() {
               </div>
             </div>
 
-            <div className="grid gap-4 xl:grid-cols-2 2xl:min-h-0 2xl:grid-cols-1">
+            <div className="grid gap-4 grid-rows-[minmax(220px,0.78fr)_minmax(360px,1.22fr)] xl:grid-cols-2 xl:grid-rows-1 2xl:min-h-0 2xl:grid-cols-1 2xl:grid-rows-[minmax(220px,0.74fr)_minmax(380px,1.26fr)]">
               <TaskDetailPanel
                 selectedAccount={selectedAccount}
               />
               <TimelinePanel
-                logQuery={logQuery}
-                logs={filteredLogs}
+                logs={logs}
                 logListRef={logListRef}
-                onLogQueryChange={setLogQuery}
                 onLogListScroll={handleLogListScroll}
               />
             </div>
@@ -929,22 +1035,6 @@ export default function App() {
         onDownloadUpdate={() => void window.electronAPI.desktop.downloadUpdate()}
       />
 
-      <LicenseDrawer
-        open={authDrawerOpen}
-        license={license}
-        accessModeText={accessModeText}
-        licenseKey={licenseKey}
-        licenseBusy={licenseBusy}
-        bindBusy={bindBusy}
-        bindSession={bindSession}
-        miniAppCodeUrl={bindMiniAppCodeUrl}
-        onLicenseKeyChange={setLicenseKey}
-        onStartTrial={() => void handleStartTrial()}
-        onActivate={() => void handleActivate()}
-        onRefreshBindStatus={() => void refreshBindSessionStatus(true)}
-        onClose={() => setAuthDrawerOpen(false)}
-      />
     </div>
   )
 }
-

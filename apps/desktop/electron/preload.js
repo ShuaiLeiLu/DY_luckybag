@@ -36,7 +36,8 @@ const INVOKE_CHANNELS = new Set([
   'desktop:install-update',
   'desktop:append-event',
   'desktop:append-account-log',
-  'desktop:append-history-record'
+  'desktop:append-history-record',
+  'desktop:purge-account-data'
 ])
 
 const EVENT_CHANNELS = new Set([
@@ -123,6 +124,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     appendHistoryRecord(record) {
       return invoke('desktop:append-history-record', record)
+    },
+    purgeAccountData(accountId) {
+      return invoke('desktop:purge-account-data', { accountId })
     },
     onUpdateState(handler) {
       return on('desktop:update-state', handler)

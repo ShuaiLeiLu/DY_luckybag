@@ -683,7 +683,14 @@ async function douyinLiveRemote(uri, params, headers, method = 'GET') {
       lastError = error
       const code = error?.code
       const statusCode = Number(error?.statusCode || 0)
+      const networkRetryable =
+        code === 'ENOTFOUND' ||
+        code === 'EAI_AGAIN' ||
+        code === 'ECONNRESET' ||
+        code === 'ETIMEDOUT' ||
+        code === 'ECONNABORTED'
       const retryable =
+        networkRetryable ||
         code === 'NON_JSON_RESPONSE' ||
         code === 'JSON_PARSE_ERROR' ||
         statusCode === 403 ||

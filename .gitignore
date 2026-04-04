@@ -17,9 +17,6 @@ apps/pool-server/.gocache/
 tokens.json
 *.token
 *.session
-apps/pool-server/config.json
-apps/desktop/config.json
-apps/license-miniapp/config.local.js
 
 # Logs
 *.log
@@ -68,7 +65,6 @@ Desktop.ini
 超人福袋助手_1.0.10/
 
 # Keep example configs
-!*.example.json
 !apps/desktop/tokens.example.json
 
 # Local backend container data

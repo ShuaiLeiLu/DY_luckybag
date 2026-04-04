@@ -55,6 +55,16 @@ function createAccount(overrides: Partial<AccountSession> = {}): AccountSession 
     todayRedPacketWinCount: 0,
     todayLotteryWonDiamonds: 0,
     todayRedPacketWonDiamonds: 0,
+    scanUploadSubmitted: 0,
+    scanUploadAccepted: 0,
+    scanUploadOk: false,
+    scanUploadSkipped: '',
+    scanUploadError: '',
+    scanUploadAt: 0,
+    poolActiveCandidates: 0,
+    poolValidCandidates: 0,
+    poolAvailableCandidates: 0,
+    poolSummaryAt: 0,
     ...overrides
   }
 }

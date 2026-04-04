@@ -21,4 +21,4 @@ services:
       REDIS_ADDR: "redis:6379"
       REDIS_DB: "0"
     volumes:
-      - ./config.json:/app/config.json:ro
+      - ../../config.json:/app/config.json:ro

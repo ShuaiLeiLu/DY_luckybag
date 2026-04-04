@@ -17,7 +17,7 @@ function isBrowserGoneResult(result) {
  * @param {string} script 页面脚本
  * @returns {Promise<object>}
  */
-async function executeScriptSafely(manager, accountId, script, timeoutMs = 4500) {
+async function executeScriptSafely(manager, accountId, script, timeoutMs = 4500, label = '') {
   if (!manager?.accounts?.has(accountId) || manager.isPaused(accountId)) {
     return { success: false, error: '账号已停止', code: 'ACCOUNT_STOPPED' }
   }
@@ -25,7 +25,8 @@ async function executeScriptSafely(manager, accountId, script, timeoutMs = 4500)
     const result = await manager.ipc.invoke('execute-script', {
       accountId,
       script,
-      timeoutMs: Math.max(1200, Number(timeoutMs || 4500))
+      timeoutMs: Math.max(1200, Number(timeoutMs || 4500)),
+      label: String(label || '')
     })
     if (isBrowserGoneResult(result)) {
       return { success: false, error: '浏览器实例不存在', code: 'BROWSER_NOT_FOUND' }
@@ -38,6 +39,9 @@ async function executeScriptSafely(manager, accountId, script, timeoutMs = 4500)
     }
     if (message.includes('执行脚本超时')) {
       return { success: false, error: '执行脚本超时', code: 'EXECUTE_TIMEOUT' }
+    }
+    if (message.includes('页面上下文切换中')) {
+      return { success: false, error: '页面上下文切换中', code: 'EXECUTE_CONTEXT_LOST' }
     }
     return { success: false, error: message, code: error?.code || 'EXECUTE_SCRIPT_FAILED' }
   }
@@ -166,7 +170,7 @@ async function readLotteryJoinedState(manager, accountId, timeoutMs = 5000) {
         sample: text.slice(0, 180)
       };
     })()
-  `, timeoutMs)
+  `, timeoutMs, 'join.read_joined_state')
   if (isBrowserGoneResult(res)) {
     return { success: false, error: '浏览器已关闭，停止参与', code: 'BROWSER_NOT_FOUND' }
   }
@@ -180,12 +184,21 @@ async function readLotteryJoinedState(manager, accountId, timeoutMs = 5000) {
 }
 
 async function waitForVisibleSelector(manager, accountId, selector, timeoutMs) {
-  const res = await executeScriptSafely(manager, accountId, buildWaitForVisibleSelectorScript(selector, timeoutMs), timeoutMs + 1500)
+  const res = await executeScriptSafely(
+    manager,
+    accountId,
+    buildWaitForVisibleSelectorScript(selector, timeoutMs),
+    timeoutMs + 1500,
+    `join.wait_selector:${selector}`
+  )
   if (isBrowserGoneResult(res)) {
     return { success: false, error: '浏览器已关闭，停止参与', code: 'BROWSER_NOT_FOUND' }
   }
   if (res?.code === 'EXECUTE_TIMEOUT') {
     return { success: false, error: '页面脚本超时', code: 'EXECUTE_TIMEOUT' }
+  }
+  if (res?.code === 'EXECUTE_CONTEXT_LOST') {
+    return { success: false, error: '页面上下文切换中', code: 'EXECUTE_CONTEXT_LOST' }
   }
   if (!res?.success || !res?.result || typeof res.result !== 'object') {
     return { success: false, error: '执行脚本失败', code: 'WAIT_SELECTOR_FAILED' }
@@ -202,12 +215,21 @@ async function waitForVisibleSelector(manager, accountId, selector, timeoutMs) {
 }
 
 async function clickVisibleSelector(manager, accountId, selector, timeoutMs) {
-  const res = await executeScriptSafely(manager, accountId, buildClickVisibleSelectorScript(selector, timeoutMs), timeoutMs + 1500)
+  const res = await executeScriptSafely(
+    manager,
+    accountId,
+    buildClickVisibleSelectorScript(selector, timeoutMs),
+    timeoutMs + 1500,
+    `join.click_selector:${selector}`
+  )
   if (isBrowserGoneResult(res)) {
     return { success: false, error: '浏览器已关闭，停止参与', code: 'BROWSER_NOT_FOUND' }
   }
   if (res?.code === 'EXECUTE_TIMEOUT') {
     return { success: false, error: '页面脚本超时', code: 'EXECUTE_TIMEOUT' }
+  }
+  if (res?.code === 'EXECUTE_CONTEXT_LOST') {
+    return { success: false, error: '页面上下文切换中', code: 'EXECUTE_CONTEXT_LOST' }
   }
   if (!res?.success || !res?.result || typeof res.result !== 'object') {
     return { success: false, error: '执行脚本失败', code: 'CLICK_SELECTOR_FAILED' }
@@ -283,13 +305,16 @@ async function clickLotteryEntryFallback(manager, accountId, timeoutMs = 12000) 
       };
       tick();
     }))()
-  `, timeoutMs + 1800)
+  `, timeoutMs + 1800, 'join.click_lottery_entry_fallback')
 
   if (isBrowserGoneResult(res)) {
     return { success: false, error: '浏览器已关闭，停止参与', code: 'BROWSER_NOT_FOUND' }
   }
   if (res?.code === 'EXECUTE_TIMEOUT') {
     return { success: false, error: '页面脚本超时', code: 'EXECUTE_TIMEOUT' }
+  }
+  if (res?.code === 'EXECUTE_CONTEXT_LOST') {
+    return { success: false, error: '页面上下文切换中', code: 'EXECUTE_CONTEXT_LOST' }
   }
   if (!res?.success || !res?.result || typeof res.result !== 'object') {
     return { success: false, error: '执行脚本失败', code: 'FALLBACK_ENTRY_FAILED' }
@@ -353,13 +378,16 @@ async function clickLotteryJoinFallback(manager, accountId, timeoutMs = 10000) {
       };
       tick();
     }))()
-  `, timeoutMs + 1800)
+  `, timeoutMs + 1800, 'join.click_lottery_join_fallback')
 
   if (isBrowserGoneResult(res)) {
     return { success: false, error: '浏览器已关闭，停止参与', code: 'BROWSER_NOT_FOUND' }
   }
   if (res?.code === 'EXECUTE_TIMEOUT') {
     return { success: false, error: '页面脚本超时', code: 'EXECUTE_TIMEOUT' }
+  }
+  if (res?.code === 'EXECUTE_CONTEXT_LOST') {
+    return { success: false, error: '页面上下文切换中', code: 'EXECUTE_CONTEXT_LOST' }
   }
   if (!res?.success || !res?.result || typeof res.result !== 'object') {
     return { success: false, error: '执行脚本失败', code: 'FALLBACK_JOIN_FAILED' }
@@ -420,116 +448,15 @@ async function runSecondInspect(manager, accountId, lotteryInfo, config = {}) {
  * @param {number} timeoutMs 超时时间
  * @returns {Promise<boolean>}
  */
-export async function waitForLiveRoomReady(manager, accountId, timeoutMs = 10000, options = {}) {
-  const start = Date.now()
-  const expectedRoomIds = Array.from(new Set(
-    (Array.isArray(options?.expectedRoomIds) ? options.expectedRoomIds : [])
-      .map((item) => String(item || '').trim())
-      .filter(Boolean)
-  ))
-  const expectedTargetUrl = expectedRoomIds.length > 0 ? `https://live.douyin.com/${expectedRoomIds[0]}` : 'https://live.douyin.com'
-  let reloadedOnce = false
-  let redirectedToTarget = false
+export async function waitForLiveRoomReady(manager, accountId, timeoutMs = 20000, _options = {}) {
+  if (!manager?.accounts?.has(accountId) || manager.isPaused(accountId)) return false
 
-  while (Date.now() - start < timeoutMs) {
-    if (!manager.accounts.has(accountId) || manager.isPaused(accountId)) return false
-    const result = await executeScriptSafely(manager, accountId, `
-      (() => {
-        const expectedRoomIds = ${JSON.stringify(expectedRoomIds)};
-        const href = String(location.href || '');
-        const hrefOk = href.includes('live.douyin.com');
-        const pathMatch = href.match(/live\.douyin\.com\/([^/?#]+)/i);
-        const currentRoomKey = pathMatch ? String(decodeURIComponent(pathMatch[1] || '')).trim() : '';
-        const expectedMatch = expectedRoomIds.length === 0 || expectedRoomIds.includes(currentRoomKey);
-        const stateOk = document.readyState === 'interactive' || document.readyState === 'complete';
-        const body = document.body;
-        const style = body ? window.getComputedStyle(body) : null;
-        const visible = !!body && style && style.display !== 'none' && style.visibility !== 'hidden';
-        const text = String(body?.innerText || '').replace(/\s+/g, '');
-        const elementCount = document.querySelectorAll('body *').length;
-        const interactiveCount = document.querySelectorAll('button, a, input, textarea, [role="button"]').length;
-        const errorLike = /(页面不存在|暂时不可用|网络错误|加载失败|系统繁忙|请求失败|访问受限|服务器开小差)/.test(text);
-        const liveMarker = /(直播|福袋|红包|在线|说点什么|聊天室|小时榜|本场)/.test(text);
-        const roomMismatch = hrefOk && expectedRoomIds.length > 0 && !expectedMatch;
-        const ready = hrefOk && expectedMatch && stateOk && visible && !errorLike && (
-          liveMarker ||
-          text.length >= 80 ||
-          (elementCount >= 40 && interactiveCount >= 3)
-        );
-        const blankLike = hrefOk && expectedMatch && stateOk && visible && text.length < 20 && elementCount <= 8 && interactiveCount <= 1;
-        return {
-          ready,
-          blankLike,
-          errorLike,
-          roomMismatch,
-          currentRoomKey,
-          href,
-          sample: text.slice(0, 120),
-          textLength: text.length,
-          elementCount,
-          interactiveCount
-        };
-      })()
-    `)
-    if (isBrowserGoneResult(result)) {
-      return false
-    }
-
-    const snapshot = result?.success && result?.result && typeof result.result === 'object'
-      ? result.result
-      : null
-
-    if (snapshot?.ready === true) {
-      return true
-    }
-
-    if (!redirectedToTarget && snapshot?.roomMismatch === true) {
-      redirectedToTarget = true
-      try {
-        manager.accounts.get(accountId)?.callbacks?.onLog?.('⚠️ 当前页面与目标直播间不一致，正在切回目标房间...', 'warning')
-      } catch (_) {
-        // ignore
-      }
-      try {
-        await manager.ipc.invoke('navigate-to', { accountId, url: expectedTargetUrl })
-      } catch (_) {
-        // ignore
-      }
-      await manager.sleep(900)
-      continue
-    }
-
-    if (
-      !reloadedOnce &&
-      (snapshot?.blankLike === true || snapshot?.errorLike === true) &&
-      Date.now() - start >= Math.min(3500, Math.floor(timeoutMs * 0.35))
-    ) {
-      reloadedOnce = true
-      try {
-        manager.accounts.get(accountId)?.callbacks?.onLog?.(
-          snapshot?.errorLike === true
-            ? '⚠️ 页面疑似错误态，正在重载直播间...'
-            : '⚠️ 页面疑似白板，正在重载直播间...',
-          'warning'
-        )
-      } catch (_) {
-        // ignore
-      }
-      const targetUrl = snapshot?.roomMismatch === true
-        ? expectedTargetUrl
-        : (String(snapshot?.href || '').includes('live.douyin.com') ? String(snapshot.href) : expectedTargetUrl)
-      try {
-        await manager.ipc.invoke('navigate-to', { accountId, url: targetUrl })
-      } catch (_) {
-        // ignore
-      }
-      await manager.sleep(900)
-      continue
-    }
-
-    await manager.sleep(snapshot?.blankLike || snapshot?.errorLike || snapshot?.roomMismatch ? 560 : 360)
+  let waitResult = await waitForVisibleSelector(manager, accountId, '.dVxrjT_h', Math.max(1200, Number(timeoutMs || 20000)))
+  if (waitResult?.code === 'EXECUTE_CONTEXT_LOST') {
+    await manager.sleep(1200)
+    waitResult = await waitForVisibleSelector(manager, accountId, '.dVxrjT_h', Math.max(1200, Number(timeoutMs || 20000)))
   }
-  return false
+  return waitResult?.success === true
 }
 
 export async function closeLiveStreamRendering(manager, accountId) {
@@ -564,31 +491,29 @@ export async function ensureCloseLiveStreamRendering(manager, accountId) {
  * @returns {Promise<{success:boolean, confirmed?:boolean, error?:string, code?:string}>}
  */
 export async function joinLotteryByUI(manager, accountId, remainingTime = 30, options = {}) {
-  const waitEntryResult = await waitForVisibleSelector(manager, accountId, '.dVxrjT_h', 7000)
-  let entryReady = waitEntryResult?.success === true
-
-  if (entryReady) {
-    const clickEntryResult = await clickVisibleSelector(manager, accountId, '.dVxrjT_h', 7000)
-    entryReady = clickEntryResult?.success === true
+  let waitEntryResult = await waitForVisibleSelector(manager, accountId, '.dVxrjT_h', 20000)
+  if (waitEntryResult?.code === 'EXECUTE_CONTEXT_LOST') {
+    await manager.sleep(1200)
+    waitEntryResult = await waitForVisibleSelector(manager, accountId, '.dVxrjT_h', 20000)
+  }
+  if (!waitEntryResult?.success) {
+    return {
+      success: false,
+      error: waitEntryResult?.error || '福袋元素未找到',
+      code: waitEntryResult?.code || 'LOTTERY_ENTRY_NOT_FOUND'
+    }
   }
 
-  if (!entryReady) {
-    try {
-      manager.accounts.get(accountId)?.callbacks?.onLog?.('⚠️ 默认福袋入口未命中，切换通用入口识别...', 'warning')
-    } catch (_) {
-      // ignore
-    }
-    const fallbackEntry = await clickLotteryEntryFallback(manager, accountId, 12000)
-    if (!fallbackEntry?.success) {
-      if (fallbackEntry?.code === 'ACCOUNT_STOPPED' || fallbackEntry?.code === 'BROWSER_NOT_FOUND') {
-        return { success: false, error: fallbackEntry.error, code: fallbackEntry.code }
-      }
-      const suffix = fallbackEntry?.sample ? ` 页面片段: ${String(fallbackEntry.sample).slice(0, 80)}...` : ''
-      return {
-        success: false,
-        error: `${fallbackEntry.error || '未找到福袋入口'}${suffix}`,
-        code: fallbackEntry.code || 'LOTTERY_ENTRY_NOT_FOUND'
-      }
+  let clickEntryResult = await clickVisibleSelector(manager, accountId, '.dVxrjT_h', 20000)
+  if (clickEntryResult?.code === 'EXECUTE_CONTEXT_LOST') {
+    await manager.sleep(1200)
+    clickEntryResult = await clickVisibleSelector(manager, accountId, '.dVxrjT_h', 20000)
+  }
+  if (!clickEntryResult?.success) {
+    return {
+      success: false,
+      error: clickEntryResult?.error || '等待福袋出现失败',
+      code: clickEntryResult?.code || 'LOTTERY_ENTRY_CLICK_FAILED'
     }
   }
 
@@ -606,21 +531,33 @@ export async function joinLotteryByUI(manager, accountId, remainingTime = 30, op
     }
   }
 
-  const clickJoinResult = await clickVisibleSelector(manager, accountId, '#lottery_close_cotainer div[role="button"]', 6000)
+  let clickJoinResult = await clickVisibleSelector(manager, accountId, '#lottery_close_cotainer div[role="button"]', 10000)
+  if (clickJoinResult?.code === 'EXECUTE_CONTEXT_LOST') {
+    await manager.sleep(1200)
+    clickJoinResult = await clickVisibleSelector(manager, accountId, '#lottery_close_cotainer div[role="button"]', 10000)
+  }
   if (!clickJoinResult?.success) {
-    try {
-      manager.accounts.get(accountId)?.callbacks?.onLog?.('⚠️ 默认参与按钮未命中，切换通用按钮识别...', 'warning')
-    } catch (_) {
-      // ignore
+    return {
+      success: false,
+      error: clickJoinResult?.error || '点击参与福袋失败',
+      code: clickJoinResult?.code || 'JOIN_BUTTON_NOT_FOUND'
     }
-    const fallbackJoin = await clickLotteryJoinFallback(manager, accountId, 8000)
-    if (!fallbackJoin?.success) {
-      const suffix = fallbackJoin?.sample ? ` 页面片段: ${String(fallbackJoin.sample).slice(0, 80)}...` : ''
-      return {
-        success: false,
-        error: `点击参与失败${suffix}`,
-        code: fallbackJoin.code || clickJoinResult.code || 'JOIN_BUTTON_NOT_FOUND'
-      }
+  }
+
+  if (options?.config?.enableRedPacket?.enabled === true) {
+    await joinRedPacketByUI(manager, accountId)
+  }
+
+  let confirmResult = await clickVisibleSelector(manager, accountId, '.dVxrjT_h', 5000)
+  if (confirmResult?.code === 'EXECUTE_CONTEXT_LOST') {
+    await manager.sleep(1200)
+    confirmResult = await clickVisibleSelector(manager, accountId, '.dVxrjT_h', 5000)
+  }
+  if (!confirmResult?.success) {
+    return {
+      success: false,
+      error: confirmResult?.error || '检查确认参与福袋失败',
+      code: confirmResult?.code || 'JOIN_CONFIRM_FAILED'
     }
   }
 
@@ -931,6 +868,3 @@ export async function joinRedPacketByUI(manager, accountId) {
     return { clickedCount: 0, skippedRestrictedCount: 0, mode: 'exception' }
   }
 }
-
-
-

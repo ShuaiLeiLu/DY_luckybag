@@ -64,6 +64,16 @@ export interface AccountSession {
   todayRedPacketWinCount: number
   todayLotteryWonDiamonds: number
   todayRedPacketWonDiamonds: number
+  scanUploadSubmitted: number
+  scanUploadAccepted: number
+  scanUploadOk: boolean
+  scanUploadSkipped: string
+  scanUploadError: string
+  scanUploadAt: number
+  poolActiveCandidates: number
+  poolValidCandidates: number
+  poolAvailableCandidates: number
+  poolSummaryAt: number
 }
 
 export interface PoolLease {
@@ -141,6 +151,7 @@ export interface LotteryHistoryRecord {
 export interface DesktopSettings {
   poolServerUrl: string
   updateFeedUrl: string
+  noticeMarkdown: string
   stayDuration: number
   enableRedPacket: boolean
   randomInteraction: boolean

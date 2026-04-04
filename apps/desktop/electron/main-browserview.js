@@ -22,6 +22,7 @@ const protocolGuardPartitions = new Set()
 const MAX_VISIBLE_ACCOUNT_WINDOWS = 4
 const DESKTOP_DEV_SERVER_URL = 'http://127.0.0.1:5173'
 const unreadableLegacyTokenPaths = new Set()
+const lotteryRightCacheByAccount = new Map() // accountId -> Map(roomIdOrLotteryId, { data, updatedAt, roomId, lotteryId })
 
 /**
  * 判断扫描追踪日志是否启用（环境变量 DY_SCAN_TRACE，默认关闭）。
@@ -44,6 +45,102 @@ function traceScan(tag, payload = null) {
     console.log(`[scan-trace] ${tag}`, JSON.stringify(payload))
   } catch (_) {
     console.log(`[scan-trace] ${tag}`, payload)
+  }
+}
+
+function normalizeLiveLotteryPayload(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const lotteryInfo = raw.lottery_info || raw.lotteryInfo || null
+  if (!lotteryInfo || typeof lotteryInfo !== 'object') return null
+  const roomId = String(
+    raw.room_id_str ||
+    raw.room_id ||
+    raw.roomId ||
+    lotteryInfo.room_id_str ||
+    lotteryInfo.room_id ||
+    lotteryInfo.roomId ||
+    lotteryInfo.anchor_room_id ||
+    ''
+  ).trim()
+  const lotteryId = String(
+    lotteryInfo.lottery_id_str ||
+    lotteryInfo.lottery_id ||
+    lotteryInfo.lotteryId ||
+    raw.lottery_id_str ||
+    raw.lottery_id ||
+    raw.lotteryId ||
+    ''
+  ).trim()
+  if (!roomId && !lotteryId) return null
+  return {
+    data: raw,
+    roomId,
+    lotteryId,
+    updatedAt: Date.now()
+  }
+}
+
+function cacheLotteryRightPayload(accountId, raw) {
+  const normalized = normalizeLiveLotteryPayload(raw)
+  if (!accountId || !normalized) return
+  const keyAccountId = String(accountId || '').trim()
+  if (!keyAccountId) return
+  let cache = lotteryRightCacheByAccount.get(keyAccountId)
+  if (!cache) {
+    cache = new Map()
+    lotteryRightCacheByAccount.set(keyAccountId, cache)
+  }
+  if (normalized.roomId) cache.set(`room:${normalized.roomId}`, normalized)
+  if (normalized.lotteryId) cache.set(`lottery:${normalized.lotteryId}`, normalized)
+
+  const now = Date.now()
+  for (const [key, value] of cache.entries()) {
+    if (now - Number(value?.updatedAt || 0) > 120000) {
+      cache.delete(key)
+    }
+  }
+}
+
+function readCachedLotteryRightPayload(accountId, { roomId = '', lotteryId = '', maxAgeMs = 20000 } = {}) {
+  const keyAccountId = String(accountId || '').trim()
+  if (!keyAccountId) return null
+  const cache = lotteryRightCacheByAccount.get(keyAccountId)
+  if (!cache || cache.size === 0) return null
+
+  const keys = [
+    String(lotteryId || '').trim() ? `lottery:${String(lotteryId || '').trim()}` : '',
+    String(roomId || '').trim() ? `room:${String(roomId || '').trim()}` : ''
+  ].filter(Boolean)
+  const now = Date.now()
+  for (const key of keys) {
+    const hit = cache.get(key)
+    if (!hit) continue
+    if (now - Number(hit.updatedAt || 0) > Math.max(0, Number(maxAgeMs || 0))) continue
+    return hit.data || null
+  }
+  return null
+}
+
+function buildLotteryDetailFromRaw(raw) {
+  const payload = normalizeLiveLotteryPayload(raw)
+  if (!payload?.data) return null
+  const lotteryInfo = payload.data.lottery_info || payload.data.lotteryInfo || null
+  if (!lotteryInfo) return null
+  const conditions = Array.isArray(lotteryInfo.conditions) ? lotteryInfo.conditions : []
+  return {
+    lottery_id: lotteryInfo.lottery_id_str || lotteryInfo.lottery_id || lotteryInfo.lotteryId || '',
+    anchorId: lotteryInfo.anchor_id || '',
+    joinTotal: lotteryInfo.candidate_num || lotteryInfo.candidate_user_num || 0,
+    winningTotal: lotteryInfo.lucky_count || 0,
+    lotteryTotal: lotteryInfo.prize_count || 0,
+    lotteryName: lotteryInfo.prize_info?.name || '未知奖品',
+    prize_name: lotteryInfo.prize_info?.name || '未知奖品',
+    prizeType: lotteryInfo.prize_type || lotteryInfo.prize_info?.type || lotteryInfo.prize_info?.prize_type || 0,
+    prizeInfo: lotteryInfo.prize_info || {},
+    total_amount: lotteryInfo.total_amount || lotteryInfo.prize_info?.total_amount || 0,
+    start_time: lotteryInfo.start_time || 0,
+    end_time: lotteryInfo.draw_time || lotteryInfo.end_time || 0,
+    conditions
   }
 }
 
@@ -82,6 +179,55 @@ function rememberBrowserUrl(accountId, url = '') {
   const normalized = String(url || '').trim()
   if (!browserData || !normalized || !isHttpLikeUrl(normalized)) return
   browserData.lastUrl = normalized
+}
+
+function isLiveRoomUrl(url = '') {
+  return /https?:\/\/live\.douyin\.com\//i.test(String(url || '').trim())
+}
+
+function setAccountMediaBlockingState(accountId, enabled) {
+  const browserData = browserViews.get(accountId)
+  if (!browserData || !browserData.window || browserData.window.isDestroyed()) {
+    return { success: false, error: 'browser_window_not_found' }
+  }
+  browserData.blockMediaRequests = enabled === true
+  return {
+    success: true,
+    enabled: browserData.blockMediaRequests,
+    url: String(browserData.lastUrl || browserData.window.webContents.getURL?.() || '')
+  }
+}
+
+function waitForNavigationResult(loadPromise, timeoutMs = 15000) {
+  const safeTimeout = Math.max(1500, Math.min(30000, Number(timeoutMs || 15000)))
+  return Promise.race([
+    loadPromise.then(() => ({ ok: true, timedOut: false })).catch((error) => ({ ok: false, error, timedOut: false })),
+    new Promise((resolve) => {
+      setTimeout(() => resolve({ ok: false, error: new Error('navigation_timeout'), timedOut: true }), safeTimeout)
+    })
+  ])
+}
+
+function isSoftNavigationFailure(error, currentUrl = '', targetUrl = '') {
+  const msg = String(error?.message || '').toLowerCase()
+  const code = String(error?.code || '').toLowerCase()
+  const errno = Number(error?.errno || 0)
+  const aborted = msg.includes('err_aborted') || msg.includes('(-3)') || code.includes('err_aborted') || errno === -3
+  const timeout = msg.includes('navigation_timeout')
+  const currentLive = isLiveRoomUrl(currentUrl)
+  const targetLive = isLiveRoomUrl(targetUrl)
+  if (aborted && targetLive) return true
+  if (timeout && currentLive && targetLive) return true
+  return false
+}
+
+function shouldAutoRecoverOnScriptTimeout(label = '') {
+  const normalized = String(label || '').trim()
+  if (!normalized) return true
+  if (normalized.startsWith('join.wait_live_room_ready')) return false
+  if (normalized.startsWith('join.wait_selector:')) return false
+  if (normalized.startsWith('join.click_lottery_entry_fallback')) return false
+  return true
 }
 
 function scheduleBrowserRecovery(accountId, reason = '', fallbackUrl = 'https://live.douyin.com') {
@@ -223,6 +369,16 @@ function getBootstrapSnapshot() {
 }
 
 logger.debug(`Token存储路径: ${tokenStorePath}`)
+
+// macOS 开发机上抖音直播页容易触发 Chromium GPU overlay/mailbox 崩溃，
+// 自动化运行不依赖硬件视频渲染，这里优先保证稳定性。
+try {
+  if (process.platform === 'darwin') {
+    app.disableHardwareAcceleration()
+  }
+} catch (e) {
+  logger.debug('关闭硬件加速失败', e)
+}
 
 // 关闭后台节流，避免窗口最小化/被全屏窗口遮挡时脚本冻结
 try {
@@ -502,6 +658,149 @@ async function getAccountCookiesAndString(accountId) {
   return { cookies, cookieString }
 }
 
+function normalizeCookieHeaderString(raw = '') {
+  return String(raw || '')
+    .replace(/\r?\n/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
+function doesCookieDomainMatchHost(domain = '', host = '') {
+  const normalizedDomain = String(domain || '').replace(/^\./, '').trim().toLowerCase()
+  const normalizedHost = String(host || '').trim().toLowerCase()
+  if (!normalizedDomain || !normalizedHost) return false
+  return normalizedHost === normalizedDomain || normalizedHost.endsWith(`.${normalizedDomain}`)
+}
+
+function cookieHostScore(cookie = {}, host = '') {
+  const normalizedHost = String(host || '').trim().toLowerCase()
+  const domain = String(cookie?.domain || '').replace(/^\./, '').trim().toLowerCase()
+  if (!domain) return 0
+  if (domain === normalizedHost) return 3
+  if (domain === 'douyin.com') return 2
+  if (normalizedHost.endsWith(`.${domain}`)) return 1
+  return 0
+}
+
+function buildCookieStringForHost(cookies = [], host = 'live.douyin.com') {
+  const normalizedHost = String(host || '').trim().toLowerCase()
+  const bestByName = new Map()
+  for (const item of Array.isArray(cookies) ? cookies : []) {
+    const name = String(item?.name || '').trim()
+    const value = String(item?.value || '').trim()
+    if (!name || !value) continue
+    const domain = String(item?.domain || '').trim()
+    if (domain && !doesCookieDomainMatchHost(domain, normalizedHost)) continue
+    const current = bestByName.get(name)
+    if (!current) {
+      bestByName.set(name, item)
+      continue
+    }
+    const currentScore = cookieHostScore(current, normalizedHost)
+    const nextScore = cookieHostScore(item, normalizedHost)
+    if (nextScore > currentScore) {
+      bestByName.set(name, item)
+      continue
+    }
+    if (nextScore === currentScore) {
+      const currentPathLen = String(current?.path || '').length
+      const nextPathLen = String(item?.path || '').length
+      if (nextPathLen > currentPathLen) {
+        bestByName.set(name, item)
+      }
+    }
+  }
+  const header = Array.from(bestByName.values())
+    .filter(c => c?.name && c?.value)
+    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
+    .map(c => `${c.name}=${c.value}`)
+    .join('; ')
+  return normalizeCookieHeaderString(header)
+}
+
+function buildCookieStringFromTokenRecord(accountId, host = 'live.douyin.com') {
+  const tokens = readTokenStore()
+  const tokenInfo = tokens?.[accountId] || {}
+  if (!tokenInfo || typeof tokenInfo !== 'object') return ''
+  const snapshot = Array.isArray(tokenInfo.cookieSnapshot) ? tokenInfo.cookieSnapshot : []
+  if (snapshot.length > 0) {
+    const fromSnapshot = buildCookieStringForHost(snapshot, host)
+    if (fromSnapshot) return fromSnapshot
+  }
+  const pairs = []
+  const pushPair = (name) => {
+    const value = String(tokenInfo?.[name] || '').trim()
+    if (!value) return
+    pairs.push(`${name}=${value}`)
+  }
+  pushPair('sessionid')
+  pushPair('sessionid_ss')
+  pushPair('ttwid')
+  pushPair('passport_csrf_token')
+  return normalizeCookieHeaderString(pairs.join('; '))
+}
+
+function pushCookieCandidate(pool = [], seen = new Set(), rawCookie = '', source = '') {
+  const cookie = normalizeCookieHeaderString(rawCookie)
+  if (!cookie) return
+  if (cookie.length < 16) return
+  if (seen.has(cookie)) return
+  seen.add(cookie)
+  pool.push({ cookie, source: String(source || '') })
+}
+
+function shuffleList(list = []) {
+  const arr = Array.isArray(list) ? [...list] : []
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    const tmp = arr[i]
+    arr[i] = arr[j]
+    arr[j] = tmp
+  }
+  return arr
+}
+
+async function buildDetailCookiePool(primaryAccountId, host = 'live.douyin.com', limit = 8) {
+  const pool = []
+  const seen = new Set()
+  const safeLimit = Math.max(1, Math.min(16, Number(limit || 8)))
+  const normalizedHost = String(host || 'live.douyin.com').trim() || 'live.douyin.com'
+
+  const addFromSession = async (accountId, source) => {
+    if (!accountId) return
+    try {
+      const { cookies, cookieString } = await getAccountCookiesAndString(accountId)
+      const preferred = buildCookieStringForHost(cookies, normalizedHost)
+      pushCookieCandidate(pool, seen, preferred, `${source}:session-host`)
+      pushCookieCandidate(pool, seen, cookieString, `${source}:session-raw`)
+    } catch (_) {
+      // ignore
+    }
+    pushCookieCandidate(pool, seen, buildCookieStringFromTokenRecord(accountId, normalizedHost), `${source}:token`)
+  }
+
+  await addFromSession(primaryAccountId, `account:${primaryAccountId}`)
+
+  const activeAccounts = shuffleList(Array.from(browserViews.keys()).filter(id => id && id !== primaryAccountId))
+  for (const accountId of activeAccounts) {
+    if (pool.length >= safeLimit) break
+    await addFromSession(accountId, `account:${accountId}`)
+  }
+
+  if (pool.length < safeLimit) {
+    const tokens = readTokenStore()
+    const tokenAccountIds = shuffleList(
+      Object.keys(tokens || {}).filter((id) => id && id !== primaryAccountId && typeof tokens[id] === 'object')
+    )
+    for (const accountId of tokenAccountIds) {
+      if (pool.length >= safeLimit) break
+      pushCookieCandidate(pool, seen, buildCookieStringFromTokenRecord(accountId, normalizedHost), `token:${accountId}`)
+    }
+  }
+
+  return pool.slice(0, safeLimit)
+}
+
 function normalizeCookieSnapshotItem(cookie = {}) {
   const name = String(cookie?.name || '').trim()
   const value = String(cookie?.value || '').trim()
@@ -619,14 +918,21 @@ async function restoreCookieSnapshot(accountSession, snapshot = [], currentTime)
 /**
  * safeGetAccountCookieString 方法：获取账号 cookie header 字符串（失败时返回空串）。
  */
-async function safeGetAccountCookieString(accountId) {
+async function safeGetAccountCookieString(accountId, options = {}) {
   if (!accountId) return ''
+  const host = String(options?.host || 'live.douyin.com').trim() || 'live.douyin.com'
   try {
-    const { cookieString } = await getAccountCookiesAndString(accountId)
-    return cookieString
+    const { cookies, cookieString } = await getAccountCookiesAndString(accountId)
+    const preferred = buildCookieStringForHost(cookies, host)
+    if (preferred) return preferred
+    const normalizedRaw = normalizeCookieHeaderString(cookieString)
+    if (normalizedRaw) return normalizedRaw
+    const tokenFallback = buildCookieStringFromTokenRecord(accountId, host)
+    if (tokenFallback) return tokenFallback
+    return ''
   } catch (e) {
     logger.warn('⚠️ 获取Cookie失败:', e.message)
-    return ''
+    return buildCookieStringFromTokenRecord(accountId, host)
   }
 }
 
@@ -1101,6 +1407,69 @@ ipcMain.handle('scan-debug-log', async (_event, payload = {}) => {
     const summary = payload?.summary && typeof payload.summary === 'object'
       ? payload.summary
       : payload
+    if (stage === 'metric:all-request') {
+      const requestText = request > 0 ? ` request=${request}` : ''
+      const scannedRooms = Number(summary?.rawRooms || 0)
+      const lotteryRooms = Number(summary?.hintedRooms || 0)
+      console.log(`[main-browserview] [scan-summary] [${accountId || 'unknown'}]${requestText} 扫描直播间=${scannedRooms} 福袋直播间=${lotteryRooms}`)
+      return { success: true }
+    }
+    if (stage === 'metric:all-detail-start') {
+      const requestText = request > 0 ? ` request=${request}` : ''
+      const detailRequested = Number(summary?.detailRequested || summary?.hintedRooms || 0)
+      console.log(`[main-browserview] [scan-lottery] [${accountId || 'unknown'}]${requestText} 开始扫描福袋详情=${detailRequested}`)
+      return { success: true }
+    }
+    if (stage === 'metric:all-batch-add') {
+      const requestText = request > 0 ? ` request=${request}` : ''
+      const detailRequested = Number(summary?.detailRequested || summary?.batchTotal || 0)
+      const detailSucceeded = Number(summary?.detailSucceeded || summary?.validLotteries || 0)
+      const detailError = Number(summary?.detailError || 0)
+      const detailHardRisk = Number(summary?.detailHardRisk || 0)
+      const detailErrorSamples = Array.isArray(summary?.detailErrorSamples) ? summary.detailErrorSamples : []
+      const sampleText = detailErrorSamples.length > 0
+        ? ` 样例=${detailErrorSamples.slice(0, 2).map((item) => {
+          const code = String(item?.code || 'UNKNOWN')
+          const status = Number(item?.statusCode || 0)
+          const msg = String(item?.message || '').replace(/\s+/g, ' ').slice(0, 80)
+          return `${code}${status > 0 ? `/${status}` : ''}:${msg}`
+        }).join(' | ')}`
+        : ''
+      const poolDelta = Number(summary?.poolDelta || 0)
+      console.log(`[main-browserview] [scan-lottery] [${accountId || 'unknown'}]${requestText} 详情请求=${detailRequested} 详情成功=${detailSucceeded} 详情失败=${detailError} 风控=${detailHardRisk} 池变化=${poolDelta}${sampleText}`)
+      return { success: true }
+    }
+    if (stage === 'metric:all-round-upload') {
+      const requestText = request > 0 ? ` request=${request}` : ''
+      const uploaded = Number(summary?.uploaded || 0)
+      const accepted = Number(summary?.accepted || 0)
+      const ok = summary?.ok === true
+      const skipped = String(summary?.skipped || '')
+      const status = Number(summary?.status || 0)
+      const error = String(summary?.error || '')
+      const statusText = status > 0 ? ` status=${status}` : ''
+      const skippedText = skipped ? ` skipped=${skipped}` : ''
+      const errorText = error ? ` error=${error}` : ''
+      console.log(`[main-browserview] [scan-upload] [${accountId || 'unknown'}]${requestText} ok=${ok} 提交=${uploaded} 接收=${accepted}${statusText}${skippedText}${errorText}`)
+      return { success: true }
+    }
+    if (stage.startsWith('metric:category:')) {
+      const requestText = request > 0 ? ` request=${request}` : ''
+      const categoryName = String(summary?.categoryName || stage.replace('metric:category:', '') || 'unknown')
+      const rawRooms = Number(summary?.rawRooms || 0)
+      const dedupRooms = Number(summary?.dedupRooms || 0)
+      const detailRequested = Number(summary?.detailRequested || 0)
+      const validLotteries = Number(summary?.validLotteries || 0)
+      console.log(`[main-browserview] [scan-category] [${accountId || 'unknown'}] [${categoryName}]${requestText} 直播间=${rawRooms} 候选=${dedupRooms} 详情=${detailRequested} 福袋=${validLotteries}`)
+      return { success: true }
+    }
+    if (stage.startsWith('metric:category-detail-start:')) {
+      const requestText = request > 0 ? ` request=${request}` : ''
+      const categoryName = String(summary?.categoryName || stage.replace('metric:category-detail-start:', '') || 'unknown')
+      const detailRequested = Number(summary?.detailRequested || summary?.dedupRooms || 0)
+      console.log(`[main-browserview] [scan-category] [${accountId || 'unknown'}] [${categoryName}]${requestText} 开始扫描福袋详情=${detailRequested}`)
+      return { success: true }
+    }
     const safeJson = JSON.stringify(summary || {})
     const maxLen = 3200
     const compact = safeJson.length > maxLen ? `${safeJson.slice(0, maxLen)}...` : safeJson
@@ -1410,6 +1779,9 @@ ipcMain.handle('launch-browser', async (event, payload) => {
           try {
             const { body } = await wc.debugger.sendCommand('Network.getResponseBody', { requestId })
             const json = JSON.parse(body)
+            if (isLottery) {
+              cacheLotteryRightPayload(accountId, json?.data || null)
+            }
 
             mainWindow.webContents.send('douyin-response', {
               accountId,
@@ -1498,6 +1870,7 @@ ipcMain.handle('launch-browser', async (event, payload) => {
         return
       }
       browserViews.delete(accountId)
+      lotteryRightCacheByAccount.delete(accountId)
       
       // 通知渲染进程窗口已关闭，停止该账号的所有活动
       if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1529,13 +1902,12 @@ ipcMain.handle('launch-browser', async (event, payload) => {
 
 ipcMain.handle('set-live-stream-blocking', async (event, { accountId, enabled }) => {
   try {
-    const browserData = browserViews.get(accountId)
-    if (!browserData || !browserData.window || browserData.window.isDestroyed()) {
+    const result = setAccountMediaBlockingState(accountId, enabled === true)
+    if (!result.success) {
       return { success: false, error: '浏览器实例不存在', code: 'BROWSER_NOT_FOUND' }
     }
-    browserData.blockMediaRequests = false
-    logger.info(`[${accountId}] 直播流拦截功能已临时停用，保持关闭状态`)
-    return { success: true, enabled: browserData.blockMediaRequests }
+    logger.info(`[${accountId}] 直播流拦截已${result.enabled ? '开启' : '关闭'}`)
+    return { success: true, enabled: result.enabled }
   } catch (error) {
     logger.error('设置直播流拦截失败:', error)
     return { success: false, error: error.message }
@@ -1551,6 +1923,9 @@ ipcMain.handle('navigate-to', async (event, { accountId, url }) => {
     if (isBlockedExternalProtocol(url) || !isHttpLikeUrl(url)) {
       throw new Error(`禁止导航到外部协议: ${url}`)
     }
+    if (isLiveRoomUrl(url)) {
+      console.log(`[main-browserview] [${accountId}] 进入直播间 -> ${url}`)
+    }
     rememberBrowserUrl(accountId, url)
     await browserData.window.loadURL(url)
     return { success: true }
@@ -1560,7 +1935,7 @@ ipcMain.handle('navigate-to', async (event, { accountId, url }) => {
   }
 })
 
-ipcMain.handle('execute-script', async (event, { accountId, script, timeoutMs = 4500 }) => {
+ipcMain.handle('execute-script', async (event, { accountId, script, timeoutMs = 4500, label = '' }) => {
   try {
     const browserData = browserViews.get(accountId)
     if (!browserData) {
@@ -1580,11 +1955,18 @@ ipcMain.handle('execute-script', async (event, { accountId, script, timeoutMs = 
     ])
     return { success: true, result }
   } catch (error) {
+    const errorMessage = String(error?.message || error || '')
+    const isContextSwitchError = /Script failed to execute|Cannot find context with specified id|Execution context was destroyed|Object has been destroyed|Inspected target navigated or closed/i.test(errorMessage)
+    if (isContextSwitchError) {
+      return { success: false, error: '页面上下文切换中', code: 'EXECUTE_CONTEXT_LOST' }
+    }
     if (String(error?.message || '').includes('执行脚本超时') || error?.code === 'EXECUTE_TIMEOUT') {
-      scheduleBrowserRecovery(accountId, 'execute-script-timeout')
+      if (shouldAutoRecoverOnScriptTimeout(label)) {
+        scheduleBrowserRecovery(accountId, `execute-script-timeout:${String(label || 'unknown')}`)
+      }
       return { success: false, error: '执行脚本超时', code: 'EXECUTE_TIMEOUT' }
     }
-    logger.error('执行脚本失败:', error)
+    logger.error(`执行脚本失败${label ? ` [${label}]` : ''}:`, error)
     return { success: false, error: error.message }
   }
 })
@@ -1595,6 +1977,7 @@ ipcMain.handle('close-browser', async (event, accountId) => {
     if (browserData) {
       browserData.window.close()
       browserViews.delete(accountId)
+      lotteryRightCacheByAccount.delete(accountId)
     }
     return { success: true }
   } catch (error) {
@@ -1680,6 +2063,19 @@ ipcMain.handle('desktop:append-history-record', async (_event, payload = {}) => 
   try {
     const item = ensureStateStore().appendHistoryRecord(payload)
     return { success: true, item }
+  } catch (error) {
+    return { success: false, error: error.message }
+  }
+})
+
+ipcMain.handle('desktop:purge-account-data', async (_event, payload = {}) => {
+  try {
+    const accountId = String(payload?.accountId || '').trim()
+    const result = ensureStateStore().purgeAccountData(accountId)
+    if (result?.success !== true) {
+      return { success: false, error: result?.error || 'purge_failed' }
+    }
+    return { success: true, result }
   } catch (error) {
     return { success: false, error: error.message }
   }
@@ -2075,26 +2471,95 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCou
 })
 
 // 搜索直播间-【分类】
-ipcMain.handle('search-live-by-category', async (event, { accountId = null, categoryId = '0', offset = 0, count = 15 } = {}) => {
+const FIXED_CATEGORY_DEFAULT = Object.freeze({
+  categoryId: '4_103',
+  partition: '103',
+  partitionType: 4
+})
+
+const FIXED_CATEGORY_CATALOG = Object.freeze({
+  '4_101': Object.freeze({ categoryId: '4_101', partition: '101', partitionType: 4 }),
+  '4_102': Object.freeze({ categoryId: '4_102', partition: '102', partitionType: 4 }),
+  '4_103': Object.freeze({ categoryId: '4_103', partition: '103', partitionType: 4 }),
+  '4_104': Object.freeze({ categoryId: '4_104', partition: '104', partitionType: 4 }),
+  '4_105': Object.freeze({ categoryId: '4_105', partition: '105', partitionType: 4 }),
+  '4_106': Object.freeze({ categoryId: '4_106', partition: '106', partitionType: 4 }),
+  '4_107': Object.freeze({ categoryId: '4_107', partition: '107', partitionType: 4 }),
+  '4_108': Object.freeze({ categoryId: '4_108', partition: '108', partitionType: 4 })
+})
+
+const LEGACY_CATEGORY_ALIAS_MAP = Object.freeze({
+  // 旧默认ID兼容：映射到新固定分类
+  '1_720': '4_103',
+  '3_10000': '4_101',
+  '3_10001': '4_106',
+  // 旧数字枚举兼容
+  '0': '4_103',
+  '1': '4_103',
+  '2': '4_101',
+  '3': '4_101',
+  '4': '4_106',
+  '5': '4_101'
+})
+
+function resolveCategoryPartitionParams(rawCategoryId = '') {
+  const text = String(rawCategoryId || '').trim()
+  if (!text) {
+    return { ...FIXED_CATEGORY_DEFAULT }
+  }
+
+  const normalized = LEGACY_CATEGORY_ALIAS_MAP[text] || text
+
+  if (Object.prototype.hasOwnProperty.call(FIXED_CATEGORY_CATALOG, normalized)) {
+    return { ...FIXED_CATEGORY_CATALOG[normalized] }
+  }
+
+  const parts = normalized.split('_').map(item => String(item || '').trim()).filter(Boolean)
+  if (parts.length >= 2 && /^[0-9]+$/.test(parts[0]) && /^[0-9]+$/.test(parts[1])) {
+    return {
+      categoryId: normalized,
+      partition: parts.slice(1).join('_'),
+      partitionType: Number(parts[0]) || 1
+    }
+  }
+
+  if (/^[0-9]+$/.test(normalized)) {
+    const topCategory = `4_${normalized}`
+    if (Object.prototype.hasOwnProperty.call(FIXED_CATEGORY_CATALOG, topCategory)) {
+      return { ...FIXED_CATEGORY_CATALOG[topCategory] }
+    }
+    return {
+      categoryId: normalized,
+      partition: normalized,
+      partitionType: 4
+    }
+  }
+
+  return { ...FIXED_CATEGORY_DEFAULT }
+}
+
+ipcMain.handle('search-live-by-category', async (event, { accountId = null, categoryId = FIXED_CATEGORY_DEFAULT.categoryId, offset = 0, count = 15 } = {}) => {
   try {
+    const resolvedCategory = resolveCategoryPartitionParams(categoryId)
+    const safeOffset = Math.max(0, Number(offset) || 0)
+    const safeCount = Math.max(1, Number(count) || 15)
+
     traceScan('request search-live-by-category', {
       accountId: accountId || '',
-      categoryId: String(categoryId || '0'),
-      offset: Math.max(0, Number(offset) || 0),
-      count: Math.max(1, Number(count) || 15)
+      categoryId: String(resolvedCategory.categoryId || FIXED_CATEGORY_DEFAULT.categoryId),
+      offset: safeOffset,
+      count: safeCount
     })
 
     const cookieString = await safeGetAccountCookieString(accountId)
     
-    // 完全按照原项目的参数
-    const json = await douyinLiveRemote('/webcast/web/partition/detail/room/v2/', {
-      live_id: 1,
-      enter_from: 'page_refresh',
-      cookie_enabled: true,
-      count: count,
-      offset: offset,
-      partition: categoryId,
-      partition_type: 4,
+    // 固定最新类目接口参数（一次发现后写死）
+    const json = await douyinLiveRemote('/webcast/web/partition/detail/room/', {
+      count: safeCount,
+      offset: safeOffset,
+      aid: 6383,
+      partition: resolvedCategory.partition,
+      partition_type: resolvedCategory.partitionType,
       req_from: 2
     }, {
       cookie: cookieString,
@@ -2102,7 +2567,7 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
     })
     
     // 详细日志
-    logger.debug(`[search-live-by-category] 分类:${categoryId}, offset:${offset}`)
+    logger.debug(`[search-live-by-category] 分类:${resolvedCategory.categoryId}, partition_type:${resolvedCategory.partitionType}, partition:${resolvedCategory.partition}, offset:${safeOffset}`)
     if (json) {
       logger.debug(`[search-live-by-category] 响应结构:`, {
         hasData: !!json.data,
@@ -2134,7 +2599,7 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
           : []
 
     if (rawList.length === 0) {
-      const nextOffset = Math.max(0, Number(offset) || 0) + Math.max(0, Number(count) || 15)
+      const nextOffset = safeOffset + safeCount
       return {
         success: true,
         roomInfoList: [],
@@ -2165,17 +2630,17 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
       })
       .filter(Boolean)
     
-    const nextOffset = Math.max(0, Number(offset) || 0) + Math.max(0, Number(count) || 15)
+    const nextOffset = safeOffset + safeCount
     const hasMore = Boolean(
       json?.data?.has_more ??
       json?.extra?.has_more ??
-      (rawList.length >= Math.max(1, Number(count) || 15))
+      (rawList.length >= safeCount)
     )
 
     logger.debug(`[search-live-by-category] 原始${rawList.length}个, 筛出${roomInfoList.length}个有福袋直播间`)
     traceScan('response search-live-by-category', {
       accountId: accountId || '',
-      categoryId: String(categoryId || '0'),
+      categoryId: String(resolvedCategory.categoryId || FIXED_CATEGORY_DEFAULT.categoryId),
       success: true,
       rawCount: rawList.length,
       lotteryRooms: roomInfoList.length,
@@ -2193,7 +2658,7 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
   } catch (error) {
     traceScan('response search-live-by-category', {
       accountId: accountId || '',
-      categoryId: String(categoryId || '0'),
+      categoryId: String(resolveCategoryPartitionParams(categoryId).categoryId || FIXED_CATEGORY_DEFAULT.categoryId),
       success: false,
       error: error?.message || 'unknown'
     })
@@ -2210,68 +2675,52 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, acco
       webRid: String(webRid || '')
     })
 
-    const cookieString = await safeGetAccountCookieString(accountId)
-
-    const referers = [webRid, roomId]
-      .filter(Boolean)
-      .map(v => `https://live.douyin.com/${v}`)
-    referers.push('https://live.douyin.com/')
-
-    let json = null
-    let lastError = null
-
-    for (const referer of referers) {
-      try {
-        json = await douyinLiveRemote('/webcast/lottery/melon/lottery_info/', {
-          live_id: '1',
-          enter_from: 'link_share',
-          room_id: roomId,
-          query_from: '1'
-        }, {
-          cookie: cookieString,
-          referer
-        })
-        if (json?.data?.lottery_info) break
-      } catch (error) {
-        lastError = error
-        // 短暂等待后重试，降低偶发风控页面导致的失败率
-        await new Promise(resolve => setTimeout(resolve, 250))
-      }
+    const safeRoomId = String(roomId || '').trim()
+    if (!safeRoomId) {
+      return { success: false, error: 'room_id为空' }
     }
 
-    if (!json && lastError) {
-      throw lastError
+    const detailCookiePool = await buildDetailCookiePool(accountId, 'live.douyin.com', 8)
+    const selectedCookie = detailCookiePool.length > 0
+      ? detailCookiePool[Math.floor(Math.random() * detailCookiePool.length)]
+      : null
+    const cookieString = normalizeCookieHeaderString(selectedCookie?.cookie || await safeGetAccountCookieString(accountId, { host: 'live.douyin.com' }))
+
+    const requestParams = {
+      live_id: 1,
+      enter_from: 'link_share',
+      cookie_enabled: true,
+      room_id: safeRoomId,
+      query_from: 1
+    }
+    const requestHeaders = {
+      cookie: cookieString
     }
 
-    if (!json?.data?.lottery_info) {
-      return { success: false, error: '福袋信息不存在' }
+    traceScan('response get-lottery-detail-plan', {
+      accountId: accountId || '',
+      roomId: safeRoomId,
+      cookiePoolSize: detailCookiePool.length,
+      selectedCookieSource: String(selectedCookie?.source || (cookieString ? 'primary' : 'none')),
+      paramMode: 'superman-compatible'
+    })
+
+    const json = await douyinLiveRemote('/webcast/lottery/melon/lottery_info/', requestParams, requestHeaders)
+    const lotteryRawData = json?.data || json?.data?.data || json || null
+    const lotteryDetail = buildLotteryDetailFromRaw(lotteryRawData)
+
+    if (!lotteryDetail) {
+      return { success: false, error: '福袋信息数据格式错误' }
     }
 
-    const lottery_info = json.data.lottery_info
-
-    // 扫描阶段不做条件过滤，所有福袋详情直接返回给上层，由服务端统一筛选。
-    const conditions = Array.isArray(lottery_info.conditions) ? lottery_info.conditions : []
-
-    const lotteryDetail = {
-      lottery_id: lottery_info.lottery_id_str,
-      anchorId: lottery_info.anchor_id,
-      joinTotal: lottery_info.candidate_num || 0,
-      winningTotal: lottery_info.lucky_count || 0,
-      lotteryTotal: lottery_info.prize_count || 0,
-      lotteryName: lottery_info.prize_info?.name || '未知奖品',
-      prize_name: lottery_info.prize_info?.name || '未知奖品',
-      prizeType: lottery_info.prize_type || lottery_info.prize_info?.type || lottery_info.prize_info?.prize_type || 0,
-      prizeInfo: lottery_info.prize_info || {},
-      total_amount: lottery_info.total_amount || lottery_info.prize_info?.total_amount || 0,
-      start_time: lottery_info.start_time,
-      end_time: lottery_info.draw_time,
-      conditions
-    }
+    const conditions = Array.isArray(lotteryDetail.conditions) ? lotteryDetail.conditions : []
+    const source = 'api'
 
     traceScan('response get-lottery-detail', {
       accountId: accountId || '',
       roomId: String(roomId || ''),
       success: true,
+      source,
       lotteryId: String(lotteryDetail.lottery_id || ''),
       joinTotal: Number(lotteryDetail.joinTotal || 0),
       luckyCount: Number(lotteryDetail.winningTotal || 0),
@@ -2286,7 +2735,7 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, acco
       error: error?.message || 'unknown',
       code: error?.code || ''
     })
-    logger.error('获取福袋详情失败:', error)
+    logger.debug('获取福袋详情失败:', error)
     const message = error?.code === 'NON_JSON_RESPONSE'
       ? `接口返回非JSON内容(${error.statusCode || 'unknown'})`
       : error.message
@@ -2301,35 +2750,28 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, acco
 
 
 // 收集福袋信息 - 方法2：按分类扫描（可获取更多结果）
-// 常用分类ID: 
-// - 热门: 0
-// - 游戏: 1
-// - 娱乐: 2
-// - 才艺: 3
-// - 知识: 4
-// - 二次元: 5
-ipcMain.handle('collect-lotteries-by-category', async (event, { categoryId = '0', offset = 0, accountId = null }) => {
+// 固定分类ID（新版）：4_101~4_108（聊天/音乐/游戏/二次元/舞蹈/文化/生活/运动）
+ipcMain.handle('collect-lotteries-by-category', async (event, { categoryId = FIXED_CATEGORY_DEFAULT.categoryId, offset = 0, accountId = null }) => {
   try {
     return new Promise(async (resolve) => {
       // 获取cookie并提取参数
       let cookieString = ''
-      let dynamicParams = {}
+      const resolvedCategory = resolveCategoryPartitionParams(categoryId)
+      const safeOffset = Math.max(0, Number(offset) || 0)
       
       if (accountId) {
         cookieString = await safeGetAccountCookieString(accountId)
-        dynamicParams = extractParamsFromCookie(cookieString)
         logger.debug(`[分类扫描] 使用账号 ${accountId} 的Cookie`)
       }
       
       try {
-        const json = await douyinLiveRemote('/webcast/web/partition/detail/room/v2/', {
-          live_id: '1',
-          enter_from: 'page_refresh',
-          count: '15',
-          offset: offset.toString(),
-          partition: categoryId,
-          partition_type: '4',
-          req_from: '2'
+        const json = await douyinLiveRemote('/webcast/web/partition/detail/room/', {
+          count: 15,
+          offset: safeOffset,
+          aid: 6383,
+          partition: resolvedCategory.partition,
+          partition_type: resolvedCategory.partitionType,
+          req_from: 2
         }, {
           cookie: cookieString,
           referer: 'https://live.douyin.com/'
