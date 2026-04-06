@@ -2,7 +2,9 @@ const fs = require('fs')
 const path = require('path')
 const { DatabaseSync } = require('node:sqlite')
 
-const PROJECT_CONFIG_PATH = path.resolve(__dirname, '..', '..', '..', 'config.json')
+const PROJECT_ROOT_PATH = path.resolve(__dirname, '..', '..', '..')
+const PROJECT_CONFIG_PATH = path.join(PROJECT_ROOT_PATH, 'config.json')
+const PROJECT_RUNTIME_LOGS_DIR = path.join(PROJECT_ROOT_PATH, 'runtime-logs')
 const LEGACY_FIXED_POOL_SERVER_URL = 'http://127.0.0.1:9090'
 const JOIN_RECORDS_FILE_NAME = 'lottery-join-records.jsonl'
 const WIN_RECORDS_FILE_NAME = 'lottery-win-records.jsonl'
@@ -186,6 +188,17 @@ function appendJsonLine(filePath, payload) {
   fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, 'utf8')
 }
 
+function resolveRuntimeLogsDir(stateDir) {
+  try {
+    ensureDir(PROJECT_RUNTIME_LOGS_DIR)
+    return PROJECT_RUNTIME_LOGS_DIR
+  } catch (_) {
+    const fallbackDir = path.join(stateDir, 'runtime-logs')
+    ensureDir(fallbackDir)
+    return fallbackDir
+  }
+}
+
 function appendTextLine(filePath, line) {
   fs.appendFileSync(filePath, `${String(line || '').replace(/\r?\n+/g, ' ').trim()}\n`, 'utf8')
 }
@@ -226,12 +239,13 @@ function purgeJsonlByAccount(filePath, accountId) {
 function createStateStore(baseDir) {
   const stateDir = path.join(baseDir, 'state')
   ensureDir(stateDir)
-  const accountLogsDir = path.join(stateDir, ACCOUNT_LOGS_DIR_NAME)
+  const runtimeLogsDir = resolveRuntimeLogsDir(stateDir)
+  const accountLogsDir = path.join(runtimeLogsDir, ACCOUNT_LOGS_DIR_NAME)
   ensureDir(accountLogsDir)
   const dbPath = path.join(stateDir, 'desktop.sqlite')
   const joinRecordsPath = path.join(stateDir, JOIN_RECORDS_FILE_NAME)
   const winRecordsPath = path.join(stateDir, WIN_RECORDS_FILE_NAME)
-  const timelineLogsPath = path.join(stateDir, TIMELINE_LOGS_FILE_NAME)
+  const timelineLogsPath = path.join(runtimeLogsDir, TIMELINE_LOGS_FILE_NAME)
   const db = new DatabaseSync(dbPath)
 
   db.exec(`
@@ -441,6 +455,7 @@ function createStateStore(baseDir) {
 
   return {
     dbPath,
+    runtimeLogsDir,
     accountLogsDir,
     historyFiles: {
       join: joinRecordsPath,
