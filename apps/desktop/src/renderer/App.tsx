@@ -55,7 +55,7 @@ type ServiceResult<T = AnyRecord> = {
 
 const defaultSettings: DesktopSettings = {
   poolServerUrl: FIXED_POOL_SERVER_URL,
-  updateFeedUrl: 'https://updates.example.com/dy-fudai/windows',
+  updateFeedUrl: '',
   noticeMarkdown: '',
   stayDuration: 18,
   enableRedPacket: true,
@@ -446,6 +446,7 @@ export default function App() {
     if (!runtime) return
     if (!runtime.token && !options.tokenInfo) return
     if (runtime._starting) return
+    if (runtime._stopping) return
     runtime._starting = true
 
     try {
@@ -570,8 +571,11 @@ export default function App() {
   })
 
   const stopAccount = useEffectEvent(async (accountId: string) => {
+    const runtime = runtimeAccountsRef.current.get(accountId)
+    if (runtime?._stopping) return
+    if (runtime) runtime._stopping = true
     try {
-      manager.stopAccount(accountId)
+      await manager.stopAccount(accountId)
       await window.electronAPI.desktop.setAccountMonitoring(accountId, false)
       patchAccount(accountId, {
         state: 'paused',
@@ -586,6 +590,9 @@ export default function App() {
       })
     } catch (error) {
       addLog(`暂停账号失败: ${String((error as Error)?.message || error)}`, 'warning')
+    } finally {
+      const latest = runtimeAccountsRef.current.get(accountId)
+      if (latest) latest._stopping = false
     }
   })
 
