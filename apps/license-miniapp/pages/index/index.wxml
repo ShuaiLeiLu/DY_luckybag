@@ -9,15 +9,15 @@
   <view class="header-section glass-panel animate-float">
     <view class="flex-row justify-between items-center header-top">
       <view class="flex-col">
-        <text class="label-caps">Current Status</text>
+        <text class="label-caps">当前状态</text>
         <view class="flex-row items-center status-indicator {{isLicenseExpired ? 'status-danger' : 'status-success'}}">
           <view class="dot"></view>
           <text class="text-h2">{{sessionStatusText}}</text>
         </view>
       </view>
       <view class="icon-box">
-        <image src="../../assets/shield-check.png" mode="aspectFit" class="header-icon" wx:if="{{!isLicenseExpired}}"></image>
-        <image src="../../assets/shield-alert.png" mode="aspectFit" class="header-icon" wx:else></image>
+        <image src="../../assets/shield-check.svg" mode="aspectFit" class="header-icon" wx:if="{{!isLicenseExpired}}"></image>
+        <image src="../../assets/shield-check.svg" mode="aspectFit" class="header-icon" style="filter: grayscale(100%); opacity: 0.5;" wx:else></image>
       </view>
     </view>
 
@@ -29,37 +29,36 @@
         <text class="text-h2 separator">:</text>
         <text class="text-h2">{{remainingParts.minutes || 0}}m</text>
       </view>
-      <text class="label-caps gauge-label">Remaining Time</text>
+      <text class="label-caps gauge-label">剩余授权时间</text>
     </view>
   </view>
 
   <!-- 2. Device Card -->
   <view class="device-section glass-panel">
     <view class="flex-row justify-between items-center border-b pb-sm">
-      <text class="label-caps">Bound Desktop</text>
-      <text class="text-sub text-mono">{{sessionInfo.clientId || 'Not Bound'}}</text>
+      <text class="label-caps">已绑定设备</text>
+      <text class="text-sub text-mono">{{sessionInfo.clientId || '未绑定'}}</text>
     </view>
     
     <block wx:if="{{sessionInfo.clientId}}">
       <view class="flex-col pt-md">
         <view class="info-row">
-          <text class="text-sub">Authorization Mode</text>
-          <text class="text-body font-semibold">{{sessionInfo.accessMode === 'unrestricted' ? 'Unrestricted (Pro)' : (sessionInfo.accessMode === 'licensed' ? 'Licensed' : 'Trial Version')}}</text>
+          <text class="text-sub">授权模式</text>
+          <text class="text-body font-semibold">{{sessionInfo.accessMode === 'unrestricted' ? '服务端免授权' : (sessionInfo.accessMode === 'licensed' ? '专业版' : '试用版')}}</text>
         </view>
         <view class="info-row">
-          <text class="text-sub">Network State</text>
-          <text class="text-body text-success">Online</text>
+          <text class="text-sub">网络状态</text>
+          <text class="text-body text-success">在线</text>
         </view>
       </view>
     </block>
 
     <block wx:else>
       <view class="empty-state flex-col items-center justify-center py-xl">
-        <image src="../../assets/desktop-off.png" mode="aspectFit" class="empty-icon"></image>
-        <text class="text-body mb-md text-center">No desktop client bound. Please scan the QR code on your desktop application.</text>
+        <image src="../../assets/smartphone.svg" mode="aspectFit" class="empty-icon"></image>
+        <text class="text-body mb-md text-center">暂未绑定桌面端。请使用微信扫描桌面客户端上的二维码进行绑定。</text>
         <button class="btn-scan" bindtap="handleScanCode">
-          <image src="../../assets/scan.png" mode="aspectFit" class="btn-icon"></image>
-          Scan to Bind
+          扫码绑定设备
         </button>
       </view>
     </block>
@@ -69,7 +68,7 @@
   <view class="action-section" wx:if="{{showSigninAdButton}}">
     <view class="reward-card glass-panel flex-col items-center">
       <view class="reward-glow"></view>
-      <text class="text-h2 mb-sm text-center">Extend Your License</text>
+      <text class="text-h2 mb-sm text-center">延长使用时间</text>
       <text class="text-sub text-center mb-lg">{{rewardCopy.subtitleText}}</text>
       
       <button 
@@ -79,19 +78,17 @@
         disabled="{{btnDisabled}}"
       >
         <view class="btn-content">
-          <image src="../../assets/play-circle.png" mode="aspectFit" class="btn-icon"></image>
           <text>{{rewardCopy.buttonText}}</text>
         </view>
       </button>
       
-      <text class="text-sub text-center mt-sm" wx:if="{{todayAlreadySigned}}">You have already extended today. Come back tomorrow!</text>
+      <text class="text-sub text-center mt-sm" wx:if="{{todayAlreadySigned}}">您今天已经领取过奖励了，请明天再来！</text>
     </view>
   </view>
 
   <!-- Notice/Message Area -->
   <view class="notice-section glass-panel" wx:if="{{hasBackendMessage}}">
     <view class="flex-row items-start">
-      <image src="../../assets/bell.png" mode="aspectFit" class="notice-icon"></image>
       <text class="text-sub notice-text">{{sessionInfo.message}}</text>
     </view>
   </view>

@@ -508,7 +508,7 @@ Page({
         ? '今日已签到'
         : rewardCopy.buttonText,
       grantMaskText: rewardCopy.grantMaskText,
-      sessionStatusText: authorized ? 'Authorized' : 'Waiting',
+      sessionStatusText: authorized ? '已授权' : '等待中',
       isLicenseExpired,
       showSigninAdButton: ['scanned', 'granted', 'authorized'].includes(bindStatus),
       todayAlreadySigned: signedToday,
