@@ -1,11 +1,12 @@
 const fs = require('fs')
 const path = require('path')
-const { DatabaseSync } = require('node:sqlite')
 
 const PROJECT_ROOT_PATH = path.resolve(__dirname, '..', '..', '..')
 const PROJECT_CONFIG_PATH = path.join(PROJECT_ROOT_PATH, 'config.json')
 const PROJECT_RUNTIME_LOGS_DIR = path.join(PROJECT_ROOT_PATH, 'runtime-logs')
 const LEGACY_FIXED_POOL_SERVER_URL = 'http://127.0.0.1:9090'
+const SETTINGS_FILE_NAME = 'desktop-settings.json'
+const HISTORY_ALL_FILE_NAME = 'lottery-history-records.jsonl'
 const JOIN_RECORDS_FILE_NAME = 'lottery-join-records.jsonl'
 const WIN_RECORDS_FILE_NAME = 'lottery-win-records.jsonl'
 const ACCOUNT_LOGS_DIR_NAME = 'account-logs'
@@ -46,6 +47,14 @@ function safeParseJSON(raw, fallback) {
 function asPlainObject(value, fallback = {}) {
   if (value && typeof value === 'object' && !Array.isArray(value)) return value
   return fallback
+}
+
+function clonePlainObject(value, fallback = {}) {
+  try {
+    return asPlainObject(JSON.parse(JSON.stringify(asPlainObject(value, fallback))), fallback)
+  } catch (_) {
+    return fallback
+  }
 }
 
 function toSafeNumber(value, fallback = 0) {
@@ -203,6 +212,70 @@ function appendTextLine(filePath, line) {
   fs.appendFileSync(filePath, `${String(line || '').replace(/\r?\n+/g, ' ').trim()}\n`, 'utf8')
 }
 
+function readJsonObjectFile(filePath, fallback = {}) {
+  try {
+    if (!fs.existsSync(filePath)) return fallback
+    const raw = fs.readFileSync(filePath, 'utf8')
+    return asPlainObject(safeParseJSON(raw, fallback), fallback)
+  } catch (_) {
+    return fallback
+  }
+}
+
+function writeJsonObjectFile(filePath, payload) {
+  const dir = path.dirname(filePath)
+  ensureDir(dir)
+  fs.writeFileSync(filePath, `${JSON.stringify(asPlainObject(payload, {}), null, 2)}\n`, 'utf8')
+}
+
+function readJsonLines(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return []
+    const raw = fs.readFileSync(filePath, 'utf8')
+    if (!raw.trim()) return []
+    return raw
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => safeParseJSON(line, null))
+      .filter((item) => item && typeof item === 'object')
+  } catch (_) {
+    return []
+  }
+}
+
+function writeJsonLines(filePath, items = []) {
+  const dir = path.dirname(filePath)
+  ensureDir(dir)
+  const normalized = Array.isArray(items) ? items : []
+  const raw = normalized.length > 0
+    ? `${normalized.map((item) => JSON.stringify(item)).join('\n')}\n`
+    : ''
+  fs.writeFileSync(filePath, raw, 'utf8')
+}
+
+function bootstrapHistoryAllFile(historyAllPath, legacyPaths = []) {
+  try {
+    if (fs.existsSync(historyAllPath)) return
+    const legacy = legacyPaths
+      .flatMap((filePath) => readJsonLines(filePath))
+      .map((item) => normalizeHistoryRecord(item))
+      .filter((item) => item.recordType === 'join' || item.recordType === 'win')
+      .sort((a, b) => {
+        const createdDiff = Number(a.createdAt || 0) - Number(b.createdAt || 0)
+        if (createdDiff !== 0) return createdDiff
+        return Number(a.id || 0) - Number(b.id || 0)
+      })
+      .map((item, index) => ({
+        ...item,
+        id: index + 1
+      }))
+    if (legacy.length <= 0) return
+    writeJsonLines(historyAllPath, legacy)
+  } catch (_) {
+    // ignore bootstrap errors and allow runtime to continue
+  }
+}
+
 function buildTextLogLine({ createdAt = Date.now(), level = 'info', scope = 'desktop', accountId = '', message = '' } = {}) {
   const dateParts = formatLocalDateParts(createdAt)
   const levelText = String(level || 'info').toUpperCase()
@@ -242,52 +315,20 @@ function createStateStore(baseDir) {
   const runtimeLogsDir = resolveRuntimeLogsDir(stateDir)
   const accountLogsDir = path.join(runtimeLogsDir, ACCOUNT_LOGS_DIR_NAME)
   ensureDir(accountLogsDir)
-  const dbPath = path.join(stateDir, 'desktop.sqlite')
+  const settingsPath = path.join(stateDir, SETTINGS_FILE_NAME)
+  const historyAllPath = path.join(stateDir, HISTORY_ALL_FILE_NAME)
   const joinRecordsPath = path.join(stateDir, JOIN_RECORDS_FILE_NAME)
   const winRecordsPath = path.join(stateDir, WIN_RECORDS_FILE_NAME)
   const timelineLogsPath = path.join(runtimeLogsDir, TIMELINE_LOGS_FILE_NAME)
-  const db = new DatabaseSync(dbPath)
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS app_settings (
-      setting_key TEXT PRIMARY KEY,
-      setting_value TEXT NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS runtime_events (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      scope TEXT NOT NULL,
-      level TEXT NOT NULL,
-      message TEXT NOT NULL,
-      created_at INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS lottery_history_records (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      record_type TEXT NOT NULL,
-      account_id TEXT NOT NULL,
-      lottery_id TEXT NOT NULL,
-      room_id TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      payload_json TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_runtime_events_created_at ON runtime_events(created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_lottery_history_records_created_at ON lottery_history_records(created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_lottery_history_records_type_created_at ON lottery_history_records(record_type, created_at DESC);
-  `)
-
-  // Runtime timeline logs are session-only and should start fresh on every app launch.
-  db.prepare('DELETE FROM runtime_events').run()
+  bootstrapHistoryAllFile(historyAllPath, [joinRecordsPath, winRecordsPath])
+  let cachedSettings = null
+  let historySeq = readJsonLines(historyAllPath)
+    .reduce((maxId, item) => Math.max(maxId, Math.max(0, toSafeNumber(item?.id, 0))), 0)
 
   function getSettings() {
-    const row = db.prepare(`
-      SELECT setting_value
-      FROM app_settings
-      WHERE setting_key = 'desktop_settings'
-      LIMIT 1
-    `).get()
-
-    const parsed = row ? safeParseJSON(row.setting_value, {}) : {}
-    return normalizeSettings(parsed)
+    if (cachedSettings) return clonePlainObject(cachedSettings, DEFAULT_SETTINGS)
+    cachedSettings = normalizeSettings(readJsonObjectFile(settingsPath, {}))
+    return clonePlainObject(cachedSettings, DEFAULT_SETTINGS)
   }
 
   function saveSettings(patch = {}) {
@@ -295,14 +336,9 @@ function createStateStore(baseDir) {
       ...getSettings(),
       ...(patch && typeof patch === 'object' ? patch : {})
     })
-    db.prepare(`
-      INSERT INTO app_settings (setting_key, setting_value, updated_at)
-      VALUES ('desktop_settings', ?, ?)
-      ON CONFLICT(setting_key) DO UPDATE
-      SET setting_value = excluded.setting_value,
-          updated_at = excluded.updated_at
-    `).run(JSON.stringify(merged), Date.now())
-    return merged
+    writeJsonObjectFile(settingsPath, merged)
+    cachedSettings = merged
+    return clonePlainObject(merged, DEFAULT_SETTINGS)
   }
 
   function clearRuntimeEvents() {
@@ -335,21 +371,16 @@ function createStateStore(baseDir) {
 
   function appendHistoryRecord(record = {}) {
     const payload = normalizeHistoryRecord(record)
-    const result = db.prepare(`
-      INSERT INTO lottery_history_records (record_type, account_id, lottery_id, room_id, created_at, payload_json)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
-      payload.recordType,
-      payload.accountId,
-      payload.lotteryId,
-      payload.roomId,
-      payload.createdAt,
-      JSON.stringify(payload)
-    )
+    if (payload.id > 0) {
+      historySeq = Math.max(historySeq, payload.id)
+    } else {
+      historySeq += 1
+    }
     const item = {
       ...payload,
-      id: Number(result.lastInsertRowid || 0)
+      id: payload.id > 0 ? payload.id : historySeq
     }
+    appendJsonLine(historyAllPath, item)
     appendJsonLine(item.recordType === 'win' ? winRecordsPath : joinRecordsPath, item)
     return item
   }
@@ -385,27 +416,22 @@ function createStateStore(baseDir) {
   function listHistoryRecords(limit = 200, options = {}) {
     const normalizedType = String(options?.recordType || 'all').trim().toLowerCase()
     const safeLimit = clampLimit(limit, 200, 1000)
-    const rows = normalizedType === 'join' || normalizedType === 'win'
-      ? db.prepare(`
-        SELECT id, record_type, created_at, payload_json
-        FROM lottery_history_records
-        WHERE record_type = ?
-        ORDER BY id DESC
-        LIMIT ?
-      `).all(normalizedType, safeLimit)
-      : db.prepare(`
-        SELECT id, record_type, created_at, payload_json
-        FROM lottery_history_records
-        ORDER BY id DESC
-        LIMIT ?
-      `).all(safeLimit)
+    const all = readJsonLines(historyAllPath)
+      .map((item) => normalizeHistoryRecord(item))
+      .filter((item) => item.recordType === 'join' || item.recordType === 'win')
 
-    return rows.map((row) => normalizeHistoryRecord({
-      ...safeParseJSON(row.payload_json, {}),
-      id: Number(row.id || 0),
-      recordType: String(row.record_type || ''),
-      createdAt: Number(row.created_at || 0)
-    })).reverse()
+    const filtered = (normalizedType === 'join' || normalizedType === 'win')
+      ? all.filter((item) => item.recordType === normalizedType)
+      : all
+
+    return filtered
+      .sort((a, b) => {
+        const idDiff = Number(b.id || 0) - Number(a.id || 0)
+        if (idDiff !== 0) return idDiff
+        return Number(b.createdAt || 0) - Number(a.createdAt || 0)
+      })
+      .slice(0, safeLimit)
+      .reverse()
   }
 
   function purgeAccountData(accountId) {
@@ -414,10 +440,7 @@ function createStateStore(baseDir) {
       return { success: false, error: 'account_id_required' }
     }
 
-    const historyDeleteResult = db.prepare(`
-      DELETE FROM lottery_history_records
-      WHERE account_id = ?
-    `).run(targetId)
+    const historyAllPurge = purgeJsonlByAccount(historyAllPath, targetId)
 
     const accountLogDir = path.join(accountLogsDir, sanitizeFileSegment(targetId))
     let removedLogFiles = 0
@@ -445,7 +468,7 @@ function createStateStore(baseDir) {
     return {
       success: true,
       accountId: targetId,
-      deletedHistoryRows: Number(historyDeleteResult?.changes || 0),
+      deletedHistoryRows: Number(historyAllPurge.removed || 0),
       deletedAccountLogFiles: removedLogFiles,
       deletedAccountLogBytes: removedLogBytes,
       deletedJoinJsonlRows: Number(joinPurge.removed || 0),
@@ -454,10 +477,13 @@ function createStateStore(baseDir) {
   }
 
   return {
-    dbPath,
+    dbPath: null,
+    settingsPath,
+    historyAllPath,
     runtimeLogsDir,
     accountLogsDir,
     historyFiles: {
+      all: historyAllPath,
       join: joinRecordsPath,
       win: winRecordsPath
     },

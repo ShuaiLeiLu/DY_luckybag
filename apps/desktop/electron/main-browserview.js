@@ -9,6 +9,65 @@ const { createHotUpdateService } = require('./hot-update-service')
 const { createStateStore, DEFAULT_SETTINGS } = require('./state-store')
 const { createUpdateService } = require('./update-service')
 
+function resolveProjectRootDir() {
+  const fromEnv = String(process.env.DY_PROJECT_ROOT || '').trim()
+  if (fromEnv) return path.resolve(fromEnv)
+
+  const candidates = [
+    path.resolve(__dirname, '..', '..', '..'),
+    process.cwd()
+  ]
+
+  for (const start of candidates) {
+    let current = path.resolve(start)
+    for (let i = 0; i < 8; i += 1) {
+      const pkgPath = path.join(current, 'package.json')
+      if (fs.existsSync(pkgPath)) {
+        try {
+          const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'))
+          if (String(pkg?.name || '').trim() === 'dy-fudai-desktop') {
+            return current
+          }
+        } catch (_) {}
+      }
+      const parent = path.dirname(current)
+      if (parent === current) break
+      current = parent
+    }
+  }
+  return path.resolve(__dirname, '..', '..', '..')
+}
+
+function migrateLegacyStateDir(legacyUserDataDir, projectUserDataDir) {
+  const legacyStateDir = path.join(String(legacyUserDataDir || ''), 'state')
+  const targetStateDir = path.join(projectUserDataDir, 'state')
+  if (!legacyUserDataDir || !fs.existsSync(legacyStateDir)) return
+  if (fs.existsSync(targetStateDir)) return
+  try {
+    fs.mkdirSync(projectUserDataDir, { recursive: true })
+    fs.cpSync(legacyStateDir, targetStateDir, { recursive: true })
+    console.log(`[desktop-storage] migrated legacy state: ${legacyStateDir} -> ${targetStateDir}`)
+  } catch (error) {
+    console.warn(`[desktop-storage] migrate legacy state failed: ${String(error?.message || error)}`)
+  }
+}
+
+function configureProjectUserDataDir() {
+  const legacyUserDataDir = app.getPath('userData')
+  const projectRootDir = resolveProjectRootDir()
+  const projectUserDataDir = path.join(projectRootDir, 'dy-fudai-desktop')
+  try {
+    fs.mkdirSync(projectUserDataDir, { recursive: true })
+    migrateLegacyStateDir(legacyUserDataDir, projectUserDataDir)
+    app.setPath('userData', projectUserDataDir)
+    console.log(`[desktop-storage] userData => ${projectUserDataDir}`)
+  } catch (error) {
+    console.warn(`[desktop-storage] set userData failed, fallback to default: ${String(error?.message || error)}`)
+  }
+}
+
+configureProjectUserDataDir()
+
 let mainWindow
 let browserViews = new Map() // 存储多个BrowserView实例
 let keepAwakeBlockerId = null
