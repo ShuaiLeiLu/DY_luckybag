@@ -5,6 +5,7 @@ const fs = require('fs')
 const os = require('os')
 const { douyinLiveRemote } = require('./douyinLiveRemote')
 const { createLogger } = require('./logger')
+const { createHotUpdateService } = require('./hot-update-service')
 const { createStateStore, DEFAULT_SETTINGS } = require('./state-store')
 const { createUpdateService } = require('./update-service')
 
@@ -14,6 +15,7 @@ let keepAwakeBlockerId = null
 let browserInstanceSeq = 0
 let stateStore = null
 let updateService = null
+let hotUpdateService = null
 
 const logger = createLogger('main-browserview', { defaultLevel: 'warn' })
 const secureStateDir = path.join(app.getPath('userData'), 'state')
@@ -272,6 +274,42 @@ function ensureUpdateService() {
     })
   }
   return updateService
+}
+
+function resolveHotUpdateSettings(settings = {}) {
+  return {
+    enabled: settings?.hotUpdateEnabled === true,
+    manifestUrl: String(settings?.hotUpdateManifestUrl || '').trim(),
+    reloadOnApply: settings?.hotUpdateReloadOnApply === true
+  }
+}
+
+function createBoundHotUpdateService(settings = {}) {
+  const hotSettings = resolveHotUpdateSettings(settings)
+  const service = createHotUpdateService({
+    enabled: hotSettings.enabled,
+    manifestUrl: hotSettings.manifestUrl,
+    reloadOnApply: hotSettings.reloadOnApply,
+    userDataDir: app.getPath('userData'),
+    appVersion: app.getVersion(),
+    onChange(snapshot) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('desktop:hot-update-state', snapshot)
+      }
+    }
+  })
+  return service
+}
+
+function ensureHotUpdateService() {
+  if (!hotUpdateService) {
+    const settings = ensureStateStore().getSettings()
+    hotUpdateService = createBoundHotUpdateService(settings)
+    hotUpdateService.init().catch((error) => {
+      logger.warn(`[hot-update] init failed: ${error?.message || error}`)
+    })
+  }
+  return hotUpdateService
 }
 
 function appendRuntimeEvent(level = 'info', message = '', scope = 'desktop') {
@@ -1128,8 +1166,17 @@ async function resolveUserInfo(accountId, options = {}) {
   return null
 }
 
-function getDesktopIndexFile() {
+function getBundledDesktopIndexFile() {
   return path.join(__dirname, '../dist/index.html')
+}
+
+function getDesktopIndexFile() {
+  const service = ensureHotUpdateService()
+  const hotEntry = service.getAppliedEntryFile()
+  if (hotEntry && fs.existsSync(hotEntry)) {
+    return hotEntry
+  }
+  return getBundledDesktopIndexFile()
 }
 
 function buildDesktopFailureHtml(message = '', detail = '') {
@@ -1260,7 +1307,7 @@ function createWindow() {
   if (isDev) {
     mainWindow.loadURL(DESKTOP_DEV_SERVER_URL).catch(async (error) => {
       logger.error(`[desktop] dev server load failed: ${error?.message || error}`)
-      const fallbackFile = getDesktopIndexFile()
+      const fallbackFile = getBundledDesktopIndexFile()
       if (fs.existsSync(fallbackFile)) {
         await mainWindow.loadFile(fallbackFile).catch(async (fallbackError) => {
           await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildDesktopFailureHtml('开发服务器未能加载，本地兜底页面也加载失败。', `${error?.message || error}\n${fallbackError?.message || fallbackError}`))}`)
@@ -1282,14 +1329,24 @@ function createWindow() {
 app.whenReady().then(createWindow)
 app.whenReady().then(() => {
   fs.mkdirSync(secureStateDir, { recursive: true })
-  stateStore = createStateStore(app.getPath('userData'))
-  updateService = createUpdateService({
-    feedUrl: stateStore?.getSettings()?.updateFeedUrl || DEFAULT_SETTINGS.updateFeedUrl,
-    onChange(snapshot) {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('desktop:update-state', snapshot)
-      }
-    }
+  ensureStateStore()
+  ensureUpdateService()
+  ensureHotUpdateService()
+})
+app.whenReady().then(async () => {
+  const service = ensureHotUpdateService()
+  const hotSnapshot = await service.check().catch((error) => ({
+    status: 'error',
+    message: String(error?.message || error || 'unknown_error')
+  }))
+  if (!hotSnapshot || hotSnapshot.status !== 'applied') return
+  if (hotSnapshot.reloadOnApply !== true) return
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const nextEntry = String(hotSnapshot.appliedEntryFile || '').trim()
+  if (!nextEntry) return
+  if (!fs.existsSync(nextEntry)) return
+  mainWindow.loadFile(nextEntry).catch((error) => {
+    logger.warn(`[hot-update] reload after apply failed: ${error?.message || error}`)
   })
 })
 
@@ -1414,6 +1471,12 @@ ipcMain.handle('scan-debug-log', async (_event, payload = {}) => {
       console.log(`[main-browserview] [scan-summary] [${accountId || 'unknown'}]${requestText} 扫描直播间=${scannedRooms} 福袋直播间=${lotteryRooms}`)
       return { success: true }
     }
+    if (stage === 'metric:all-start') {
+      const requestText = request > 0 ? ` request=${request}` : ''
+      const scannedRooms = Number(summary?.rawRooms || 0)
+      console.log(`[main-browserview] [scan-lottery] [${accountId || 'unknown'}]${requestText} 开始扫描福袋（本轮直播间=${scannedRooms}）`)
+      return { success: true }
+    }
     if (stage === 'metric:all-detail-start') {
       const requestText = request > 0 ? ` request=${request}` : ''
       const detailRequested = Number(summary?.detailRequested || summary?.hintedRooms || 0)
@@ -1443,14 +1506,20 @@ ipcMain.handle('scan-debug-log', async (_event, payload = {}) => {
       const requestText = request > 0 ? ` request=${request}` : ''
       const uploaded = Number(summary?.uploaded || 0)
       const accepted = Number(summary?.accepted || 0)
+      const eligibleCount = Number(summary?.eligibleCount || 0)
+      const claimClaimed = summary?.claimClaimed === true
+      const claimReason = String(summary?.claimReason || '')
       const ok = summary?.ok === true
       const skipped = String(summary?.skipped || '')
       const status = Number(summary?.status || 0)
       const error = String(summary?.error || '')
+      const eligibleText = ` 可参与=${eligibleCount}`
+      const claimText = ` 已分配=${claimClaimed ? 'yes' : 'no'}`
+      const claimReasonText = claimReason ? ` reason=${claimReason}` : ''
       const statusText = status > 0 ? ` status=${status}` : ''
       const skippedText = skipped ? ` skipped=${skipped}` : ''
       const errorText = error ? ` error=${error}` : ''
-      console.log(`[main-browserview] [scan-upload] [${accountId || 'unknown'}]${requestText} ok=${ok} 提交=${uploaded} 接收=${accepted}${statusText}${skippedText}${errorText}`)
+      console.log(`[main-browserview] [scan-upload] [${accountId || 'unknown'}]${requestText} ok=${ok} 提交=${uploaded} 接收=${accepted}${eligibleText}${claimText}${claimReasonText}${statusText}${skippedText}${errorText}`)
       return { success: true }
     }
     if (stage.startsWith('metric:category:')) {
@@ -2007,6 +2076,22 @@ ipcMain.handle('desktop:save-settings', async (_event, payload = {}) => {
         }
       })
     }
+    const hotConfig = resolveHotUpdateSettings(settings)
+    const prevHotSnapshot = ensureHotUpdateService().getSnapshot()
+    const hotChanged = prevHotSnapshot.enabled !== hotConfig.enabled
+      || prevHotSnapshot.manifestUrl !== hotConfig.manifestUrl
+      || prevHotSnapshot.reloadOnApply !== hotConfig.reloadOnApply
+    if (hotChanged) {
+      hotUpdateService = createBoundHotUpdateService(settings)
+      await hotUpdateService.init().catch((error) => {
+        logger.warn(`[hot-update] reinit failed: ${error?.message || error}`)
+      })
+      if (hotConfig.enabled && hotConfig.manifestUrl) {
+        hotUpdateService.check().catch((error) => {
+          logger.warn(`[hot-update] recheck failed: ${error?.message || error}`)
+        })
+      }
+    }
     return { success: true, settings }
   } catch (error) {
     return { success: false, error: error.message, settings: ensureStateStore().getSettings() }
@@ -2033,6 +2118,8 @@ ipcMain.handle('desktop:get-update-state', async () => ensureUpdateService().get
 ipcMain.handle('desktop:check-for-updates', async () => ensureUpdateService().check())
 ipcMain.handle('desktop:download-update', async () => ensureUpdateService().download())
 ipcMain.handle('desktop:install-update', async () => ({ success: ensureUpdateService().install() }))
+ipcMain.handle('desktop:get-hot-update-state', async () => ensureHotUpdateService().getSnapshot())
+ipcMain.handle('desktop:check-hot-update', async () => ensureHotUpdateService().check())
 
 ipcMain.handle('desktop:append-event', async (_event, payload = {}) => {
   try {

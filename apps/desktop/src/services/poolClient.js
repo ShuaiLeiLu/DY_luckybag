@@ -1,4 +1,5 @@
 export const FIXED_POOL_SERVER_URL = 'http://127.0.0.1:9090'
+let configuredPoolServerUrl = FIXED_POOL_SERVER_URL
 const DEFAULT_TIMEOUT_MS = 3200
 const CLIENT_ID_STORAGE_KEY = 'DY_POOL_CLIENT_ID'
 const LICENSE_FP_STORAGE_KEY = 'DY_LICENSE_FINGERPRINT'
@@ -75,19 +76,22 @@ async function requestJSON(baseUrl, path, { method = 'GET', body = null, timeout
 
 /**
  * 解析当前客户端应使用的筛选服务地址。
- * 当前版本固定使用旧服务端配置，不允许从 UI / localStorage 覆盖。
+ * 未配置时回退到内置本地地址。
  * @returns {string}
  */
 export function resolvePoolServerUrl() {
-  return normalizePoolServerUrl(FIXED_POOL_SERVER_URL)
+  const normalized = normalizePoolServerUrl(configuredPoolServerUrl)
+  return normalized || normalizePoolServerUrl(FIXED_POOL_SERVER_URL)
 }
 
 /**
- * 固定服务端地址，不再持久化用户修改。
+ * 更新当前运行时使用的服务端地址。
  * @param {string} url 服务地址
  * @returns {string} 规范化后的地址
  */
-export function persistPoolServerUrl(_url) {
+export function persistPoolServerUrl(url) {
+  const normalized = normalizePoolServerUrl(url)
+  configuredPoolServerUrl = normalized || FIXED_POOL_SERVER_URL
   return resolvePoolServerUrl()
 }
 
@@ -145,18 +149,41 @@ export function resolveLicenseFingerprint() {
  * @param {string} baseUrl 服务地址
  * @param {string} sourceId 来源ID
  * @param {Array} candidates 候选列表
- * @param {number} timeoutMs 超时毫秒
+ * @param {number|object} timeoutOrOptions 超时毫秒或扩展参数
  * @returns {Promise<object>}
  */
-export async function upsertPoolCandidates(baseUrl, sourceId, candidates, timeoutMs = DEFAULT_TIMEOUT_MS) {
+export async function upsertPoolCandidates(baseUrl, sourceId, candidates, timeoutOrOptions = DEFAULT_TIMEOUT_MS) {
   const list = Array.isArray(candidates) ? candidates : []
   if (list.length === 0) return { ok: true, data: { ok: true, accepted: 0 } }
+  const options = (timeoutOrOptions && typeof timeoutOrOptions === 'object')
+    ? timeoutOrOptions
+    : { timeoutMs: timeoutOrOptions }
+  const timeoutMs = Number(options?.timeoutMs || DEFAULT_TIMEOUT_MS)
+  const filters = (options?.filters && typeof options.filters === 'object') ? options.filters : null
+  const claimTask = options?.claimTask === true
+  const clientId = String(options?.clientId || '').trim()
+  const accountId = String(options?.accountId || '').trim()
+  const leaseSec = Math.max(10, Number(options?.leaseSec || 35))
+  const topLimit = Math.max(1, Math.min(20, Number(options?.topLimit || 5)))
+  const preferKeys = Array.isArray(options?.preferKeys) ? options.preferKeys : []
+  const excludeKeys = Array.isArray(options?.excludeKeys) ? options.excludeKeys : []
+
+  const body = {
+    sourceId: sourceId || 'client',
+    candidates: list,
+    topLimit
+  }
+  if (filters) body.filters = filters
+  if (claimTask) body.claimTask = true
+  if (clientId) body.clientId = clientId
+  if (accountId) body.accountId = accountId
+  if (claimTask) body.leaseSec = leaseSec
+  if (preferKeys.length > 0) body.preferKeys = preferKeys
+  if (excludeKeys.length > 0) body.excludeKeys = excludeKeys
+
   return requestJSON(baseUrl, '/candidate/batch-upsert', {
     method: 'POST',
-    body: {
-      sourceId: sourceId || 'client',
-      candidates: list
-    },
+    body,
     timeoutMs
   })
 }

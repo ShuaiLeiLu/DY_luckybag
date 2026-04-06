@@ -16,6 +16,28 @@ declare global {
         checkForUpdates: () => Promise<UpdateSnapshot>
         downloadUpdate: () => Promise<UpdateSnapshot>
         installUpdate: () => Promise<{ success: boolean }>
+        getHotUpdateState: () => Promise<{
+          status: string
+          enabled: boolean
+          manifestUrl: string
+          reloadOnApply: boolean
+          currentVersion: string
+          latestVersion: string
+          message: string
+          checkedAt: number
+          appliedEntryFile: string
+        }>
+        checkHotUpdate: () => Promise<{
+          status: string
+          enabled: boolean
+          manifestUrl: string
+          reloadOnApply: boolean
+          currentVersion: string
+          latestVersion: string
+          message: string
+          checkedAt: number
+          appliedEntryFile: string
+        }>
         appendEvent: (event: Omit<RecoveryEvent, 'id' | 'createdAt'>) => Promise<{ success: boolean }>
         appendAccountLog: (record: {
           accountId: string
@@ -38,6 +60,17 @@ declare global {
           error?: string
         }>
         onUpdateState: (handler: (snapshot: UpdateSnapshot) => void) => () => void
+        onHotUpdateState: (handler: (snapshot: {
+          status: string
+          enabled: boolean
+          manifestUrl: string
+          reloadOnApply: boolean
+          currentVersion: string
+          latestVersion: string
+          message: string
+          checkedAt: number
+          appliedEntryFile: string
+        }) => void) => () => void
       }
     }
   }

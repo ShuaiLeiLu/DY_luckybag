@@ -100,16 +100,22 @@ function normalizeCategoryList(manager, scanProfile = null) {
 /**
  * 搜索直播间-【全部】（照抄超人福袋流程）
  */
-export async function searchLiveByAll(manager, accountId, times = 10, scanProfile = null) {
+export async function searchLiveByAll(manager, accountId, times = 10, scanProfile = null, runtimeOptions = {}) {
   const accountData = manager?.accounts?.get(accountId)
   if (!accountData || !manager?.ipc) return
   const totalTimes = Math.max(1, Math.floor(toNumber(times, DEFAULT_FULL_SCAN_TIMES)))
   const roundUploadCandidates = []
+  const deadlineMs = Number(runtimeOptions?.deadlineMs || 0)
+  const hitDeadline = () => deadlineMs > 0 && Date.now() >= deadlineMs
 
   safeOnScanProgressLog(accountData, `开始执行全部直播间搜索，共${totalTimes}次`)
 
   for (let i = 0; i < totalTimes; i++) {
     if (manager.isPaused(accountId)) break
+    if (hitDeadline()) {
+      safeOnScanProgressLog(accountData, `全站扫描命中阶段截止时间，提前结束（${i}/${totalTimes}）`, 'info')
+      break
+    }
 
     safeOnScanProgressLog(accountData, `正在执行直播间第${i + 1}/${totalTimes}次搜索...`)
 
@@ -133,6 +139,10 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
         continue
       }
 
+      emitScanMetric(manager, accountId, 'all-start', i + 1, {
+        rawRooms: result.roomInfoList.length
+      })
+
       const roomInfoList = result.roomInfoList
         .filter((item) => item?.hasLotteryHint === true)
         .map((item) => ({
@@ -149,6 +159,7 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
         hintedRooms: roomInfoList.length,
         detailRequested: roomInfoList.length
       })
+      safeOnLog(accountData, `🔍 第${i + 1}/${totalTimes}轮开始扫描福袋（候选${roomInfoList.length}）`)
 
       const detailResult = await getLotteryInfo(manager, roomInfoList, accountId, scanProfile)
       const settled = Array.isArray(detailResult?.settled) ? detailResult.settled : []
@@ -211,9 +222,16 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
       manager.sortLotteriesByProbability(accountId)
       manager.emitLotteryListUpdate(accountData)
 
+      if (hitDeadline()) {
+        safeOnScanProgressLog(accountData, `全站扫描命中阶段截止时间，提前收尾上报（${i + 1}/${totalTimes}）`, 'info')
+        break
+      }
       await sleep(manager, randomDelay(FULL_SCAN_REQUEST_GAP_MS.min, FULL_SCAN_REQUEST_GAP_MS.max))
     } catch (error) {
       safeOnScanProgressLog(accountData, `第${i + 1}次搜索出错: ${error?.message || error}`, 'warning')
+      if (hitDeadline()) {
+        break
+      }
       await sleep(manager, randomDelay(FULL_SCAN_REQUEST_GAP_MS.min, FULL_SCAN_REQUEST_GAP_MS.max))
     }
   }
@@ -229,6 +247,7 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
   })
   const uploadList = Array.from(uploadMap.values())
   const uploadAt = Date.now()
+  const uploadAfterScan = runtimeOptions?.uploadAfterScan !== false
 
   if (uploadList.length <= 0) {
     safeOnLog(accountData, '本轮扫描结束，无可提交的福袋详情')
@@ -246,16 +265,49 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
       scanUploadError: '',
       scanUploadAt: uploadAt
     })
-    return
+    return {
+      uploaded: 0,
+      accepted: 0,
+      uploadOk: true,
+      skipped: 'empty_upload_list',
+      eligibleCount: 0,
+      eligibleLotteries: [],
+      claimedTask: null,
+      deferredUploadCandidates: []
+    }
   }
 
-  const uploadRes = await manager.enqueuePoolCandidatesUpload(accountId, uploadList)
+  if (!uploadAfterScan) {
+    safeOnLog(accountData, `本轮扫描结束，已缓存${uploadList.length}个福袋，等待阶段结束后统一上传服务端`)
+    return {
+      uploaded: 0,
+      accepted: 0,
+      uploadOk: true,
+      skipped: 'deferred_waiting_draw_upload',
+      eligibleCount: 0,
+      eligibleLotteries: [],
+      claimedTask: null,
+      deferredUploadCandidates: uploadList
+    }
+  }
+
+  const claimAfterScan = runtimeOptions?.claimAfterScan !== false
+  const uploadRes = await manager.enqueuePoolCandidatesUpload(accountId, uploadList, {
+    claimTask: claimAfterScan,
+    topLimit: 5
+  })
     .catch((error) => ({ ok: false, accepted: 0, total: uploadList.length, error: error?.message || String(error || 'unknown') }))
   const accepted = Math.max(0, Number(uploadRes?.accepted || 0))
+  const eligibleCount = Math.max(0, Number(uploadRes?.eligibleCount || 0))
+  const claimClaimed = uploadRes?.claimClaimed === true
+  const claimReason = String(uploadRes?.claimReason || '')
   emitScanMetric(manager, accountId, 'all-round-upload', totalTimes, {
     ok: uploadRes?.ok === true,
     uploaded: uploadList.length,
     accepted,
+    eligibleCount,
+    claimClaimed,
+    claimReason,
     skipped: String(uploadRes?.skipped || ''),
     status: Number(uploadRes?.status || 0),
     error: uploadRes?.ok ? '' : String(uploadRes?.error || 'unknown')
@@ -277,16 +329,41 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
 
   if (uploadRes?.ok && uploadRes?.skipped === 'pool_server_disabled') {
     safeOnLog(accountData, `本轮扫描结束，已整理${uploadList.length}个福袋，但服务端候选池未启用，未执行上报`, 'warning')
-    return
+    return {
+      uploaded: uploadList.length,
+      accepted,
+      uploadOk: true,
+      skipped: 'pool_server_disabled',
+      eligibleCount,
+      eligibleLotteries: Array.isArray(uploadRes?.eligibleLotteries) ? uploadRes.eligibleLotteries : [],
+      claimedTask: uploadRes?.claimedTask || null
+    }
   }
   if (uploadRes?.ok && uploadRes?.skipped === 'invalid_candidates') {
     safeOnLog(accountData, `本轮扫描结束，已整理${uploadList.length}个福袋，但字段不完整导致未能上报服务端`, 'warning')
-    return
+    return {
+      uploaded: uploadList.length,
+      accepted,
+      uploadOk: true,
+      skipped: 'invalid_candidates',
+      eligibleCount,
+      eligibleLotteries: Array.isArray(uploadRes?.eligibleLotteries) ? uploadRes.eligibleLotteries : [],
+      claimedTask: uploadRes?.claimedTask || null
+    }
   }
   if (uploadRes?.ok) {
-    safeOnLog(accountData, `本轮扫描结束，已向服务端提交${uploadList.length}个福袋候选，服务端接收${accepted}个`, 'success')
+    safeOnLog(accountData, `本轮扫描结束，已向服务端提交${uploadList.length}个福袋候选，服务端接收${accepted}个，可参与${eligibleCount}个`, 'success')
   } else {
     safeOnLog(accountData, `本轮扫描结束，候选上报失败：${uploadRes?.error || 'unknown'}`, 'warning')
+  }
+  return {
+    uploaded: uploadList.length,
+    accepted,
+    uploadOk: uploadRes?.ok === true,
+    skipped: String(uploadRes?.skipped || ''),
+    eligibleCount,
+    eligibleLotteries: Array.isArray(uploadRes?.eligibleLotteries) ? uploadRes.eligibleLotteries : [],
+    claimedTask: uploadRes?.claimedTask || null
   }
 }
 

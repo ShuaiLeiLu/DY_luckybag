@@ -34,6 +34,9 @@ npm run desktop:electron:dev
 # 桌面端构建
 npm run desktop:build
 
+# 生成桌面端热更新 manifest（仅前端资源）
+npm run desktop:hot:manifest -- --base-url https://your-cdn.example.com/dy-fudai/desktop/3.0.0/
+
 # 桌面端测试
 npm run desktop:test
 

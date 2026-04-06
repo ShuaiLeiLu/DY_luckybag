@@ -33,6 +33,20 @@ npm run server:docker:up
 npm run server:db:init
 ```
 
+## Desktop 热更新资源
+
+- 执行 `npm run server:docker:build` 时，会自动构建 Desktop 前端并把最新资源打入服务端镜像。
+- 镜像内默认静态目录：`/app/static/desktop`
+- 对外访问路径：
+  - `/desktop/hot-manifest.json`
+  - `/desktop/<version>/...`（`index.html` 与 `assets/*`）
+
+可通过环境变量覆盖静态目录：
+
+```bash
+POOL_DESKTOP_STATIC_DIR=/app/static/desktop
+```
+
 ## 目录
 
 ```text

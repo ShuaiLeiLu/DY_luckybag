@@ -11,6 +11,7 @@
   "scripts": {
     "desktop:dev": "vite --config apps/desktop/vite.config.mjs",
     "desktop:build": "tsc --noEmit -p apps/desktop/tsconfig.json && vite build --config apps/desktop/vite.config.mjs",
+    "desktop:hot:manifest": "node ./scripts/build-desktop-hot-manifest.mjs",
     "desktop:test": "vitest run --config apps/desktop/vite.config.mjs",
     "server:test:license": "cd apps/pool-server && go test ./internal/license",
     "server:run": "node ./run-go.mjs --cwd apps/pool-server run ./cmd/poolserver",

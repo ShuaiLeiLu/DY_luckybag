@@ -15,6 +15,9 @@ NO_CACHE="${NO_CACHE:-0}"
 GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
 GOSUMDB="${GOSUMDB:-sum.golang.google.cn}"
 GOPRIVATE="${GOPRIVATE:-}"
+ENABLE_DESKTOP_HOT="${ENABLE_DESKTOP_HOT:-1}"
+HOT_BASE_URL="${HOT_BASE_URL:-}"
+DESKTOP_VERSION="${DESKTOP_VERSION:-}"
 
 print_help() {
   cat <<'EOF'
@@ -34,6 +37,9 @@ print_help() {
   --goproxy <url>      Go 代理，默认 https://goproxy.cn,direct
   --gosumdb <value>    Go sumdb，默认 sum.golang.google.cn
   --goprivate <value>  Go 私有模块域名（可选）
+  --hot-base-url <url> Desktop 热更新资源基准地址（如 https://fudai.shuai.help/desktop/3.0.0/）
+  --desktop-version <v> 指定 Desktop 资源版本号（默认读取 package.json version）
+  --skip-desktop-hot   跳过打包 Desktop 热更新资源
   -h, --help           显示帮助
 
 环境变量:
@@ -92,6 +98,18 @@ while [[ $# -gt 0 ]]; do
       GOPRIVATE="$2"
       shift 2
       ;;
+    --hot-base-url)
+      HOT_BASE_URL="$2"
+      shift 2
+      ;;
+    --desktop-version)
+      DESKTOP_VERSION="$2"
+      shift 2
+      ;;
+    --skip-desktop-hot)
+      ENABLE_DESKTOP_HOT=0
+      shift
+      ;;
     -h|--help)
       print_help
       exit 0
@@ -104,9 +122,70 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+resolve_desktop_version() {
+  node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(String(p.version||"").trim())' "${ROOT_DIR}/package.json"
+}
+
+resolve_hot_base_url() {
+  node -e 'const fs=require("fs");const cfg=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const ver=String(process.argv[2]||"").trim();const base=String(cfg?.desktop?.poolServerUrl||"").trim().replace(/\/+$/,"");if(!base||!ver){process.exit(1)}process.stdout.write(`${base}/desktop/${ver}/`)' "${ROOT_DIR}/config.json" "${DESKTOP_VERSION}"
+}
+
+prepare_desktop_hot_assets() {
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "未找到 npm，无法构建 Desktop 热更新资源。可使用 --skip-desktop-hot 跳过。"
+    exit 1
+  fi
+
+  if [[ -z "${DESKTOP_VERSION}" ]]; then
+    DESKTOP_VERSION="$(resolve_desktop_version)"
+  fi
+  if [[ -z "${DESKTOP_VERSION}" ]]; then
+    echo "无法解析 Desktop 版本号（package.json version）"
+    exit 1
+  fi
+
+  if [[ -z "${HOT_BASE_URL}" ]]; then
+    HOT_BASE_URL="$(resolve_hot_base_url || true)"
+  fi
+  if [[ -z "${HOT_BASE_URL}" ]]; then
+    echo "无法推导 HOT_BASE_URL，请使用 --hot-base-url 显式指定。"
+    exit 1
+  fi
+
+  local dist_dir="${ROOT_DIR}/apps/desktop/dist"
+  local static_root="${CONTEXT_DIR}/static/desktop"
+  local static_version_dir="${static_root}/${DESKTOP_VERSION}"
+
+  echo ">>> 构建 Desktop 前端资源"
+  echo ">>> Desktop 版本: ${DESKTOP_VERSION}"
+  echo ">>> Hot Base URL: ${HOT_BASE_URL}"
+  (
+    cd "${ROOT_DIR}"
+    npm run desktop:build
+    npm run desktop:hot:manifest -- --base-url "${HOT_BASE_URL}" --version "${DESKTOP_VERSION}" --min-app-version "${DESKTOP_VERSION}"
+  )
+
+  if [[ ! -f "${dist_dir}/hot-manifest.json" ]]; then
+    echo "未找到热更新清单: ${dist_dir}/hot-manifest.json"
+    exit 1
+  fi
+
+  rm -rf "${static_root}"
+  mkdir -p "${static_version_dir}"
+  cp -R "${dist_dir}/." "${static_version_dir}/"
+  cp "${dist_dir}/hot-manifest.json" "${static_root}/hot-manifest.json"
+  echo ">>> 已写入镜像上下文资源: ${static_root}"
+}
+
 if [[ ! -f "${DOCKERFILE_PATH}" ]]; then
   echo "未找到 Dockerfile: ${DOCKERFILE_PATH}"
   exit 1
+fi
+
+if [[ "${ENABLE_DESKTOP_HOT}" == "1" ]]; then
+  prepare_desktop_hot_assets
+else
+  echo ">>> 已跳过 Desktop 热更新资源打包 (--skip-desktop-hot)"
 fi
 
 IMAGE_REF="${IMAGE_NAME}:${IMAGE_TAG}"
@@ -120,6 +199,7 @@ echo ">>> 镜像: ${IMAGE_REF}"
 echo ">>> 上下文: ${CONTEXT_DIR}"
 echo ">>> GOPROXY: ${GOPROXY}"
 echo ">>> GOSUMDB: ${GOSUMDB}"
+echo ">>> Desktop hot assets: ${ENABLE_DESKTOP_HOT}"
 
 if [[ "${USE_BUILDX}" == "1" || "${PUSH_IMAGE}" == "1" ]]; then
   if ! docker buildx version >/dev/null 2>&1; then

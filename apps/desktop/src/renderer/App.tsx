@@ -11,6 +11,7 @@ import {
   FIXED_POOL_SERVER_URL,
   activateLicense,
   fetchLicenseStatus,
+  normalizePoolServerUrl,
   resolveLicenseFingerprint,
   resolvePoolClientId,
   startLicenseTrial
@@ -216,7 +217,9 @@ export default function App() {
   })
 
   const poolClientId = useMemo(() => resolvePoolClientId(), [])
-  const activePoolServerUrl = FIXED_POOL_SERVER_URL
+  const activePoolServerUrl = useMemo(() => {
+    return normalizePoolServerUrl(settings.poolServerUrl) || FIXED_POOL_SERVER_URL
+  }, [settings.poolServerUrl])
   const poolFingerprint = useMemo(() => resolveLicenseFingerprint(), [])
 
   const selectedAccount = accounts.find((item) => item.id === selectedAccountId) || accounts[0] || null
@@ -322,7 +325,7 @@ export default function App() {
   })
 
   const refreshLicense = useEffectEvent(async () => {
-    const baseUrl = FIXED_POOL_SERVER_URL
+    const baseUrl = activePoolServerUrl
     const requestStatus = async (timeoutMs: number) => (await fetchLicenseStatus(baseUrl, {
       clientId: poolClientId,
       fingerprint: poolFingerprint,
@@ -366,7 +369,7 @@ export default function App() {
   })
 
   const refreshDispatch = useEffectEvent(async () => {
-    manager.setPoolServerConfig({ url: FIXED_POOL_SERVER_URL }, { silent: true })
+    manager.setPoolServerConfig({ url: activePoolServerUrl }, { silent: true })
     const result = (await manager.fetchPoolTaskDebugSnapshot(buildLegacyConfig(settings), { limit: 50 })) as ServiceResult<{
       summary?: AnyRecord
     }>
@@ -406,11 +409,12 @@ export default function App() {
   const bootstrapDesktop = useEffectEvent(async () => {
     try {
       const snapshot = await window.electronAPI.desktop.getBootstrap()
+      const snapshotPoolServerUrl = normalizePoolServerUrl(snapshot?.settings?.poolServerUrl) || FIXED_POOL_SERVER_URL
       setBootstrap(snapshot)
       setSettings({
         ...defaultSettings,
         ...(snapshot.settings || {}),
-        poolServerUrl: FIXED_POOL_SERVER_URL
+        poolServerUrl: snapshotPoolServerUrl
       })
       setUpdateState(snapshot.update || emptyUpdate)
       setHistoryRecords(Array.isArray(snapshot.historyRecords) ? snapshot.historyRecords : [])
@@ -473,7 +477,7 @@ export default function App() {
         scanRole: runtime.scanRole || 'worker'
       })
       manager.setScanConfig(settings.scanConfig)
-      manager.setPoolServerConfig({ url: FIXED_POOL_SERVER_URL }, { silent: true })
+      manager.setPoolServerConfig({ url: activePoolServerUrl }, { silent: true })
       manager.startAccount(runtime, buildLegacyConfig(settings), {
         onStatusUpdate: (update: AnyRecord) => {
           patchAccount(accountId, {
@@ -685,11 +689,11 @@ export default function App() {
   const persistSettings = useEffectEvent(async (nextSettings: DesktopSettings) => {
     const normalizedSettings: DesktopSettings = {
       ...nextSettings,
-      poolServerUrl: FIXED_POOL_SERVER_URL
+      poolServerUrl: normalizePoolServerUrl(nextSettings.poolServerUrl) || FIXED_POOL_SERVER_URL
     }
     setSettings(normalizedSettings)
     manager.setScanConfig(normalizedSettings.scanConfig)
-    manager.setPoolServerConfig({ url: FIXED_POOL_SERVER_URL }, { silent: true })
+    manager.setPoolServerConfig({ url: normalizedSettings.poolServerUrl }, { silent: true })
     try {
       await window.electronAPI.desktop.saveSettings(normalizedSettings)
     } catch (_) {
@@ -743,6 +747,10 @@ export default function App() {
       loginTimersRef.current.clear()
     }
   }, [])
+
+  useEffect(() => {
+    manager.setPoolServerConfig({ url: activePoolServerUrl }, { silent: true })
+  }, [activePoolServerUrl, manager])
 
   useEffect(() => {
     void refreshLicense()

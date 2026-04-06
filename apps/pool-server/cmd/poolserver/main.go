@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -182,6 +183,25 @@ func resolveConfigPath() string {
 		}
 	}
 	return "config.json"
+}
+
+func resolveDesktopStaticDir() (string, bool) {
+	candidates := []string{
+		strings.TrimSpace(os.Getenv("POOL_DESKTOP_STATIC_DIR")),
+		"/app/static/desktop",
+		"static/desktop",
+		filepath.Join("cmd", "poolserver", "web", "desktop"),
+	}
+	for _, c := range candidates {
+		dir := strings.TrimSpace(c)
+		if dir == "" {
+			continue
+		}
+		if st, err := os.Stat(dir); err == nil && st.IsDir() {
+			return dir, true
+		}
+	}
+	return "", false
 }
 
 // writeJSON 方法：写入JSON数据。
@@ -790,6 +810,32 @@ func main() {
 			"profileVersion": profileVersion,
 		})
 	})
+
+	if desktopStaticDir, ok := resolveDesktopStaticDir(); ok {
+		desktopFS := http.FileServer(http.Dir(desktopStaticDir))
+		mux.HandleFunc("/desktop", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodOptions {
+				writeJSON(w, http.StatusNoContent, map[string]any{})
+				return
+			}
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+				return
+			}
+			http.Redirect(w, r, "/desktop/", http.StatusMovedPermanently)
+		})
+		mux.Handle("/desktop/", http.StripPrefix("/desktop/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(strings.TrimSpace(r.URL.Path), "hot-manifest.json") {
+				w.Header().Set("Cache-Control", "no-store")
+			} else {
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			}
+			desktopFS.ServeHTTP(w, r)
+		})))
+		log.Printf("[pool-server-go] desktop-static=enabled dir=%s", desktopStaticDir)
+	} else {
+		log.Printf("[pool-server-go] desktop-static=disabled (set POOL_DESKTOP_STATIC_DIR or package static files)")
+	}
 
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions {
@@ -1664,8 +1710,16 @@ func main() {
 		}
 
 		var req struct {
-			SourceID   string           `json:"sourceId"`
-			Candidates []map[string]any `json:"candidates"`
+			SourceID    string           `json:"sourceId"`
+			Candidates  []map[string]any `json:"candidates"`
+			Filters     map[string]any   `json:"filters"`
+			TopLimit    int              `json:"topLimit"`
+			ClaimTask   bool             `json:"claimTask"`
+			ClientID    string           `json:"clientId"`
+			AccountID   string           `json:"accountId"`
+			LeaseSec    int64            `json:"leaseSec"`
+			PreferKeys  []string         `json:"preferKeys"`
+			ExcludeKeys []string         `json:"excludeKeys"`
 		}
 		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
 			writeBodyErr(w, err)
@@ -1679,8 +1733,56 @@ func main() {
 		res := svc.UpsertBatch(req.SourceID, req.Candidates)
 		svc.RefreshTop(false)
 		baseProfile, _ := svc.Profile()
-		debugSnapshot, _ := svc.TaskDebug(baseProfile, pool.ClaimOwner{}, 1)
+		effectiveProfile := pool.ApplyProfilePatch(baseProfile, req.Filters)
+		owner := pool.ClaimOwner{
+			ClientID:  strings.TrimSpace(req.ClientID),
+			AccountID: strings.TrimSpace(req.AccountID),
+		}
+		if owner.ClientID == "" {
+			owner.ClientID = strings.TrimSpace(r.Header.Get("x-pool-client-id"))
+		}
+		if owner.AccountID == "" {
+			owner.AccountID = strings.TrimSpace(req.SourceID)
+		}
+		topLimit := req.TopLimit
+		if topLimit <= 0 {
+			topLimit = 5
+		}
+		if topLimit > 20 {
+			topLimit = 20
+		}
+
+		eligibleItems, eligibleMeta, _ := svc.TopAvailable(topLimit, effectiveProfile, owner, true)
+		debugSnapshot, _ := svc.TaskDebug(effectiveProfile, owner, 1)
 		summary := debugSnapshot.Summary
+		claimPayload := map[string]any{
+			"claimed": false,
+			"reason":  "",
+		}
+		if req.ClaimTask && owner.ClientID != "" && owner.AccountID != "" {
+			claimResult, err := svc.ClaimTask(pool.ClaimOptions{
+				Owner:       owner,
+				LeaseSec:    req.LeaseSec,
+				Profile:     effectiveProfile,
+				PreferKeys:  req.PreferKeys,
+				ExcludeKeys: req.ExcludeKeys,
+			})
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+			claimPayload = map[string]any{
+				"claimed":        claimResult.Claimed,
+				"reason":         claimResult.Reason,
+				"item":           claimResult.Item,
+				"lease":          claimResult.Lease,
+				"profileVersion": claimResult.ProfileVersion,
+				"generatedAt":    claimResult.GeneratedAtMS,
+			}
+			eligibleItems, eligibleMeta, _ = svc.TopAvailable(topLimit, effectiveProfile, owner, true)
+			debugSnapshot, _ = svc.TaskDebug(effectiveProfile, owner, 1)
+			summary = debugSnapshot.Summary
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":                  true,
 			"generatedAt":         summary.GeneratedAtMS,
@@ -1695,6 +1797,10 @@ func main() {
 			"validCandidates":     summary.ValidCandidates,
 			"availableCandidates": summary.AvailableCandidates,
 			"profileVersion":      res.ProfileVersion,
+			"appliedFilters":      effectiveProfile,
+			"eligibleItems":       eligibleItems,
+			"eligibleMeta":        eligibleMeta,
+			"claim":               claimPayload,
 		})
 	})
 

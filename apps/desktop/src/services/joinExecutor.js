@@ -491,16 +491,21 @@ export async function ensureCloseLiveStreamRendering(manager, accountId) {
  * @returns {Promise<{success:boolean, confirmed?:boolean, error?:string, code?:string}>}
  */
 export async function joinLotteryByUI(manager, accountId, remainingTime = 30, options = {}) {
+  const currentLotteryId = String(options?.lotteryInfo?.lottery_id || options?.lotteryInfo?.lotteryId || '')
+
   let waitEntryResult = await waitForVisibleSelector(manager, accountId, '.dVxrjT_h', 20000)
   if (waitEntryResult?.code === 'EXECUTE_CONTEXT_LOST') {
     await manager.sleep(1200)
     waitEntryResult = await waitForVisibleSelector(manager, accountId, '.dVxrjT_h', 20000)
   }
   if (!waitEntryResult?.success) {
-    return {
-      success: false,
-      error: waitEntryResult?.error || '福袋元素未找到',
-      code: waitEntryResult?.code || 'LOTTERY_ENTRY_NOT_FOUND'
+    const fallbackEntry = await clickLotteryEntryFallback(manager, accountId, 12000)
+    if (!fallbackEntry?.success) {
+      return {
+        success: false,
+        error: waitEntryResult?.error || fallbackEntry?.error || '福袋元素未找到',
+        code: waitEntryResult?.code || fallbackEntry?.code || 'LOTTERY_ENTRY_NOT_FOUND'
+      }
     }
   }
 
@@ -510,10 +515,13 @@ export async function joinLotteryByUI(manager, accountId, remainingTime = 30, op
     clickEntryResult = await clickVisibleSelector(manager, accountId, '.dVxrjT_h', 20000)
   }
   if (!clickEntryResult?.success) {
-    return {
-      success: false,
-      error: clickEntryResult?.error || '等待福袋出现失败',
-      code: clickEntryResult?.code || 'LOTTERY_ENTRY_CLICK_FAILED'
+    const fallbackEntry = await clickLotteryEntryFallback(manager, accountId, 12000)
+    if (!fallbackEntry?.success) {
+      return {
+        success: false,
+        error: clickEntryResult?.error || fallbackEntry?.error || '等待福袋出现失败',
+        code: clickEntryResult?.code || fallbackEntry?.code || 'LOTTERY_ENTRY_CLICK_FAILED'
+      }
     }
   }
 
@@ -537,10 +545,13 @@ export async function joinLotteryByUI(manager, accountId, remainingTime = 30, op
     clickJoinResult = await clickVisibleSelector(manager, accountId, '#lottery_close_cotainer div[role="button"]', 10000)
   }
   if (!clickJoinResult?.success) {
-    return {
-      success: false,
-      error: clickJoinResult?.error || '点击参与福袋失败',
-      code: clickJoinResult?.code || 'JOIN_BUTTON_NOT_FOUND'
+    const fallbackJoin = await clickLotteryJoinFallback(manager, accountId, 10000)
+    if (!fallbackJoin?.success) {
+      return {
+        success: false,
+        error: clickJoinResult?.error || fallbackJoin?.error || '点击参与福袋失败',
+        code: clickJoinResult?.code || fallbackJoin?.code || 'JOIN_BUTTON_NOT_FOUND'
+      }
     }
   }
 
@@ -548,23 +559,29 @@ export async function joinLotteryByUI(manager, accountId, remainingTime = 30, op
     await joinRedPacketByUI(manager, accountId)
   }
 
-  let confirmResult = await clickVisibleSelector(manager, accountId, '.dVxrjT_h', 5000)
-  if (confirmResult?.code === 'EXECUTE_CONTEXT_LOST') {
-    await manager.sleep(1200)
-    confirmResult = await clickVisibleSelector(manager, accountId, '.dVxrjT_h', 5000)
-  }
-  if (!confirmResult?.success) {
-    return {
-      success: false,
-      error: confirmResult?.error || '检查确认参与福袋失败',
-      code: confirmResult?.code || 'JOIN_CONFIRM_FAILED'
+  let confirmJoined = false
+  let lastSample = ''
+  for (let i = 0; i < 3; i++) {
+    if (i > 0) {
+      await manager.sleep(650)
     }
+    let joinedState = await readLotteryJoinedState(manager, accountId, 4200)
+    if (joinedState?.code === 'EXECUTE_CONTEXT_LOST') {
+      await manager.sleep(900)
+      joinedState = await readLotteryJoinedState(manager, accountId, 4200)
+    }
+    if (joinedState?.success && joinedState?.joined) {
+      confirmJoined = true
+      break
+    }
+    lastSample = String(joinedState?.sample || '')
   }
 
   return {
     success: true,
-    confirmed: false,
-    lotteryId: String(secondInspect?.snapshot?.lottery_id || secondInspect?.snapshot?.lotteryId || options?.lotteryInfo?.lottery_id || '')
+    confirmed: confirmJoined,
+    lotteryId: String(secondInspect?.snapshot?.lottery_id || secondInspect?.snapshot?.lotteryId || currentLotteryId),
+    sample: lastSample
   }
 }
 

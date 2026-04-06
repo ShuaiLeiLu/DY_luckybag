@@ -57,6 +57,18 @@ export function useTimelineLogs() {
     startTransition(() => {
       setLogs((current) => [...current.slice(-359), entry])
     })
+    const level = type === 'warning'
+      ? 'warning'
+      : type === 'error'
+        ? 'error'
+        : type === 'success'
+          ? 'success'
+          : 'info'
+    window.electronAPI?.desktop?.appendEvent?.({
+      scope: 'timeline',
+      level,
+      message: String(message || '')
+    }).catch(() => {})
   })
 
   return {

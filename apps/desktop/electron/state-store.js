@@ -3,12 +3,17 @@ const path = require('path')
 const { DatabaseSync } = require('node:sqlite')
 
 const PROJECT_CONFIG_PATH = path.resolve(__dirname, '..', '..', '..', 'config.json')
+const LEGACY_FIXED_POOL_SERVER_URL = 'http://127.0.0.1:9090'
 const JOIN_RECORDS_FILE_NAME = 'lottery-join-records.jsonl'
 const WIN_RECORDS_FILE_NAME = 'lottery-win-records.jsonl'
 const ACCOUNT_LOGS_DIR_NAME = 'account-logs'
+const TIMELINE_LOGS_FILE_NAME = 'timeline-runtime.txt'
 const BUILTIN_DEFAULT_SETTINGS = Object.freeze({
   poolServerUrl: 'http://127.0.0.1:9090',
   updateFeedUrl: 'https://updates.example.com/dy-fudai/windows',
+  hotUpdateEnabled: false,
+  hotUpdateManifestUrl: '',
+  hotUpdateReloadOnApply: false,
   noticeMarkdown: '',
   stayDuration: 18,
   enableRedPacket: true,
@@ -105,6 +110,10 @@ function mergeSettings(base, patch = {}) {
   }
 }
 
+function normalizeServerUrl(raw) {
+  return String(raw || '').trim().replace(/\/+$/, '')
+}
+
 function loadDesktopConfigDefaults() {
   try {
     if (!fs.existsSync(PROJECT_CONFIG_PATH)) return {}
@@ -119,7 +128,17 @@ function loadDesktopConfigDefaults() {
 const DEFAULT_SETTINGS = Object.freeze(mergeSettings(BUILTIN_DEFAULT_SETTINGS, loadDesktopConfigDefaults()))
 
 function normalizeSettings(raw = {}) {
-  return mergeSettings(DEFAULT_SETTINGS, raw)
+  const merged = mergeSettings(DEFAULT_SETTINGS, raw)
+  const mergedPoolServerUrl = normalizeServerUrl(merged.poolServerUrl)
+  const defaultPoolServerUrl = normalizeServerUrl(DEFAULT_SETTINGS.poolServerUrl)
+  const legacyPoolServerUrl = normalizeServerUrl(LEGACY_FIXED_POOL_SERVER_URL)
+
+  // 兼容旧版本历史：曾强制写死本地地址，升级后优先恢复 config.json 中的默认地址。
+  if (mergedPoolServerUrl === legacyPoolServerUrl && defaultPoolServerUrl && defaultPoolServerUrl !== legacyPoolServerUrl) {
+    merged.poolServerUrl = DEFAULT_SETTINGS.poolServerUrl
+  }
+
+  return merged
 }
 
 function normalizeHistoryRecord(record = {}) {
@@ -167,6 +186,20 @@ function appendJsonLine(filePath, payload) {
   fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, 'utf8')
 }
 
+function appendTextLine(filePath, line) {
+  fs.appendFileSync(filePath, `${String(line || '').replace(/\r?\n+/g, ' ').trim()}\n`, 'utf8')
+}
+
+function buildTextLogLine({ createdAt = Date.now(), level = 'info', scope = 'desktop', accountId = '', message = '' } = {}) {
+  const dateParts = formatLocalDateParts(createdAt)
+  const levelText = String(level || 'info').toUpperCase()
+  const scopeText = String(scope || 'desktop').trim() || 'desktop'
+  const accountText = String(accountId || '').trim()
+  const body = String(message || '').replace(/\r?\n+/g, ' ').trim()
+  const accountSeg = accountText ? ` [${accountText}]` : ''
+  return `[${dateParts.ts}] [${levelText}] [${scopeText}]${accountSeg} ${body}`.trim()
+}
+
 function purgeJsonlByAccount(filePath, accountId) {
   const targetId = String(accountId || '').trim()
   if (!targetId) return { removed: 0, kept: 0 }
@@ -198,6 +231,7 @@ function createStateStore(baseDir) {
   const dbPath = path.join(stateDir, 'desktop.sqlite')
   const joinRecordsPath = path.join(stateDir, JOIN_RECORDS_FILE_NAME)
   const winRecordsPath = path.join(stateDir, WIN_RECORDS_FILE_NAME)
+  const timelineLogsPath = path.join(stateDir, TIMELINE_LOGS_FILE_NAME)
   const db = new DatabaseSync(dbPath)
 
   db.exec(`
@@ -262,12 +296,22 @@ function createStateStore(baseDir) {
   }
 
   function appendEvent(event = {}) {
+    const createdAt = Math.max(0, toSafeNumber(event.createdAt, Date.now()))
+    const scope = String(event.scope || 'desktop').trim() || 'desktop'
+    const level = normalizeEventLevel(event.level)
+    const message = String(event.message || '').replace(/\r?\n+/g, ' ').trim()
+    if (message) {
+      appendTextLine(
+        timelineLogsPath,
+        buildTextLogLine({ createdAt, scope, level, message })
+      )
+    }
     return {
       id: Date.now(),
-      scope: String(event.scope || 'desktop'),
-      level: String(event.level || 'info'),
-      message: String(event.message || ''),
-      createdAt: Date.now()
+      scope,
+      level,
+      message,
+      createdAt
     }
   }
 
@@ -308,15 +352,11 @@ function createStateStore(baseDir) {
     const dateParts = formatLocalDateParts(createdAt)
     const fileDir = path.join(accountLogsDir, sanitizeFileSegment(accountId))
     ensureDir(fileDir)
-    const filePath = path.join(fileDir, `${dateParts.day}.log`)
-    appendJsonLine(filePath, {
-      ts: dateParts.ts,
-      createdAt,
-      accountId,
-      scope,
-      level,
-      message
-    })
+    const filePath = path.join(fileDir, `${dateParts.day}.txt`)
+    appendTextLine(
+      filePath,
+      buildTextLogLine({ createdAt, accountId, scope, level, message })
+    )
     return {
       success: true,
       accountId,

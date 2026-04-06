@@ -34,6 +34,8 @@ const INVOKE_CHANNELS = new Set([
   'desktop:check-for-updates',
   'desktop:download-update',
   'desktop:install-update',
+  'desktop:get-hot-update-state',
+  'desktop:check-hot-update',
   'desktop:append-event',
   'desktop:append-account-log',
   'desktop:append-history-record',
@@ -43,7 +45,8 @@ const INVOKE_CHANNELS = new Set([
 const EVENT_CHANNELS = new Set([
   'browser-closed',
   'douyin-response',
-  'desktop:update-state'
+  'desktop:update-state',
+  'desktop:hot-update-state'
 ])
 
 function buildMachineFingerprint() {
@@ -116,6 +119,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     installUpdate() {
       return invoke('desktop:install-update')
     },
+    getHotUpdateState() {
+      return invoke('desktop:get-hot-update-state')
+    },
+    checkHotUpdate() {
+      return invoke('desktop:check-hot-update')
+    },
     appendEvent(event) {
       return invoke('desktop:append-event', event)
     },
@@ -130,6 +139,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     onUpdateState(handler) {
       return on('desktop:update-state', handler)
+    },
+    onHotUpdateState(handler) {
+      return on('desktop:hot-update-state', handler)
     }
   }
 })
