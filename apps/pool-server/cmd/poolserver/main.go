@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"database/sql"
 	_ "embed"
@@ -381,7 +382,7 @@ func parseBody(r *http.Request, limit int64, dst any) error {
 	if int64(len(body)) > limit {
 		return io.ErrShortBuffer
 	}
-	dec := json.NewDecoder(strings.NewReader(string(body)))
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	return dec.Decode(dst)
 }
@@ -1140,6 +1141,39 @@ func main() {
 		_, _ = w.Write(imageBytes)
 	})
 
+	mux.HandleFunc("/license/bind-session/scan-code", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+
+		bindRef := firstNonEmpty(
+			strings.TrimSpace(r.URL.Query().Get("sceneCode")),
+			strings.TrimSpace(r.URL.Query().Get("scene")),
+			strings.TrimSpace(r.URL.Query().Get("bindToken")),
+		)
+		imageBytes, contentType, err := licenseSvc.GetMiniAppScanCodeImage(r.Context(), bindRef)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "content-type")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(imageBytes)
+	})
+
 	mux.HandleFunc("/license/bind-session/scan", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions {
 			writeJSON(w, http.StatusNoContent, map[string]any{})
@@ -1732,6 +1766,30 @@ func main() {
 
 		res := svc.UpsertBatch(req.SourceID, req.Candidates)
 		svc.RefreshTop(false)
+		if !req.ClaimTask {
+			nowMS := time.Now().UnixMilli()
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":                  true,
+				"generatedAt":         nowMS,
+				"received":            res.Received,
+				"accepted":            res.Accepted,
+				"inserted":            res.Inserted,
+				"updated":             res.Updated,
+				"ignoredExpired":      res.IgnoredExpired,
+				"ignoredOlder":        res.IgnoredOlder,
+				"invalid":             res.Invalid,
+				"activeCandidates":    res.ActiveCandidates,
+				"validCandidates":     res.ActiveCandidates,
+				"availableCandidates": 0,
+				"profileVersion":      res.ProfileVersion,
+				"claim": map[string]any{
+					"claimed": false,
+					"reason":  "not_requested",
+				},
+			})
+			return
+		}
+
 		baseProfile, _ := svc.Profile()
 		effectiveProfile := pool.ApplyProfilePatch(baseProfile, req.Filters)
 		owner := pool.ClaimOwner{
@@ -1751,10 +1809,6 @@ func main() {
 		if topLimit > 20 {
 			topLimit = 20
 		}
-
-		eligibleItems, eligibleMeta, _ := svc.TopAvailable(topLimit, effectiveProfile, owner, true)
-		debugSnapshot, _ := svc.TaskDebug(effectiveProfile, owner, 1)
-		summary := debugSnapshot.Summary
 		claimPayload := map[string]any{
 			"claimed": false,
 			"reason":  "",
@@ -1779,10 +1833,10 @@ func main() {
 				"profileVersion": claimResult.ProfileVersion,
 				"generatedAt":    claimResult.GeneratedAtMS,
 			}
-			eligibleItems, eligibleMeta, _ = svc.TopAvailable(topLimit, effectiveProfile, owner, true)
-			debugSnapshot, _ = svc.TaskDebug(effectiveProfile, owner, 1)
-			summary = debugSnapshot.Summary
 		}
+		eligibleItems, eligibleMeta, _ := svc.TopAvailable(topLimit, effectiveProfile, owner, true)
+		debugSnapshot, _ := svc.TaskDebug(effectiveProfile, owner, 1)
+		summary := debugSnapshot.Summary
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":                  true,
 			"generatedAt":         summary.GeneratedAtMS,

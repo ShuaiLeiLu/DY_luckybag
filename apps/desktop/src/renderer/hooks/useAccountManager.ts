@@ -279,7 +279,7 @@ export function useAccountManager(options: UseAccountManagerOptions) {
 
   const stopAccount = async (accountId: string) => {
     try {
-      manager.stopAccount(accountId)
+      await manager.stopAccount(accountId)
       await window.electronAPI.desktop.setAccountMonitoring(accountId, false)
       patchAccount(accountId, {
         state: 'paused',
@@ -437,8 +437,11 @@ export function useAccountManager(options: UseAccountManagerOptions) {
   useEffect(() => {
     const offBrowserClosed = window.electronAPI.on('browser-closed', ({ accountId }: { accountId: string }) => {
       stopLoginPolling(accountId)
-      patchAccount(accountId, { state: 'paused', actionActive: false })
-      addLog(`账号 ${accountId} 的浏览器窗口已关闭`, 'warning')
+      void (async () => {
+        await stopAccount(accountId).catch(() => {})
+        patchAccount(accountId, { state: 'paused', actionActive: false })
+        addLog(`账号 ${accountId} 的浏览器窗口已关闭，已停止该账号所有活动`, 'warning')
+      })()
     })
     const offDouyinResponse = window.electronAPI.on('douyin-response', ({ accountId, type, data }: AnyRecord) => {
       if (type === 'lottery') {

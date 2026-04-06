@@ -102,6 +102,11 @@ const SCAN_POOL_REFILL_RESERVE_THRESHOLD = 8
 const SCAN_POOL_REFILL_STRONG_THRESHOLD = 3
 const POOL_TASK_LEASE_SEC = 35
 const POOL_TASK_RENEW_SEC = 12
+const POOL_UPSERT_TIMEOUT_MS = 12000
+const POOL_UPSERT_CLAIM_TIMEOUT_MS = 15000
+const POOL_UPSERT_BATCH_SIZE = 120
+const POOL_CONDITION_MAX_COUNT = 8
+const POOL_TEXT_MAX_LEN = 96
 const WAIT_CHAT_FIRST_MIN_MS = 8000
 const WAIT_CHAT_FIRST_MAX_MS = 20000
 const WAIT_CHAT_MIN_INTERVAL_MS = 18000
@@ -1189,31 +1194,100 @@ class LotteryManager {
   /**
    * toPoolCandidate 方法：将输入转换为福袋池候选项。
    */
+  sanitizePoolText(value, maxLen = POOL_TEXT_MAX_LEN) {
+    const text = String(value || '').trim()
+    if (!text) return ''
+    return text.slice(0, Math.max(12, Number(maxLen) || POOL_TEXT_MAX_LEN))
+  }
+
+  normalizePoolConditions(conditions = []) {
+    const source = Array.isArray(conditions) ? conditions : []
+    const out = []
+    for (const item of source) {
+      if (!item || typeof item !== 'object') continue
+      const type = Number(item.type || 0)
+      const desc = this.sanitizePoolText(
+        item.desc || item.description || item.title || item.text || item.name || item.content || '',
+        POOL_TEXT_MAX_LEN
+      )
+      const content = this.sanitizePoolText(item.content || '', POOL_TEXT_MAX_LEN)
+      const normalized = {}
+      if (Number.isFinite(type) && type > 0) normalized.type = Math.floor(type)
+      if (desc) normalized.desc = desc
+      if (content && content !== desc) normalized.content = content
+      if (Object.keys(normalized).length === 0) continue
+      out.push(normalized)
+      if (out.length >= POOL_CONDITION_MAX_COUNT) break
+    }
+    return out
+  }
+
+  pickPoolPrizeInfo(prizeInfo = {}) {
+    if (!prizeInfo || typeof prizeInfo !== 'object' || Array.isArray(prizeInfo)) return {}
+    const source = prizeInfo
+    const out = {}
+    const textKeys = ['name', 'type', 'prize_type']
+    const numberKeys = [
+      'total_amount',
+      'totalAmount',
+      'total_diamond_count',
+      'total_coin_count',
+      'diamond_count_total',
+      'diamond_count',
+      'coin_count',
+      'amount',
+      'value'
+    ]
+    textKeys.forEach((key) => {
+      const text = this.sanitizePoolText(source[key], POOL_TEXT_MAX_LEN)
+      if (text) out[key] = text
+    })
+    numberKeys.forEach((key) => {
+      const n = Number(source[key])
+      if (!Number.isFinite(n)) return
+      if (n === 0) return
+      out[key] = n
+    })
+    return out
+  }
+
+  splitPoolCandidates(candidates = [], batchSize = POOL_UPSERT_BATCH_SIZE) {
+    const list = Array.isArray(candidates) ? candidates : []
+    const safeBatch = Math.max(20, Math.min(300, Number(batchSize) || POOL_UPSERT_BATCH_SIZE))
+    if (list.length <= safeBatch) return [list]
+    const chunks = []
+    for (let i = 0; i < list.length; i += safeBatch) {
+      chunks.push(list.slice(i, i + safeBatch))
+    }
+    return chunks
+  }
+
   toPoolCandidate(lottery, sourceId = '') {
     if (!lottery) return null
     const endTime = Number(lottery.end_time || 0)
     const lotteryId = String(lottery.lottery_id || lottery.lotteryId || '')
     const roomId = String(lottery.roomId || '')
     if (!roomId || !lotteryId || !endTime) return null
+    const prizeInfo = this.pickPoolPrizeInfo(lottery.prizeInfo || lottery.prize_info || {})
     return {
       roomId,
       webRid: String(lottery.webRid || roomId),
       lotteryId,
-      conditions: Array.isArray(lottery.conditions) ? lottery.conditions : [],
+      conditions: this.normalizePoolConditions(lottery.conditions),
       joinTotal: Number(lottery.joinTotal || 0),
       luckyCount: Number(lottery.winningTotal || 0),
       lotteryTotal: Number(lottery.lotteryTotal || 0),
       onlineTotal: Number(lottery.onlineTotal || 0),
-      lotteryName: lottery.lotteryName || lottery.prize_name || '',
-      prizeInfo: lottery.prizeInfo || lottery.prize_info || {},
+      lotteryName: this.sanitizePoolText(lottery.lotteryName || lottery.prize_name || prizeInfo?.name || '', 80),
+      prizeInfo,
       prizeType: lottery.prizeType,
       total_amount: Number(lottery.total_amount || lottery.totalAmount || 0),
       endTime,
       startTime: Number(lottery.start_time || 0),
       fetchedAt: Number(lottery.fetchedAt || Date.now()),
       sourceId: sourceId || '',
-      authorNickname: lottery.authorNickname || '',
-      roomTitle: lottery.roomTitle || ''
+      authorNickname: this.sanitizePoolText(lottery.authorNickname || '', 48),
+      roomTitle: this.sanitizePoolText(lottery.roomTitle || '', 120)
     }
   }
 
@@ -1291,67 +1365,109 @@ class LotteryManager {
       maxRemainingSec: CLAIM_TARGET_MAX_SEC
     })
     const owner = this.getTaskOwner(accountId)
-    const res = await upsertPoolCandidates(this.poolServerUrl, accountId, candidates, {
-      timeoutMs: 3600,
-      filters,
-      claimTask: options?.claimTask === true,
-      clientId: owner.clientId,
-      accountId: owner.accountId,
-      leaseSec: POOL_TASK_LEASE_SEC,
-      topLimit: Math.max(1, Math.min(20, Number(options?.topLimit || 5))),
-      preferKeys: Array.isArray(options?.preferKeys) ? options.preferKeys : [],
-      excludeKeys: Array.isArray(options?.excludeKeys) ? options.excludeKeys : []
-    })
-    if (!res.ok) {
-      if (this.shouldLogPoolWarn(accountId, 'upsert')) {
-        const statusSuffix = res?.status ? `（HTTP ${res.status}）` : ''
-        accountData?.callbacks?.onLog?.(`⚠️ 服务端候选上报失败${statusSuffix}: ${this.formatPoolErrorMessage(res.error, '上报失败')}`, 'warning')
-      }
-      this.logger.warn(
-        `[${accountId}] pool upsert failed status=${res?.status || 0} error=${res?.error || 'unknown'} candidates=${candidates.length}`
-      )
-      return {
-        ok: false,
-        accepted: 0,
-        total: candidates.length,
-        status: Number(res?.status || 0),
-        error: String(res?.error || 'upsert_failed')
-      }
-    }
+    const claimTaskRequested = options?.claimTask === true
+    const topLimit = Math.max(1, Math.min(20, Number(options?.topLimit || 5)))
+    const preferKeys = Array.isArray(options?.preferKeys) ? options.preferKeys : []
+    const excludeKeys = Array.isArray(options?.excludeKeys) ? options.excludeKeys : []
+    const chunks = this.splitPoolCandidates(candidates, options?.batchSize)
 
-    const eligibleItems = Array.isArray(res?.data?.eligibleItems) ? res.data.eligibleItems : []
-    const eligibleLotteries = eligibleItems
-      .map((item, idx) => this.fromPoolTopItem(item, idx + 1))
-      .filter(Boolean)
-    const claim = (res?.data?.claim && typeof res.data.claim === 'object')
-      ? res.data.claim
-      : null
+    let totalAccepted = 0
+    let totalReceived = 0
+    let totalInserted = 0
+    let totalUpdated = 0
+    let totalInvalid = 0
+    let statusCode = 200
+    let summaryAt = Date.now()
+    let activeCandidates = 0
+    let validCandidates = 0
+    let availableCandidates = 0
+    let claim = null
+    let eligibleLotteries = []
     let claimedTask = null
-    if (claim?.claimed === true && claim?.item && claim?.lease) {
-      const claimedLottery = this.fromPoolTopItem(claim.item, 1)
-      if (claimedLottery) {
-        claimedTask = {
-          lottery: claimedLottery,
-          lease: claim.lease,
-          claimedAt: Number(claim?.lease?.claimedAt || Date.now()),
-          serverScore: Number(claim?.item?.score || claim?.item?.evScore || 0)
+
+    for (let i = 0; i < chunks.length; i += 1) {
+      const chunk = chunks[i]
+      const isClaimBatch = claimTaskRequested && i === 0
+      const res = await upsertPoolCandidates(this.poolServerUrl, accountId, chunk, {
+        timeoutMs: isClaimBatch ? POOL_UPSERT_CLAIM_TIMEOUT_MS : POOL_UPSERT_TIMEOUT_MS,
+        filters,
+        claimTask: isClaimBatch,
+        clientId: owner.clientId,
+        accountId: owner.accountId,
+        leaseSec: POOL_TASK_LEASE_SEC,
+        topLimit,
+        preferKeys: isClaimBatch ? preferKeys : [],
+        excludeKeys: isClaimBatch ? excludeKeys : []
+      })
+      if (!res.ok) {
+        if (this.shouldLogPoolWarn(accountId, 'upsert')) {
+          const statusSuffix = res?.status ? `（HTTP ${res.status}）` : ''
+          accountData?.callbacks?.onLog?.(`⚠️ 服务端候选上报失败${statusSuffix}: ${this.formatPoolErrorMessage(res.error, '上报失败')}`, 'warning')
         }
+        this.logger.warn(
+          `[${accountId}] pool upsert failed batch=${i + 1}/${chunks.length} status=${res?.status || 0} error=${res?.error || 'unknown'} candidates=${chunk.length}`
+        )
+        return {
+          ok: false,
+          accepted: Math.max(0, totalAccepted),
+          total: candidates.length,
+          status: Number(res?.status || 0),
+          error: String(res?.error || 'upsert_failed')
+        }
+      }
+
+      const payload = (res?.data && typeof res.data === 'object') ? res.data : {}
+      statusCode = Number(res?.status || statusCode || 200)
+      const acceptedValue = Number(payload?.accepted)
+      const receivedValue = Number(payload?.received)
+      totalAccepted += Math.max(0, Number.isFinite(acceptedValue) ? acceptedValue : chunk.length)
+      totalReceived += Math.max(0, Number.isFinite(receivedValue) ? receivedValue : chunk.length)
+      totalInserted += Math.max(0, Number(payload?.inserted || 0))
+      totalUpdated += Math.max(0, Number(payload?.updated || 0))
+      totalInvalid += Math.max(0, Number(payload?.invalid || 0))
+      summaryAt = Math.max(summaryAt, Number(payload?.generatedAt || Date.now()))
+      activeCandidates = Math.max(activeCandidates, Number(payload?.activeCandidates || 0))
+      validCandidates = Math.max(validCandidates, Number(payload?.validCandidates || 0))
+      availableCandidates = Math.max(availableCandidates, Number(payload?.availableCandidates || 0))
+
+      const claimPayload = (payload?.claim && typeof payload.claim === 'object') ? payload.claim : null
+      if (!claim && claimPayload) {
+        claim = claimPayload
+      }
+
+      if (claimPayload?.claimed === true && claimPayload?.item && claimPayload?.lease && !claimedTask) {
+        const claimedLottery = this.fromPoolTopItem(claimPayload.item, 1)
+        if (claimedLottery) {
+          claimedTask = {
+            lottery: claimedLottery,
+            lease: claimPayload.lease,
+            claimedAt: Number(claimPayload?.lease?.claimedAt || Date.now()),
+            serverScore: Number(claimPayload?.item?.score || claimPayload?.item?.evScore || 0)
+          }
+        }
+      }
+
+      const eligibleItems = Array.isArray(payload?.eligibleItems) ? payload.eligibleItems : []
+      if (eligibleItems.length > 0) {
+        eligibleLotteries = eligibleItems
+          .map((item, idx) => this.fromPoolTopItem(item, idx + 1))
+          .filter(Boolean)
       }
     }
 
     return {
       ok: true,
-      accepted: Math.max(0, Number(res?.data?.accepted || candidates.length)),
+      accepted: Math.max(0, totalAccepted),
       total: candidates.length,
-      status: Number(res?.status || 200),
-      received: Math.max(0, Number(res?.data?.received || candidates.length)),
-      inserted: Math.max(0, Number(res?.data?.inserted || 0)),
-      updated: Math.max(0, Number(res?.data?.updated || 0)),
-      invalid: Math.max(0, Number(res?.data?.invalid || 0)),
-      activeCandidates: Math.max(0, Number(res?.data?.activeCandidates || 0)),
-      validCandidates: Math.max(0, Number(res?.data?.validCandidates || 0)),
-      availableCandidates: Math.max(0, Number(res?.data?.availableCandidates || 0)),
-      summaryAt: Math.max(0, Number(res?.data?.generatedAt || Date.now())),
+      status: Math.max(200, Number(statusCode || 200)),
+      received: Math.max(0, totalReceived),
+      inserted: Math.max(0, totalInserted),
+      updated: Math.max(0, totalUpdated),
+      invalid: Math.max(0, totalInvalid),
+      activeCandidates: Math.max(0, Number(activeCandidates || 0)),
+      validCandidates: Math.max(0, Number(validCandidates || 0)),
+      availableCandidates: Math.max(0, Number(availableCandidates || 0)),
+      summaryAt: Math.max(0, Number(summaryAt || Date.now())),
       eligibleCount: eligibleLotteries.length,
       eligibleLotteries,
       claimClaimed: claim?.claimed === true,
@@ -2608,18 +2724,12 @@ class LotteryManager {
       try {
         await this.searchLiveRoom(accountId, {
           scanOnly: true,
-          deepScan: false
+          deepScan: false,
+          managedByCycle: true
         })
         singleRoundCompleted = true
       } finally {
-        if (STOP_AFTER_SINGLE_SCAN_ROUND && singleRoundCompleted) {
-          const alreadyDone = this.singleRoundScanDoneByAccount.has(accountId)
-          this.singleRoundScanDoneByAccount.add(accountId)
-          this.clearScanCycleTimer(accountId)
-          const accountData = this.accounts.get(accountId)
-          if (!alreadyDone) {
-            accountData?.callbacks?.onLog?.('✅ 单轮扫描已完成，已停止后续自动扫描')
-          }
+        if (STOP_AFTER_SINGLE_SCAN_ROUND && this.singleRoundScanDoneByAccount.has(accountId)) {
           return
         }
         if (this.accounts.has(accountId) && !this.isPaused(accountId) && this.getNormalScanPlan(accountId)) {
@@ -3187,6 +3297,7 @@ class LotteryManager {
     const deadlineMs = Number(options?.deadlineMs || 0)
     const quickCycle = options?.quickCycle === true
     const forceScanner = options?.forceScanner === true
+    const managedByCycle = options?.managedByCycle === true
     const forcedScanPlan = options?.scanPlan || null
     const claimAfterScan = options?.claimAfterScan !== false
     const executeAfterScan = options?.executeAfterScan !== false
@@ -3403,6 +3514,19 @@ class LotteryManager {
         }
         if (waitingStage && (claimedTask?.lottery || fallbackServerLottery)) {
           accountData.callbacks.onLog('⏳ 当前仍在等待/停留阶段：本轮仅扫描不上车，结束后再领取下一轮目标')
+        }
+
+        const noClaimedTarget = !claimedTask?.lottery && !fallbackServerLottery
+        if (canExecuteAfterScan && noClaimedTarget) {
+          accountData.callbacks.onLog('ℹ️ 本轮未领取到可参与目标，继续下一轮扫描')
+          this.singleRoundScanDoneByAccount.delete(accountId)
+          if (!managedByCycle) {
+            this.scheduleSelectionOrScanRetry(accountId, quickCycle ? 1200 : 2200, {
+              quickCycle: true,
+              trigger: 'no-target-continue'
+            })
+          }
+          return
         }
 
         if (markSingleRoundDone && STOP_AFTER_SINGLE_SCAN_ROUND) {

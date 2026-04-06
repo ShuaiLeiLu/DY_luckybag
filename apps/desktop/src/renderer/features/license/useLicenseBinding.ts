@@ -24,6 +24,7 @@ export type UseLicenseBindingResult = {
   bindBusy: boolean
   bindSession: LicenseBindSession | null
   bindMiniAppCodeUrl: string
+  bindMiniAppScanCodeUrl: string
   createBindSession: () => Promise<void>
   refreshBindSessionStatus: (manual?: boolean) => Promise<void>
 }
@@ -100,6 +101,16 @@ export function useLicenseBinding(options: UseLicenseBindingOptions): UseLicense
       ? `sceneCode=${encodeURIComponent(bindSceneCode)}`
       : `bindToken=${encodeURIComponent(bindToken)}`
     return `${baseUrl}/license/bind-session/miniapp-code?${query}&v=${bindCodeVersion}`
+  }, [normalizedPoolServerUrl, bindSceneCode, bindToken, bindCodeVersion])
+
+  const bindMiniAppScanCodeUrl = useMemo(() => {
+    if (!normalizedPoolServerUrl) return ''
+    if (!bindSceneCode && !bindToken) return ''
+    const baseUrl = normalizedPoolServerUrl.replace(/\/+$/, '')
+    const query = bindSceneCode
+      ? `sceneCode=${encodeURIComponent(bindSceneCode)}`
+      : `bindToken=${encodeURIComponent(bindToken)}`
+    return `${baseUrl}/license/bind-session/scan-code?${query}&v=${bindCodeVersion}`
   }, [normalizedPoolServerUrl, bindSceneCode, bindToken, bindCodeVersion])
 
   const applyBindSession = useCallback(async (nextSession: LicenseBindSession | null) => {
@@ -249,6 +260,7 @@ export function useLicenseBinding(options: UseLicenseBindingOptions): UseLicense
     bindBusy,
     bindSession,
     bindMiniAppCodeUrl,
+    bindMiniAppScanCodeUrl,
     createBindSession,
     refreshBindSessionStatus
   }

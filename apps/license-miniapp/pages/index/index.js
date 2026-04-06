@@ -458,6 +458,12 @@ Page({
           this.setData({ sceneCode: scene })
           this.ensureSession()
         } else {
+          console.warn('[miniapp-scan] invalid scan payload', {
+            scanType: String(res.scanType || ''),
+            path: String(res.path || ''),
+            result: String(res.result || ''),
+            rawData: String(res.rawData || '')
+          })
           wx.showToast({ title: '无效的二维码', icon: 'none' })
         }
       }
@@ -599,7 +605,6 @@ Page({
     return mapping[raw] || raw || '请求失败'
   }
 })
-
 
 
 

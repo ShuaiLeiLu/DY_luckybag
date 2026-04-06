@@ -180,6 +180,7 @@ export default function App() {
   const [selectedAccountId, setSelectedAccountId] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [forceShowMainWhenLocked, setForceShowMainWhenLocked] = useState(false)
+  const [manualShowLicenseGate, setManualShowLicenseGate] = useState(false)
   const [licenseBusy, setLicenseBusy] = useState(false)
   const lastRuntimeLogRef = useRef<Map<string, { key: string; at: number }>>(new Map())
   const {
@@ -717,8 +718,11 @@ export default function App() {
     })
     const offBrowserClosed = window.electronAPI.on('browser-closed', ({ accountId }: { accountId: string }) => {
       stopLoginPolling(accountId)
-      patchAccount(accountId, { state: 'paused', actionActive: false })
-      addLog(`账号 ${accountId} 的浏览器窗口已关闭`, 'warning')
+      void (async () => {
+        await stopAccount(accountId).catch(() => {})
+        patchAccount(accountId, { state: 'paused', actionActive: false })
+        addLog(`账号 ${accountId} 的浏览器窗口已关闭，已停止该账号所有活动`, 'warning')
+      })()
     })
     const offDouyinResponse = window.electronAPI.on('douyin-response', ({ accountId, type, data }: AnyRecord) => {
       if (type === 'lottery') {
@@ -904,6 +908,7 @@ export default function App() {
     bindBusy,
     bindSession,
     bindMiniAppCodeUrl,
+    bindMiniAppScanCodeUrl,
     createBindSession,
     refreshBindSessionStatus
   } = useLicenseBinding({
@@ -916,7 +921,7 @@ export default function App() {
     onLog: addLog
   })
 
-  const showGate = gateLocked && !forceShowMainWhenLocked
+  const showGate = (gateLocked && !forceShowMainWhenLocked) || manualShowLicenseGate
 
   return (
     <div className="h-full w-full overflow-auto p-3 sm:p-4 md:p-5">
@@ -928,12 +933,18 @@ export default function App() {
           bindBusy={bindBusy}
           bindSession={bindSession}
           miniAppCodeUrl={bindMiniAppCodeUrl}
+          miniAppScanCodeUrl={bindMiniAppScanCodeUrl}
           onLicenseKeyChange={setLicenseKey}
           onStartTrial={handleStartTrial}
           onActivate={handleActivate}
           onCreateBindSession={() => void createBindSession()}
           onRefreshBindStatus={() => void refreshBindSessionStatus(true)}
-          onBackToMain={() => setForceShowMainWhenLocked(true)}
+          onBackToMain={() => {
+            setManualShowLicenseGate(false)
+            if (gateLocked) {
+              setForceShowMainWhenLocked(true)
+            }
+          }}
           busy={licenseBusy}
         />
       ) : (
@@ -948,6 +959,15 @@ export default function App() {
                   </button>
                   <button className="w-full rounded-full border border-slate-600/70 px-4 py-2 transition hover:border-slate-400 hover:bg-slate-800/60 sm:w-auto" onClick={() => setSettingsOpen(true)}>
                     设置中心
+                  </button>
+                  <button
+                    className="w-full rounded-full border border-cyan-500/50 bg-cyan-500/10 px-4 py-2 text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-500/20 sm:w-auto"
+                    onClick={() => {
+                      setManualShowLicenseGate(true)
+                      setForceShowMainWhenLocked(false)
+                    }}
+                  >
+                    授权中心
                   </button>
                   {gateLocked ? (
                     <button className="w-full rounded-full border border-cyan-500/50 bg-cyan-500/10 px-4 py-2 text-cyan-100 transition hover:border-cyan-300 hover:bg-cyan-500/20 sm:w-auto" onClick={() => setForceShowMainWhenLocked(false)}>

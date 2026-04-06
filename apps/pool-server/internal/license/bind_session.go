@@ -92,10 +92,10 @@ func (s *Service) CreateBindSession(ctx context.Context, req CreateBindSessionRe
 	}
 
 	currentStatus, err := s.Status(ctx, clientID, fingerprint)
-	if err == nil && currentStatus.Authorized {
+	if err == nil && currentStatus.Unrestricted {
 		return BindSession{
 			Status:       "authorized",
-			Message:      "当前客户端已授权",
+			Message:      "服务端免授权已开启，无需绑定",
 			ClientID:     clientID,
 			Fingerprint:  fingerprint,
 			AppVersion:   strings.TrimSpace(req.AppVersion),
@@ -622,8 +622,10 @@ func (s *Service) buildBindSession(ctx context.Context, row bindSessionRow, now 
 			licenseCopy := licenseStatus
 			session.License = &licenseCopy
 		}
-		if licenseStatus.Authorized {
-			session.Status = "authorized"
+		// 绑定会话状态用于驱动扫码流程（pending/scanned/granted/expired），
+		// 即使当前设备已在试用/授权中，也不应覆盖为 authorized，
+		// 否则前后端都会误判为“无需绑定”，导致无法生成二维码或继续扫码。
+		if session.Status == "authorized" && licenseStatus.Authorized {
 			session.Message = "客户端已获得完整授权"
 		}
 	}

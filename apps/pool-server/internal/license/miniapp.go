@@ -14,6 +14,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	qrcode "github.com/skip2/go-qrcode"
 )
 
 const (
@@ -218,6 +220,36 @@ func (s *Service) GetMiniAppCodeImage(ctx context.Context, bindRef string) ([]by
 		return nil, "", err
 	}
 	return s.fetchMiniAppCodeImage(ctx, accessToken, sceneCode)
+}
+
+// GetMiniAppScanCodeImage 生成普通二维码，供“小程序内扫一扫”解析 sceneCode。
+func (s *Service) GetMiniAppScanCodeImage(ctx context.Context, bindRef string) ([]byte, string, error) {
+	if err := s.ensureMiniAppReady(); err != nil {
+		return nil, "", err
+	}
+	bindToken, err := s.resolveMiniAppBindToken(ctx, bindRef)
+	if err != nil {
+		return nil, "", err
+	}
+	session, err := s.GetBindSession(ctx, bindToken)
+	if err != nil {
+		return nil, "", err
+	}
+	if session.Authorized {
+		return nil, "", fmt.Errorf("bind_session_already_authorized")
+	}
+	if session.Status == "expired" || session.RemainingSec <= 0 {
+		return nil, "", fmt.Errorf("bind_session_expired")
+	}
+	sceneCode := strings.TrimSpace(session.SceneCode)
+	if sceneCode == "" {
+		return nil, "", fmt.Errorf("bind_scene_invalid")
+	}
+	imageBytes, err := qrcode.Encode(sceneCode, qrcode.Medium, 360)
+	if err != nil {
+		return nil, "", fmt.Errorf("miniapp_scan_qrcode_failed")
+	}
+	return imageBytes, "image/png", nil
 }
 
 func (s *Service) ensureMiniAppReady() error {

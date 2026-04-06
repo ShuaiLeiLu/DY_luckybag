@@ -10,6 +10,7 @@ export type LicenseGateProps = {
   bindBusy: boolean
   bindSession: LicenseBindSession | null
   miniAppCodeUrl: string
+  miniAppScanCodeUrl: string
   onLicenseKeyChange: (value: string) => void
   onStartTrial: () => void
   onActivate: () => void
@@ -28,6 +29,7 @@ export function LicenseGate(props: LicenseGateProps) {
   const bindStatus = toBindStatusText(props.bindSession)
   const bindRemaining = getBindRemainingText(props.bindSession)
   const showMiniAppCode = Boolean(props.miniAppCodeUrl)
+  const showMiniAppScanCode = Boolean(props.miniAppScanCodeUrl)
   const miniAppPlaceholder = getMiniAppPlaceholder(props.bindSession, props.bindBusy)
 
   return (
@@ -95,20 +97,41 @@ export function LicenseGate(props: LicenseGateProps) {
 
         <div className="mt-6 rounded-[24px] border border-slate-700/70 bg-slate-950/55 p-4">
           <div className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">小程序绑定</div>
-          <div className="mt-3 rounded-2xl border border-cyan-400/20 bg-gradient-to-b from-slate-900/60 to-slate-950/70 p-3">
-            {showMiniAppCode ? (
-              <div className="mx-auto flex h-44 w-44 items-center justify-center rounded-2xl border border-slate-700/70 bg-white p-2 shadow-[0_10px_28px_rgba(15,23,42,0.35)]">
-                <img
-                  src={props.miniAppCodeUrl}
-                  alt="mini-app-code"
-                  className="h-full w-full rounded-xl object-contain [image-rendering:pixelated] [filter:contrast(1.28)_saturate(0.25)]"
-                />
-              </div>
-            ) : (
-              <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-slate-700 px-4 text-center text-sm text-slate-400">
-                {miniAppPlaceholder}
-              </div>
-            )}
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <div className="rounded-2xl border border-cyan-400/20 bg-gradient-to-b from-slate-900/60 to-slate-950/70 p-3">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-cyan-100/90">微信扫一扫直达</div>
+              {showMiniAppCode ? (
+                <div className="mx-auto flex h-44 w-44 items-center justify-center rounded-2xl border border-slate-700/70 bg-white p-2 shadow-[0_10px_28px_rgba(15,23,42,0.35)]">
+                  <img
+                    src={props.miniAppCodeUrl}
+                    alt="mini-app-launch-code"
+                    className="h-full w-full rounded-xl object-contain [image-rendering:pixelated]"
+                  />
+                </div>
+              ) : (
+                <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-slate-700 px-4 text-center text-sm text-slate-400">
+                  {miniAppPlaceholder}
+                </div>
+              )}
+              <div className="mt-2 text-xs leading-5 text-slate-400">用于微信首页扫一扫，直接跳转到小程序并带入绑定参数。</div>
+            </div>
+            <div className="rounded-2xl border border-emerald-400/20 bg-gradient-to-b from-slate-900/60 to-slate-950/70 p-3">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-emerald-100/90">小程序内扫一扫</div>
+              {showMiniAppScanCode ? (
+                <div className="mx-auto flex h-44 w-44 items-center justify-center rounded-2xl border border-slate-700/70 bg-white p-2 shadow-[0_10px_28px_rgba(15,23,42,0.35)]">
+                  <img
+                    src={props.miniAppScanCodeUrl}
+                    alt="mini-app-scan-code"
+                    className="h-full w-full rounded-xl object-contain [image-rendering:pixelated]"
+                  />
+                </div>
+              ) : (
+                <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-slate-700 px-4 text-center text-sm text-slate-400">
+                  {miniAppPlaceholder}
+                </div>
+              )}
+              <div className="mt-2 text-xs leading-5 text-slate-400">已进入小程序时，点击小程序内扫一扫，扫描此码可直接绑定当前桌面端。</div>
+            </div>
           </div>
           <div className="mt-3 grid gap-2 text-sm text-slate-300 sm:grid-cols-2">
             <DeviceField label="绑定状态" value={bindStatus} />
@@ -120,7 +143,7 @@ export function LicenseGate(props: LicenseGateProps) {
               disabled={props.bindBusy}
               onClick={props.onCreateBindSession}
             >
-              {props.bindBusy ? '生成中...' : '生成小程序码'}
+              {props.bindBusy ? '生成中...' : '刷新双码'}
             </button>
             <button
               className="rounded-2xl border border-slate-600/80 bg-slate-900/80 px-4 py-2.5 text-sm font-semibold text-slate-100 transition hover:bg-slate-800/60 disabled:cursor-not-allowed disabled:opacity-60"

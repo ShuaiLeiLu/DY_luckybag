@@ -37,6 +37,7 @@
 - `POST /miniapp/bind-session/scan`
 - `POST /miniapp/bind-session/grant`
 - `GET /license/bind-session/miniapp-code?sceneCode=...`
+- `GET /license/bind-session/scan-code?sceneCode=...`
 
 ## 后端待改设计
 
