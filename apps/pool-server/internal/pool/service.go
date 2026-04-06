@@ -1102,8 +1102,6 @@ func (s *Service) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 	_, pv := s.Profile()
 	all := s.store.snapshot()
 	profileAll := profile
-	profileAll.MinRemainingSec = 0
-	profileAll.MaxRemainingSec = math.MaxInt64
 	learningSnapshot := s.learningSnapshot()
 	ordered, _ := buildOrderedTaskCandidates(
 		all,
@@ -1154,13 +1152,6 @@ func (s *Service) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 	for _, item := range ordered {
 		if choose(item, true) {
 			break
-		}
-	}
-	if selected == nil {
-		for _, item := range ordered {
-			if choose(item, false) {
-				break
-			}
 		}
 	}
 
@@ -1624,6 +1615,16 @@ func passFilter(c Candidate, p FilterProfile, nowMS int64) (bool, string) {
 
 	if p.MaxOnlineTotal > 0 && c.OnlineTotal > p.MaxOnlineTotal {
 		return false, "online_too_high"
+	}
+
+	windowMin := maxInt64(0, p.MinRemainingSec)
+	windowMax := p.MaxRemainingSec
+	if windowMax <= 0 {
+		windowMax = math.MaxInt64
+	}
+	remainingSec := maxInt64(0, (c.EndTimeMS-nowMS)/1000)
+	if remainingSec < windowMin || remainingSec > windowMax {
+		return false, "remaining_out_of_window"
 	}
 
 	_, predictedProb := predictFinalJoinAndProbability(c, nowMS)

@@ -999,8 +999,6 @@ func (s *RedisService) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 	leaseSec := normalizeLeaseSec(options.LeaseSec)
 	profile := options.Profile
 	profileAll := profile
-	profileAll.MinRemainingSec = 0
-	profileAll.MaxRemainingSec = math.MaxInt64
 	_, pv := s.Profile()
 
 	all, err := s.fetchAllCandidates(ctx)
@@ -1085,13 +1083,6 @@ func (s *RedisService) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 	for _, item := range ordered {
 		if choose(item, true) {
 			break
-		}
-	}
-	if selected == nil {
-		for _, item := range ordered {
-			if choose(item, false) {
-				break
-			}
 		}
 	}
 
