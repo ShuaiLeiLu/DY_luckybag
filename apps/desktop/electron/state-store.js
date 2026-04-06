@@ -9,7 +9,7 @@ const WIN_RECORDS_FILE_NAME = 'lottery-win-records.jsonl'
 const ACCOUNT_LOGS_DIR_NAME = 'account-logs'
 const TIMELINE_LOGS_FILE_NAME = 'timeline-runtime.txt'
 const BUILTIN_DEFAULT_SETTINGS = Object.freeze({
-  poolServerUrl: 'http://127.0.0.1:9090',
+  poolServerUrl: 'https://fudai.shuai.help',
   updateFeedUrl: 'https://updates.example.com/dy-fudai/windows',
   hotUpdateEnabled: false,
   hotUpdateManifestUrl: '',
