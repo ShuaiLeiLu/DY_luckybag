@@ -35,6 +35,20 @@ export function formatUpdateStatusText(status: UpdateSnapshot['status'] | string
 }
 
 /**
+ * 前端热更新状态文案映射。
+ */
+export function formatHotUpdateStatusText(status: string) {
+  const key = normalizeKey(status)
+  if (!key || key === 'disabled') return '未启用'
+  if (key.includes('idle')) return '前端已最新'
+  if (key.includes('checking')) return '检查中'
+  if (key.includes('downloading')) return '更新下载中'
+  if (key.includes('applied') || key.includes('ready')) return '前端已更新'
+  if (key.includes('error') || key.includes('failed')) return '更新异常'
+  return String(status || '未知状态')
+}
+
+/**
  * 授权计划文案映射。
  */
 export function formatLicensePlanText(license: LicenseSnapshot) {

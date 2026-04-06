@@ -151,6 +151,9 @@ export interface LotteryHistoryRecord {
 export interface DesktopSettings {
   poolServerUrl: string
   updateFeedUrl: string
+  hotUpdateEnabled: boolean
+  hotUpdateManifestUrl: string
+  hotUpdateReloadOnApply: boolean
   noticeMarkdown: string
   stayDuration: number
   enableRedPacket: boolean

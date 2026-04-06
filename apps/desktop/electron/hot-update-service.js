@@ -146,6 +146,19 @@ function createHotUpdateService(options = {}) {
     })
   }
 
+  function loadStateSync() {
+    try {
+      if (!fs.existsSync(statePath)) return
+      const raw = fs.readFileSync(statePath, 'utf8')
+      persistedState = {
+        ...defaultState,
+        ...(JSON.parse(raw))
+      }
+    } catch (_) {
+      persistedState = { ...defaultState }
+    }
+  }
+
   const validateManifest = (rawManifest) => {
     const manifest = rawManifest && typeof rawManifest === 'object' ? rawManifest : {}
     const version = String(manifest.version || '').trim()
@@ -329,15 +342,3 @@ function createHotUpdateService(options = {}) {
 module.exports = {
   createHotUpdateService
 }
-  const loadStateSync = () => {
-    try {
-      if (!fs.existsSync(statePath)) return
-      const raw = fs.readFileSync(statePath, 'utf8')
-      persistedState = {
-        ...defaultState,
-        ...(JSON.parse(raw))
-      }
-    } catch (_) {
-      persistedState = { ...defaultState }
-    }
-  }

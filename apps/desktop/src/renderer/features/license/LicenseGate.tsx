@@ -106,6 +106,9 @@ export function LicenseGate(props: LicenseGateProps) {
                     src={props.miniAppCodeUrl}
                     alt="mini-app-launch-code"
                     className="h-full w-full rounded-xl object-contain [image-rendering:pixelated]"
+                    onError={() => {
+                      console.warn('[miniapp-code] launch-code load failed', props.miniAppCodeUrl)
+                    }}
                   />
                 </div>
               ) : (
@@ -123,6 +126,9 @@ export function LicenseGate(props: LicenseGateProps) {
                     src={props.miniAppScanCodeUrl}
                     alt="mini-app-scan-code"
                     className="h-full w-full rounded-xl object-contain [image-rendering:pixelated]"
+                    onError={() => {
+                      console.warn('[miniapp-code] scan-code load failed', props.miniAppScanCodeUrl)
+                    }}
                   />
                 </div>
               ) : (

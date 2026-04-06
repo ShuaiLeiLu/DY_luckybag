@@ -205,9 +205,6 @@ func (s *Service) GetMiniAppCodeImage(ctx context.Context, bindRef string) ([]by
 	if err != nil {
 		return nil, "", err
 	}
-	if session.Authorized {
-		return nil, "", fmt.Errorf("bind_session_already_authorized")
-	}
 	if session.Status == "expired" || session.RemainingSec <= 0 {
 		return nil, "", fmt.Errorf("bind_session_expired")
 	}
@@ -234,9 +231,6 @@ func (s *Service) GetMiniAppScanCodeImage(ctx context.Context, bindRef string) (
 	session, err := s.GetBindSession(ctx, bindToken)
 	if err != nil {
 		return nil, "", err
-	}
-	if session.Authorized {
-		return nil, "", fmt.Errorf("bind_session_already_authorized")
 	}
 	if session.Status == "expired" || session.RemainingSec <= 0 {
 		return nil, "", fmt.Errorf("bind_session_expired")

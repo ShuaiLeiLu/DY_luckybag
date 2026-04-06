@@ -79,3 +79,7 @@ apps/pool-server/redis-data/
 
 # Local extracted reference copies
 dy_fudai-main/
+
+# Local desktop runtime profile and logs
+dy-fudai-desktop/
+runtime-logs/

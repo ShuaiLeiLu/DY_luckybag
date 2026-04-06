@@ -1,7 +1,7 @@
 {
   "desktop": {
     "poolServerUrl": "https://fudai.shuai.help",
-    "updateFeedUrl": "https://updates.example.com/dy-fudai/windows",
+    "updateFeedUrl": "",
     "hotUpdateEnabled": true,
     "hotUpdateManifestUrl": "https://fudai.shuai.help/desktop/hot-manifest.json",
     "hotUpdateReloadOnApply": false,

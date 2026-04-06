@@ -292,9 +292,13 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
   }
 
   const claimAfterScan = runtimeOptions?.claimAfterScan !== false
+  const excludeKeys = typeof manager?.getActiveSkipLotteryKeys === 'function'
+    ? manager.getActiveSkipLotteryKeys(accountId)
+    : []
   const uploadRes = await manager.enqueuePoolCandidatesUpload(accountId, uploadList, {
     claimTask: claimAfterScan,
-    topLimit: 5
+    topLimit: 5,
+    excludeKeys
   })
     .catch((error) => ({ ok: false, accepted: 0, total: uploadList.length, error: error?.message || String(error || 'unknown') }))
   const accepted = Math.max(0, Number(uploadRes?.accepted || 0))

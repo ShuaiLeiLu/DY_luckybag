@@ -97,9 +97,10 @@ export function useLicenseBinding(options: UseLicenseBindingOptions): UseLicense
     if (!normalizedPoolServerUrl) return ''
     if (!bindSceneCode && !bindToken) return ''
     const baseUrl = normalizedPoolServerUrl.replace(/\/+$/, '')
-    const query = bindSceneCode
-      ? `sceneCode=${encodeURIComponent(bindSceneCode)}`
-      : `bindToken=${encodeURIComponent(bindToken)}`
+    // 图片接口优先走 bindToken，避免多实例下 sceneCode 签名密钥不一致导致的解析失败。
+    const query = bindToken
+      ? `bindToken=${encodeURIComponent(bindToken)}`
+      : `sceneCode=${encodeURIComponent(bindSceneCode)}`
     return `${baseUrl}/license/bind-session/miniapp-code?${query}&v=${bindCodeVersion}`
   }, [normalizedPoolServerUrl, bindSceneCode, bindToken, bindCodeVersion])
 
@@ -107,9 +108,9 @@ export function useLicenseBinding(options: UseLicenseBindingOptions): UseLicense
     if (!normalizedPoolServerUrl) return ''
     if (!bindSceneCode && !bindToken) return ''
     const baseUrl = normalizedPoolServerUrl.replace(/\/+$/, '')
-    const query = bindSceneCode
-      ? `sceneCode=${encodeURIComponent(bindSceneCode)}`
-      : `bindToken=${encodeURIComponent(bindToken)}`
+    const query = bindToken
+      ? `bindToken=${encodeURIComponent(bindToken)}`
+      : `sceneCode=${encodeURIComponent(bindSceneCode)}`
     return `${baseUrl}/license/bind-session/scan-code?${query}&v=${bindCodeVersion}`
   }, [normalizedPoolServerUrl, bindSceneCode, bindToken, bindCodeVersion])
 

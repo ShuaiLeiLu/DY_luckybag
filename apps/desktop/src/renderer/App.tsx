@@ -28,7 +28,7 @@ import { AccountCard } from './features/accounts/AccountCard'
 import { buildLegacyConfig } from './features/accounts/legacyConfig'
 import { DOUYIN_LOGIN_PROMPT_SCRIPT } from './features/accounts/loginPrompt'
 import { LicenseGate } from './features/license/LicenseGate'
-import { formatAccessModeText, formatLicensePlanText, formatUpdateStatusText } from './features/license/presentation'
+import { formatAccessModeText, formatHotUpdateStatusText, formatLicensePlanText, formatUpdateStatusText } from './features/license/presentation'
 import { useLicenseBinding } from './features/license/useLicenseBinding'
 import { SettingsDrawer } from './features/settings/SettingsDrawer'
 import { TaskDetailPanel } from './features/dashboard/TaskDetailPanel'
@@ -52,10 +52,25 @@ type ServiceResult<T = AnyRecord> = {
   error?: unknown
 }
 
+type HotUpdateSnapshot = {
+  status: string
+  enabled: boolean
+  manifestUrl: string
+  reloadOnApply: boolean
+  currentVersion: string
+  latestVersion: string
+  message: string
+  checkedAt: number
+  appliedEntryFile: string
+}
+
 
 const defaultSettings: DesktopSettings = {
   poolServerUrl: FIXED_POOL_SERVER_URL,
   updateFeedUrl: '',
+  hotUpdateEnabled: true,
+  hotUpdateManifestUrl: 'https://fudai.shuai.help/desktop/hot-manifest.json',
+  hotUpdateReloadOnApply: false,
   noticeMarkdown: '',
   stayDuration: 18,
   enableRedPacket: true,
@@ -108,10 +123,32 @@ const emptyUpdate: UpdateSnapshot = {
   checkedAt: 0
 }
 
+const emptyHotUpdate: HotUpdateSnapshot = {
+  status: 'disabled',
+  enabled: false,
+  manifestUrl: '',
+  reloadOnApply: false,
+  currentVersion: '',
+  latestVersion: '',
+  message: '热更新未启用',
+  checkedAt: 0,
+  appliedEntryFile: ''
+}
+
 
 
 function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+function mapHotUpdateToInstallerStatus(status: string): UpdateSnapshot['status'] {
+  const key = String(status || '').trim().toLowerCase()
+  if (!key || key === 'disabled') return 'disabled'
+  if (key.includes('checking')) return 'checking'
+  if (key.includes('downloading')) return 'downloading'
+  if (key.includes('applied') || key.includes('ready')) return 'downloaded'
+  if (key.includes('error') || key.includes('failed')) return 'error'
+  return 'idle'
 }
 
 function simplifyRuntimeLogMessage(message: string) {
@@ -176,6 +213,7 @@ export default function App() {
   const [learningItems, setLearningItems] = useState<AnyRecord[]>([])
   const [license, setLicense] = useState<LicenseSnapshot>(emptyLicense)
   const [updateState, setUpdateState] = useState<UpdateSnapshot>(emptyUpdate)
+  const [hotUpdateState, setHotUpdateState] = useState<HotUpdateSnapshot>(emptyHotUpdate)
   const [licenseKey, setLicenseKey] = useState('')
   const [selectedAccountId, setSelectedAccountId] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -418,6 +456,13 @@ export default function App() {
         poolServerUrl: snapshotPoolServerUrl
       })
       setUpdateState(snapshot.update || emptyUpdate)
+      const hotSnapshot = await window.electronAPI.desktop.getHotUpdateState().catch(() => null)
+      if (hotSnapshot && typeof hotSnapshot === 'object') {
+        setHotUpdateState({
+          ...emptyHotUpdate,
+          ...hotSnapshot
+        })
+      }
       setHistoryRecords(Array.isArray(snapshot.historyRecords) ? snapshot.historyRecords : [])
     } catch (error) {
       addLog(`引导信息加载失败: ${String((error as Error)?.message || error)}`, 'warning')
@@ -716,6 +761,12 @@ export default function App() {
     const offUpdate = window.electronAPI.desktop.onUpdateState((snapshot) => {
       setUpdateState(snapshot)
     })
+    const offHotUpdate = window.electronAPI.desktop.onHotUpdateState((snapshot) => {
+      setHotUpdateState((current) => ({
+        ...current,
+        ...snapshot
+      }))
+    })
     const offBrowserClosed = window.electronAPI.on('browser-closed', ({ accountId }: { accountId: string }) => {
       stopLoginPolling(accountId)
       void (async () => {
@@ -752,6 +803,7 @@ export default function App() {
       window.clearInterval(learningTimer)
       window.clearInterval(licenseTimer)
       offUpdate()
+      offHotUpdate()
       offBrowserClosed()
       offDouyinResponse()
       loginTimersRef.current.forEach((timer) => window.clearInterval(timer))
@@ -782,7 +834,23 @@ export default function App() {
   const totalDiamonds = accounts.reduce((sum, account) => sum + Number(account.todayEarnedDiamonds || 0), 0)
   const totalParticipation = accounts.reduce((sum, account) => sum + Number(account.participationCount || 0), 0)
   const accessModeText = formatAccessModeText(license.accessMode)
-  const updateStatusText = formatUpdateStatusText(updateState.status)
+  const settingsAny = settings as AnyRecord
+  const hotUpdateConfigured = settingsAny?.hotUpdateEnabled === true && String(settingsAny?.hotUpdateManifestUrl || '').trim() !== ''
+  const useHotUpdateBadge = hotUpdateConfigured || hotUpdateState.enabled === true
+  const updateStatusText = useHotUpdateBadge
+    ? formatHotUpdateStatusText(hotUpdateState.status)
+    : formatUpdateStatusText(updateState.status)
+  const displayUpdateState: UpdateSnapshot = useHotUpdateBadge
+    ? {
+      status: mapHotUpdateToInstallerStatus(hotUpdateState.status),
+      currentVersion: String(hotUpdateState.currentVersion || bootstrap?.appVersion || updateState.currentVersion || ''),
+      latestVersion: String(hotUpdateState.latestVersion || ''),
+      progress: updateState.progress,
+      message: String(hotUpdateState.message || ''),
+      feedUrl: String(hotUpdateState.manifestUrl || ''),
+      checkedAt: Number(hotUpdateState.checkedAt || 0)
+    }
+    : updateState
   const licensePlanText = formatLicensePlanText(license)
 
   async function handleStartTrial() {
@@ -974,14 +1042,23 @@ export default function App() {
                       返回锁定页
                     </button>
                   ) : null}
-                  <button className="w-full rounded-full border border-slate-600/70 px-4 py-2 transition hover:border-slate-400 hover:bg-slate-800/60 sm:w-auto" onClick={() => void window.electronAPI.desktop.checkForUpdates()}>
+                  <button
+                    className="w-full rounded-full border border-slate-600/70 px-4 py-2 transition hover:border-slate-400 hover:bg-slate-800/60 sm:w-auto"
+                    onClick={() => {
+                      if (useHotUpdateBadge) {
+                        void window.electronAPI.desktop.checkHotUpdate()
+                      } else {
+                        void window.electronAPI.desktop.checkForUpdates()
+                      }
+                    }}
+                  >
                     检查更新
                   </button>
                   <span className="w-full rounded-full border border-cyan-400/20 bg-cyan-500/10 px-3 py-2 text-cyan-100 sm:w-auto">
                     {license.accessMode === 'trial' ? `试用剩余 ${formatRelative(license.trialRemainingSec)}` : license.message}
                   </span>
                   <span className="w-full rounded-full border border-slate-700 px-3 py-2 text-slate-300 sm:w-auto">
-                    版本 {bootstrap?.appVersion || updateState.currentVersion}
+                    版本 {bootstrap?.appVersion || displayUpdateState.currentVersion}
                   </span>
                 </div>
               </div>
@@ -1060,14 +1137,26 @@ export default function App() {
       <SettingsDrawer
         open={settingsOpen}
         settings={settings}
-        updateState={updateState}
+        updateState={displayUpdateState}
         updateStatusText={updateStatusText}
         learningSummary={learningSummary}
         onClose={() => setSettingsOpen(false)}
         onChange={(patch) => void persistSettings({ ...settings, ...patch })}
         onNestedChange={(updater) => void persistSettings(updater(settings))}
-        onInstallUpdate={() => void window.electronAPI.desktop.installUpdate()}
-        onDownloadUpdate={() => void window.electronAPI.desktop.downloadUpdate()}
+        onInstallUpdate={() => {
+          if (useHotUpdateBadge) {
+            void window.electronAPI.desktop.checkHotUpdate()
+          } else {
+            void window.electronAPI.desktop.installUpdate()
+          }
+        }}
+        onDownloadUpdate={() => {
+          if (useHotUpdateBadge) {
+            void window.electronAPI.desktop.checkHotUpdate()
+          } else {
+            void window.electronAPI.desktop.downloadUpdate()
+          }
+        }}
       />
 
     </div>

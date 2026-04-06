@@ -4,7 +4,10 @@ import { FIXED_POOL_SERVER_URL } from '../../services/poolClient';
 
 export const defaultSettings: DesktopSettings = {
   poolServerUrl: FIXED_POOL_SERVER_URL,
-  updateFeedUrl: 'https://updates.example.com/dy-fudai/windows',
+  updateFeedUrl: '',
+  hotUpdateEnabled: true,
+  hotUpdateManifestUrl: 'https://fudai.shuai.help/desktop/hot-manifest.json',
+  hotUpdateReloadOnApply: false,
   noticeMarkdown: '',
   stayDuration: 18,
   enableRedPacket: true,
