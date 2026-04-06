@@ -1,7 +1,7 @@
 const app = getApp()
 const { SIGNIN_REWARD_DAYS, AD_UNLOCK_DAYS, REWARDED_VIDEO_AD_UNIT_ID } = require('../../config')
 const { request, wxLogin } = require('../../utils/request')
-const { parseSceneCode } = require('../../utils/scene')
+const { parseSceneCode, parseSceneFromScanResult } = require('../../utils/scene')
 
 function buildRewardCopy(unlockDays) {
   const safeDays = Math.max(1, Number(unlockDays || SIGNIN_REWARD_DAYS || AD_UNLOCK_DAYS || 1))
@@ -151,7 +151,13 @@ Page({
   },
 
   extractSceneCode(options = {}) {
-    return parseSceneCode(options.scene || options.sceneCode || options.bindToken || app.globalData.lastSceneCode || '')
+    let qResult = ''
+    if (options.q) {
+      try {
+        qResult = parseSceneCode(decodeURIComponent(options.q))
+      } catch (e) {}
+    }
+    return qResult || parseSceneCode(options.scene || options.sceneCode || options.bindToken || app.globalData.lastSceneCode || '')
   },
 
   async ensureSession() {
@@ -443,7 +449,7 @@ Page({
   handleScanCode() {
     wx.scanCode({
       success: (res) => {
-        const scene = parseSceneCode(res.result)
+        const scene = parseSceneFromScanResult(res)
         if (scene) {
           app.globalData.lastSceneCode = scene
           try {
