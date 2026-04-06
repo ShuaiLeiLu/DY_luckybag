@@ -1,39 +1,13 @@
 {
   "pages": [
-    "pages/index/index",
-    "pages/profile/profile",
-    "pages/bind/index",
-    "pages/me/index",
-    "pages/privacy/index",
-    "pages/admin/index"
+    "pages/index/index"
   ],
   "window": {
-    "navigationBarTitleText": "抖娃福袋",
-    "navigationBarBackgroundColor": "#f8fafc",
-    "navigationBarTextStyle": "black",
-    "backgroundColor": "#f8fafc",
-    "backgroundTextStyle": "light"
-  },
-  "tabBar": {
-    "custom": true,
-    "color": "#94a3b8",
-    "selectedColor": "#4f46e5",
-    "backgroundColor": "#ffffff",
-    "borderStyle": "black",
-    "list": [
-      {
-        "pagePath": "pages/index/index",
-        "text": "工作台",
-        "iconPath": "assets/tab-home.png",
-        "selectedIconPath": "assets/tab-home-active.png"
-      },
-      {
-        "pagePath": "pages/profile/profile",
-        "text": "我的",
-        "iconPath": "assets/tab-user.png",
-        "selectedIconPath": "assets/tab-user-active.png"
-      }
-    ]
+    "navigationBarTitleText": "授权控制台",
+    "navigationBarBackgroundColor": "#020617",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#020617",
+    "backgroundTextStyle": "dark"
   },
   "style": "v2",
   "sitemapLocation": "sitemap.json"

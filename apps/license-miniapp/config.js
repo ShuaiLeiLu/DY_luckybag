@@ -1,6 +1,6 @@
 const DEFAULTS = {
-  BASE_URL: 'http://127.0.0.1:9090',
-  REWARDED_VIDEO_AD_UNIT_ID: '',
+  BASE_URL: 'https://fudai.shuai.help/admin',
+  REWARDED_VIDEO_AD_UNIT_ID: 'adunit-3258e3a8e5773f65',
   SIGNIN_REWARD_DAYS: 1,
   AD_UNLOCK_DAYS: 1
 }

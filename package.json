@@ -26,6 +26,8 @@
   },
   "dependencies": {
     "electron-updater": "^6.6.2",
+    "framer-motion": "^12.38.0",
+    "lucide-react": "^1.7.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

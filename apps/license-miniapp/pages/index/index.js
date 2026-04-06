@@ -47,22 +47,16 @@ function getStoredSigninAt() {
 function getRemainingParts(expireAt) {
   const diff = Number(expireAt || 0) - Date.now()
   if (diff <= 0) {
-    return {
-      value: '0',
-      unit: '小时'
-    }
+    return { days: '00', hours: '00', minutes: '00' }
   }
-  const hours = Math.ceil(diff / 3600000)
-  if (hours >= 24) {
-    const days = Math.ceil(hours / 24)
-    return {
-      value: String(days),
-      unit: '天'
-    }
-  }
+  const days = Math.floor(diff / (1000 * 60 * 60 * 24))
+  const hours = Math.floor((diff / (1000 * 60 * 60)) % 24)
+  const minutes = Math.floor((diff / 1000 / 60) % 60)
+  
   return {
-    value: String(hours),
-    unit: '小时'
+    days: String(days).padStart(2, '0'),
+    hours: String(hours).padStart(2, '0'),
+    minutes: String(minutes).padStart(2, '0')
   }
 }
 
@@ -100,8 +94,7 @@ Page({
     bindReady: false,
     rewardDisabled: false,
     deviceStatusText: '等待设备连接',
-    remainingValue: '0',
-    remainingUnit: '小时',
+    remainingParts: { days: '00', hours: '00', minutes: '00' },
     rewardGainText: buildRewardCopy(SIGNIN_REWARD_DAYS || AD_UNLOCK_DAYS || 1).gainText,
     rewardSubtitleText: buildRewardCopy(SIGNIN_REWARD_DAYS || AD_UNLOCK_DAYS || 1).subtitleText,
     rewardButtonText: buildRewardCopy(SIGNIN_REWARD_DAYS || AD_UNLOCK_DAYS || 1).buttonText,
@@ -152,17 +145,9 @@ Page({
   },
 
   onShow() {
-    this.syncTabBar()
     if (app.globalData.lastBindSession) {
       this.applySessionView(app.globalData.lastBindSession, 'cache')
     }
-  },
-
-  syncTabBar() {
-    if (typeof this.getTabBar !== 'function') return
-    const tabBar = this.getTabBar()
-    if (!tabBar || typeof tabBar.setData !== 'function') return
-    tabBar.setData({ selected: 0 })
   },
 
   extractSceneCode(options = {}) {
@@ -455,6 +440,28 @@ Page({
     }
   },
 
+  handleScanCode() {
+    wx.scanCode({
+      success: (res) => {
+        const scene = parseSceneCode(res.result)
+        if (scene) {
+          app.globalData.lastSceneCode = scene
+          try {
+            wx.setStorageSync('lastSceneCode', scene)
+          } catch (_) {}
+          this.setData({ sceneCode: scene })
+          this.ensureSession()
+        } else {
+          wx.showToast({ title: '无效的二维码', icon: 'none' })
+        }
+      }
+    })
+  },
+
+  handleSigninTap() {
+    this.handleDailySignin()
+  },
+
   applySessionView(session, source) {
     const authorized = session.authorized === true
     const bindStatus = String(session.status || '')
@@ -485,13 +492,14 @@ Page({
         : '完成绑定后即可解锁完整功能'
     const licenseChipText = authorized ? '运行中' : '待解锁'
 
+    const isLicenseExpired = Number(session.licenseExpireAt || 0) > 0 && Number(session.licenseExpireAt || 0) < Date.now()
+
     this.setData({
       bindReady: ['scanned', 'granted', 'authorized'].includes(bindStatus),
       deviceStatusText,
       licenseSubtitleText,
       licenseChipText,
-      remainingValue: remaining.value,
-      remainingUnit: remaining.unit,
+      remainingParts: remaining,
       rewardDisabled: signedToday,
       rewardSubtitleText: signedToday
         ? '今日已完成签到，明天可再次领取'
@@ -500,6 +508,19 @@ Page({
         ? '今日已签到'
         : rewardCopy.buttonText,
       grantMaskText: rewardCopy.grantMaskText,
+      sessionStatusText: authorized ? 'Authorized' : 'Waiting',
+      isLicenseExpired,
+      showSigninAdButton: ['scanned', 'granted', 'authorized'].includes(bindStatus),
+      todayAlreadySigned: signedToday,
+      btnDisabled: signedToday || this.data.rewardLoading,
+      btnLoading: this.data.rewardLoading,
+      rewardCopy,
+      hasBackendMessage: !!session.message,
+      sessionInfo: {
+        clientId: String(session.clientLabel || session.clientId || ''),
+        accessMode: String(session.accessMode || 'trial'),
+        message: String(session.message || '')
+      },
       session: {
         status: bindStatus,
         clientLabel: String(session.clientLabel || ''),

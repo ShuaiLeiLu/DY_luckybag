@@ -1,99 +1,100 @@
+<!-- pages/index/index.wxml -->
 <view class="container">
-  <view class="header">
-    <view class="title-group">
-      <text class="page-title">授权中心</text>
-      <view class="status-indicator">
-        <view class="dot blink"></view>
-        <text class="status-text">{{ deviceStatusText }}</text>
-      </view>
-    </view>
-  </view>
+  
+  <!-- Background Ambience -->
+  <view class="ambient-light blue-light"></view>
+  <view class="ambient-light purple-light"></view>
 
-  <view class="auth-card">
-    <view class="glow glow-tr"></view>
-    <view class="glow glow-bl"></view>
-
-    <view class="card-content">
-      <view class="card-header">
-        <view class="software-info">
-          <view class="icon-box">
-            <image class="icon-image icon-gift" src="/assets/gift.svg" mode="aspectFit"></image>
-          </view>
-          <view class="software-text">
-            <text class="software-name">抖娃福袋</text>
-            <view class="software-version">
-              <image class="icon-image icon-shield" src="/assets/shield-check.svg" mode="aspectFit"></image>
-              <text>{{ licenseSubtitleText }}</text>
-            </view>
-          </view>
-        </view>
-        <view class="status-tag">{{ licenseChipText }}</view>
-      </view>
-
-      <view class="card-body">
-        <text class="time-label">剩余授权时长</text>
-        <view class="time-box">
-          <text class="time-number">{{ remainingValue }}</text>
-          <text class="time-unit">{{ remainingUnit }}</text>
+  <!-- 1. Header & Status Section -->
+  <view class="header-section glass-panel animate-float">
+    <view class="flex-row justify-between items-center header-top">
+      <view class="flex-col">
+        <text class="label-caps">Current Status</text>
+        <view class="flex-row items-center status-indicator {{isLicenseExpired ? 'status-danger' : 'status-success'}}">
+          <view class="dot"></view>
+          <text class="text-h2">{{sessionStatusText}}</text>
         </view>
       </view>
-    </view>
-  </view>
-
-  <view class="action-card-wrapper">
-    <view class="action-card">
-      <view class="action-orb"></view>
-      <view class="action-inner">
-        <view class="action-header">
-          <view class="action-title-box">
-            <image class="icon-image icon-zap" src="/assets/zap.svg" mode="aspectFit"></image>
-            <text class="action-title">观看广告后签到</text>
-          </view>
-          <text class="action-desc">{{ rewardSubtitleText }}</text>
-        </view>
-
-        <view class="btn-ad {{ rewardLoading || rewardDisabled ? 'btn-disabled' : '' }}" hover-class="{{ rewardLoading || rewardDisabled ? '' : 'btn-hover' }}" bindtap="handleDailySignin">
-          <view class="shimmer"></view>
-          <image class="icon-image icon-key-button" src="/assets/key-white.svg" mode="aspectFit"></image>
-          <text class="btn-text">{{ rewardButtonText }}</text>
-        </view>
+      <view class="icon-box">
+        <image src="../../assets/shield-check.png" mode="aspectFit" class="header-icon" wx:if="{{!isLicenseExpired}}"></image>
+        <image src="../../assets/shield-alert.png" mode="aspectFit" class="header-icon" wx:else></image>
       </view>
     </view>
+
+    <!-- Time Remaining Gauge -->
+    <view class="gauge-container flex-col items-center justify-center">
+      <text class="gauge-value text-hero">{{remainingParts.days || 0}}</text>
+      <view class="flex-row items-center gauge-sub">
+        <text class="text-h2">{{remainingParts.hours || 0}}h</text>
+        <text class="text-h2 separator">:</text>
+        <text class="text-h2">{{remainingParts.minutes || 0}}m</text>
+      </view>
+      <text class="label-caps gauge-label">Remaining Time</text>
+    </view>
   </view>
 
-  <view class="history-section">
-    <view class="section-title">
-      <image class="icon-image icon-history" src="/assets/history.svg" mode="aspectFit"></image>
-      <text>最近动态</text>
+  <!-- 2. Device Card -->
+  <view class="device-section glass-panel">
+    <view class="flex-row justify-between items-center border-b pb-sm">
+      <text class="label-caps">Bound Desktop</text>
+      <text class="text-sub text-mono">{{sessionInfo.clientId || 'Not Bound'}}</text>
     </view>
-
-    <view class="history-list">
-      <block wx:for="{{history}}" wx:key="id">
-        <view class="history-item">
-          <view class="history-left">
-            <view class="history-icon-bg">
-              <image class="icon-image icon-clock" src="/assets/clock.svg" mode="aspectFit"></image>
-            </view>
-            <view class="history-info">
-              <text class="history-action">{{item.action}}</text>
-              <text class="history-date">{{item.date}}</text>
-            </view>
-          </view>
-          <text class="history-time-change">{{item.time}}</text>
+    
+    <block wx:if="{{sessionInfo.clientId}}">
+      <view class="flex-col pt-md">
+        <view class="info-row">
+          <text class="text-sub">Authorization Mode</text>
+          <text class="text-body font-semibold">{{sessionInfo.accessMode === 'unrestricted' ? 'Unrestricted (Pro)' : (sessionInfo.accessMode === 'licensed' ? 'Licensed' : 'Trial Version')}}</text>
         </view>
-      </block>
+        <view class="info-row">
+          <text class="text-sub">Network State</text>
+          <text class="text-body text-success">Online</text>
+        </view>
+      </view>
+    </block>
+
+    <block wx:else>
+      <view class="empty-state flex-col items-center justify-center py-xl">
+        <image src="../../assets/desktop-off.png" mode="aspectFit" class="empty-icon"></image>
+        <text class="text-body mb-md text-center">No desktop client bound. Please scan the QR code on your desktop application.</text>
+        <button class="btn-scan" bindtap="handleScanCode">
+          <image src="../../assets/scan.png" mode="aspectFit" class="btn-icon"></image>
+          Scan to Bind
+        </button>
+      </view>
+    </block>
+  </view>
+
+  <!-- 3. Primary Action (Rewards) -->
+  <view class="action-section" wx:if="{{showSigninAdButton}}">
+    <view class="reward-card glass-panel flex-col items-center">
+      <view class="reward-glow"></view>
+      <text class="text-h2 mb-sm text-center">Extend Your License</text>
+      <text class="text-sub text-center mb-lg">{{rewardCopy.subtitleText}}</text>
+      
+      <button 
+        class="btn-primary {{btnDisabled ? 'btn-disabled' : ''}}" 
+        bindtap="handleSigninTap" 
+        loading="{{btnLoading}}"
+        disabled="{{btnDisabled}}"
+      >
+        <view class="btn-content">
+          <image src="../../assets/play-circle.png" mode="aspectFit" class="btn-icon"></image>
+          <text>{{rewardCopy.buttonText}}</text>
+        </view>
+      </button>
+      
+      <text class="text-sub text-center mt-sm" wx:if="{{todayAlreadySigned}}">You have already extended today. Come back tomorrow!</text>
     </view>
   </view>
 
-  <view class="grant-mask" wx:if="{{ grantSubmitting }}">
-    <view class="grant-mask__panel">
-      <view class="grant-mask__orb"></view>
-      <view class="grant-mask__ring grant-mask__ring--outer"></view>
-      <view class="grant-mask__ring grant-mask__ring--inner"></view>
-      <text class="grant-mask__title">正在完成签到...</text>
-      <text class="grant-mask__desc">{{ grantMaskText }}</text>
+  <!-- Notice/Message Area -->
+  <view class="notice-section glass-panel" wx:if="{{hasBackendMessage}}">
+    <view class="flex-row items-start">
+      <image src="../../assets/bell.png" mode="aspectFit" class="notice-icon"></image>
+      <text class="text-sub notice-text">{{sessionInfo.message}}</text>
     </view>
   </view>
+
+  <view class="bottom-padding"></view>
 </view>
-
-
