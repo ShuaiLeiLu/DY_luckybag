@@ -4558,13 +4558,10 @@ class LotteryManager {
 
     const prepared = await this.prepareLotteryRoom(accountId, accountData, decoratedLottery, config, {
       reuseCurrentRoom: options?.reuseCurrentRoom === true,
-      // 对齐“超人模式”链路：进房后不做前置入口硬等待，直接交给 joinLotteryByUI 处理入口等待与点击。
-      skipReadyCheck: true
+      skipReadyCheck: false
     })
     if (!prepared) {
       await this.releaseClaimedPoolTask(accountId, 'room_not_ready')
-      this.markLotteryTemporarySkip(accountId, decoratedLottery, 180)
-      this.removeLotteryFromPool(accountId, decoratedLottery)
       if (this.accounts.has(accountId) && !this.isPaused(accountId)) {
         accountData.callbacks.onLog('⚠️ 直播间未就绪，2秒后重新扫描...', 'warning')
         this.scheduleSelectionOrScanRetry(accountId, 2000, { quickCycle: true, trigger: 'room-not-ready' })
