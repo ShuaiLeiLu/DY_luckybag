@@ -2830,7 +2830,11 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, acco
     const selectedCookie = detailCookiePool.length > 0
       ? detailCookiePool[Math.floor(Math.random() * detailCookiePool.length)]
       : null
-    const cookieString = normalizeCookieHeaderString(selectedCookie?.cookie || await safeGetAccountCookieString(accountId, { host: 'live.douyin.com' }))
+    // 对齐“超人福袋”详情逻辑：随机 cookie + 去除换行。
+    const cookieString = normalizeCookieHeaderString(
+      String(selectedCookie?.cookie || await safeGetAccountCookieString(accountId, { host: 'live.douyin.com' }))
+        .replace(/\r?\n/g, '')
+    )
 
     const requestParams = {
       live_id: 1,
@@ -2852,14 +2856,28 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, acco
     })
 
     const json = await douyinLiveRemote('/webcast/lottery/melon/lottery_info/', requestParams, requestHeaders)
-    const lotteryRawData = json?.data || json?.data?.data || json || null
-    const lotteryDetail = buildLotteryDetailFromRaw(lotteryRawData)
-
-    if (!lotteryDetail) {
+    const lottery_info = json?.data?.lottery_info
+    if (!lottery_info || typeof lottery_info !== 'object') {
       return { success: false, error: '福袋信息数据格式错误' }
     }
 
-    const conditions = Array.isArray(lotteryDetail.conditions) ? lotteryDetail.conditions : []
+    const conditions = Array.isArray(lottery_info.conditions) ? lottery_info.conditions : []
+    const lotteryDetail = {
+      // 对齐“超人福袋”详情字段映射
+      lottery_id: lottery_info.lottery_id_str,
+      anchorId: lottery_info.anchor_id,
+      joinTotal: lottery_info.candidate_num || 0,
+      winningTotal: lottery_info.lucky_count || 0,
+      lotteryTotal: lottery_info.prize_count || 0,
+      lotteryName: lottery_info.prize_info?.name || '未知奖品',
+      prize_name: lottery_info.prize_info?.name || '未知奖品',
+      prizeType: lottery_info.prize_type || lottery_info.prize_info?.type || lottery_info.prize_info?.prize_type || 0,
+      prizeInfo: lottery_info.prize_info || {},
+      total_amount: lottery_info.total_amount || lottery_info.prize_info?.total_amount || 0,
+      start_time: lottery_info.start_time || 0,
+      end_time: lottery_info.draw_time || 0,
+      conditions
+    }
     const source = 'api'
 
     traceScan('response get-lottery-detail', {
