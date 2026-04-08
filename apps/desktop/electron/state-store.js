@@ -4,7 +4,6 @@ const path = require('path')
 const PROJECT_ROOT_PATH = path.resolve(__dirname, '..', '..', '..')
 const PROJECT_CONFIG_PATH = path.join(PROJECT_ROOT_PATH, 'config.json')
 const PROJECT_RUNTIME_LOGS_DIR = path.join(PROJECT_ROOT_PATH, 'runtime-logs')
-const LEGACY_FIXED_POOL_SERVER_URL = 'http://127.0.0.1:9090'
 const SETTINGS_FILE_NAME = 'desktop-settings.json'
 const HISTORY_ALL_FILE_NAME = 'lottery-history-records.jsonl'
 const JOIN_RECORDS_FILE_NAME = 'lottery-join-records.jsonl'
@@ -12,10 +11,11 @@ const WIN_RECORDS_FILE_NAME = 'lottery-win-records.jsonl'
 const ACCOUNT_LOGS_DIR_NAME = 'account-logs'
 const TIMELINE_LOGS_FILE_NAME = 'timeline-runtime.txt'
 const BUILTIN_DEFAULT_SETTINGS = Object.freeze({
-  poolServerUrl: 'https://fudai.shuai.help',
+  // Packaged desktop should keep working even without a project-level config.json.
+  poolServerUrl: 'http://fudai.shuai.help:9090',
   updateFeedUrl: '',
-  hotUpdateEnabled: false,
-  hotUpdateManifestUrl: '',
+  hotUpdateEnabled: true,
+  hotUpdateManifestUrl: 'http://fudai.shuai.help:9090/desktop/hot-manifest.json',
   hotUpdateReloadOnApply: false,
   noticeMarkdown: '',
   stayDuration: 18,
@@ -125,6 +125,32 @@ function normalizeServerUrl(raw) {
   return String(raw || '').trim().replace(/\/+$/, '')
 }
 
+function isLegacyLoopbackPoolServerUrl(raw) {
+  const normalized = normalizeServerUrl(raw)
+  if (!normalized) return false
+
+  try {
+    const resolved = /^https?:\/\//i.test(normalized) ? normalized : `http://${normalized}`
+    const parsed = new URL(resolved)
+    const host = String(parsed.hostname || '').trim().toLowerCase()
+    const port = String(parsed.port || (parsed.protocol === 'https:' ? '443' : '80'))
+    if (port !== '9090') return false
+    if (host === 'localhost') return true
+
+    const octets = host.split('.')
+    return (
+      octets.length === 4 &&
+      octets.every((part) => /^\d+$/.test(part) && Number(part) >= 0 && Number(part) <= 255) &&
+      Number(octets[0]) === 127 &&
+      Number(octets[1]) === 0 &&
+      Number(octets[2]) === 0 &&
+      Number(octets[3]) === 1
+    )
+  } catch (_) {
+    return false
+  }
+}
+
 function loadDesktopConfigDefaults() {
   try {
     if (!fs.existsSync(PROJECT_CONFIG_PATH)) return {}
@@ -142,11 +168,27 @@ function normalizeSettings(raw = {}) {
   const merged = mergeSettings(DEFAULT_SETTINGS, raw)
   const mergedPoolServerUrl = normalizeServerUrl(merged.poolServerUrl)
   const defaultPoolServerUrl = normalizeServerUrl(DEFAULT_SETTINGS.poolServerUrl)
-  const legacyPoolServerUrl = normalizeServerUrl(LEGACY_FIXED_POOL_SERVER_URL)
-
-  // 兼容旧版本历史：曾强制写死本地地址，升级后优先恢复 config.json 中的默认地址。
-  if (mergedPoolServerUrl === legacyPoolServerUrl && defaultPoolServerUrl && defaultPoolServerUrl !== legacyPoolServerUrl) {
+  const mergedHotUpdateManifestUrl = normalizeServerUrl(merged.hotUpdateManifestUrl)
+  const defaultHotUpdateManifestUrl = normalizeServerUrl(DEFAULT_SETTINGS.hotUpdateManifestUrl)
+  if (
+    isLegacyLoopbackPoolServerUrl(mergedPoolServerUrl) &&
+    defaultPoolServerUrl &&
+    !isLegacyLoopbackPoolServerUrl(defaultPoolServerUrl)
+  ) {
     merged.poolServerUrl = DEFAULT_SETTINGS.poolServerUrl
+  }
+
+  // Older packaged builds persisted hot-update as disabled because main-process defaults
+  // did not include the manifest URL. Adopt the project/default hot-update settings when
+  // the stored value is still the legacy empty+disabled combination.
+  if (
+    merged.hotUpdateEnabled !== true &&
+    !mergedHotUpdateManifestUrl &&
+    DEFAULT_SETTINGS.hotUpdateEnabled === true &&
+    defaultHotUpdateManifestUrl
+  ) {
+    merged.hotUpdateEnabled = true
+    merged.hotUpdateManifestUrl = DEFAULT_SETTINGS.hotUpdateManifestUrl
   }
 
   return merged

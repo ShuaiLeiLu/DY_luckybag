@@ -21,7 +21,7 @@ node deploy-setup.js
 ```bash
 docker-compose up -d --build
 ```
-3. **域名反向代理**：配置 Nginx（或宝塔面板），将您的域名（例如 `https://fudai.shuai.help`）反向代理到服务器的 `9090` 端口。
+3. **域名反向代理**：配置 Nginx（或宝塔面板），将您的域名（例如 `http://fudai.shuai.help:9090`）反向代理到服务器的 `9090` 端口。
 
 ---
 

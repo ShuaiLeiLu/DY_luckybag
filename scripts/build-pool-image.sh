@@ -37,7 +37,7 @@ print_help() {
   --goproxy <url>      Go 代理，默认 https://goproxy.cn,direct
   --gosumdb <value>    Go sumdb，默认 sum.golang.google.cn
   --goprivate <value>  Go 私有模块域名（可选）
-  --hot-base-url <url> Desktop 热更新资源基准地址（如 https://fudai.shuai.help/desktop/3.0.0/）
+  --hot-base-url <url> Desktop 热更新资源基准地址（如 http://fudai.shuai.help:9090/desktop/3.0.0/）
   --desktop-version <v> 指定 Desktop 资源版本号（默认读取 package.json version）
   --skip-desktop-hot   跳过打包 Desktop 热更新资源
   -h, --help           显示帮助

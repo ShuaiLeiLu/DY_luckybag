@@ -1,4 +1,4 @@
-export const FIXED_POOL_SERVER_URL = 'https://fudai.shuai.help'
+export const FIXED_POOL_SERVER_URL = 'http://fudai.shuai.help:9090'
 let configuredPoolServerUrl = FIXED_POOL_SERVER_URL
 const DEFAULT_TIMEOUT_MS = 3200
 const CLIENT_ID_STORAGE_KEY = 'DY_POOL_CLIENT_ID'

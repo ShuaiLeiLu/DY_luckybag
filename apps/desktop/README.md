@@ -1,64 +1,82 @@
-﻿# Desktop App
+﻿# 抖娃福袋工作台（用户使用说明）
 
-Windows 桌面端在这个目录下独立维护。
+## 这个软件能干啥
 
-## 目录
+这是一个面向运营场景的桌面客户端，核心作用是：
 
-```text
-apps/desktop/
-├── electron/     # 主进程、preload、桌面状态存储、更新服务
-├── src/
-│   ├── renderer/ # React 页面
-│   ├── services/ # 自动化调度与服务端调用
-│   ├── shared/   # 前后端共享模型
-│   └── utils/    # 工具函数
-├── build/        # 打包资源
-├── index.html
-├── tsconfig.json
-└── vite.config.mjs
-```
+1. 统一管理多个账号
+2. 自动筛选可参与的直播福袋
+3. 自动执行参与流程（可按策略过滤）
+4. 实时查看账号状态、参与进度和收益数据
+5. 保留操作日志和历史记录，便于复盘
 
-## 常用命令
+简单说：它把“多账号盯直播 + 手动点参与”变成“集中管理 + 自动执行”。
 
-在仓库根目录执行：
+## 怎么用（用户版）
 
-```bash
-npm run desktop:dev
-npm run desktop:build
-npm run desktop:hot:manifest -- --base-url https://your-cdn.example.com/dy-fudai/desktop/3.0.0/
-npm run desktop:test
-npm run desktop:electron:dev
-npm run desktop:electron:build:win
-```
+### 第一步：进入软件并完成授权
 
-## 配置文件
+1. 打开客户端
+2. 进入“授权中心”
+3. 按页面提示选择“试用”或“激活”
+4. 授权成功后进入主界面
 
-- `config.json`（仓库根目录）：统一配置文件，桌面端读取 `desktop` 节点
-- `apps/desktop/tokens.example.json`：Token 示例模板
+### 第二步：添加账号并扫码登录
 
-### 前端热更新（仅 Desktop 渲染层）
+1. 点击“添加账号”
+2. 软件会弹出该账号的登录窗口
+3. 用手机扫码完成登录
+4. 登录成功后，账号会出现在“账号矩阵”中
 
-桌面端支持只更新 `apps/desktop/dist`（不更新 Electron 主进程）。  
-在 `config.json` 的 `desktop` 节点增加以下配置：
+### 第三步：启动任务
 
-```json
-{
-  "hotUpdateEnabled": true,
-  "hotUpdateManifestUrl": "https://your-cdn.example.com/dy-fudai/desktop/hot-manifest.json",
-  "hotUpdateReloadOnApply": false
-}
-```
+1. 在账号卡片上点击“启动”
+2. 软件开始自动筛选并参与任务
+3. 可随时点击“暂停”停止该账号
 
-- `hotUpdateEnabled`：是否启用渲染层热更新
-- `hotUpdateManifestUrl`：热更新 manifest 地址
-- `hotUpdateReloadOnApply`：下载完成后是否立即重载页面（`false` 为下次启动生效）
+### 第四步：按需调策略
 
-manifest 生成命令：
+在“设置中心”可以调整常用策略，例如：
 
-```bash
-npm run desktop:build
-npm run desktop:hot:manifest -- --base-url https://your-cdn.example.com/dy-fudai/desktop/3.0.0/
-```
+- 是否过滤粉丝团门槛
+- 是否只参与实物类
+- 是否优先大红包
+- 停留时长与其他执行参数
 
-生成文件默认位于：`apps/desktop/dist/hot-manifest.json`。  
-将 `dist` 文件夹内容上传到 `baseUrl` 对应目录，再把 manifest 上传到 `hotUpdateManifestUrl` 即可。
+修改后会立即生效。
+
+### 第五步：看结果
+
+你可以在主界面直接看到：
+
+- 在线账号数
+- 今日参与次数
+- 今日收益
+- 中签次数
+- 实时运行日志与账号状态
+
+## 用了之后你能得到什么
+
+1. 节省人力：减少手动盯盘和重复点击
+2. 提升效率：多账号并行，统一管理
+3. 过程可见：每个账号的状态和日志都可追踪
+4. 结果可量化：参与量、收益、中奖情况可直接查看
+
+注意：软件提升的是执行效率，不承诺业务收益或中奖结果。
+
+## 风险声明（必须阅读）
+
+1. 合规风险  
+使用前请确认符合目标平台规则和当地法律法规，否则可能导致限制、处罚或封禁。
+
+2. 账号风险  
+软件会在本机保存登录态；若设备被入侵或被他人接触，账号存在被盗用风险。
+
+3. 数据风险  
+删除账号会清理本地相关记录，误操作可能导致数据无法恢复。
+
+4. 结果风险  
+软件不保证中奖率、收益或业务结果，所有运营后果由使用方自行承担。
+
+5. 更新风险  
+请只使用可信更新来源，避免使用来路不明的安装包或更新地址。

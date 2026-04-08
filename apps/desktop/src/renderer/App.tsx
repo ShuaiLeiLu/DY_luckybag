@@ -69,7 +69,7 @@ const defaultSettings: DesktopSettings = {
   poolServerUrl: FIXED_POOL_SERVER_URL,
   updateFeedUrl: '',
   hotUpdateEnabled: true,
-  hotUpdateManifestUrl: 'https://fudai.shuai.help/desktop/hot-manifest.json',
+  hotUpdateManifestUrl: 'http://fudai.shuai.help:9090/desktop/hot-manifest.json',
   hotUpdateReloadOnApply: false,
   noticeMarkdown: '',
   stayDuration: 18,

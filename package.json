@@ -1,6 +1,6 @@
 {
   "name": "dy-fudai-desktop",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Windows 桌面端服务端派单福袋工作台",
   "author": "lushuailei",
   "private": true,
@@ -21,8 +21,9 @@
     "server:db:init": "node ./scripts/init-license-db.mjs",
     "server:db:init:dry": "node ./scripts/init-license-db.mjs --dry-run",
     "server:dump": "node ./scripts/pool-dump.mjs",
-    "desktop:electron:dev": "concurrently \"npm run desktop:dev\" \"wait-on http://127.0.0.1:5173 && cross-env NODE_ENV=development electron .\"",
-    "desktop:electron:build:win": "npm run desktop:build && electron-builder --win nsis --x64 --publish never"
+    "desktop:electron:dev": "concurrently \"npm run desktop:dev\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
+    "desktop:electron:build:win": "npm run desktop:build && electron-builder --win nsis --x64 --publish never",
+    "release:publish": "powershell -ExecutionPolicy Bypass -File ./scripts/release-publish.ps1"
   },
   "dependencies": {
     "electron-updater": "^6.6.2",

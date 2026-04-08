@@ -54,8 +54,17 @@ function migrateLegacyStateDir(legacyUserDataDir, projectUserDataDir) {
 
 function configureProjectUserDataDir() {
   const legacyUserDataDir = app.getPath('userData')
+  const forceProjectUserData = String(process.env.DY_FORCE_PROJECT_USER_DATA || '').trim() === '1'
+  if (app.isPackaged && !forceProjectUserData) {
+    console.log(`[desktop-storage] userData => ${legacyUserDataDir} (packaged default)`)
+    return
+  }
   const projectRootDir = resolveProjectRootDir()
   const projectUserDataDir = path.join(projectRootDir, 'dy-fudai-desktop')
+  if (/\.asar([\\/]|$)/i.test(projectUserDataDir)) {
+    console.warn(`[desktop-storage] skip project userData inside asar: ${projectUserDataDir}`)
+    return
+  }
   try {
     fs.mkdirSync(projectUserDataDir, { recursive: true })
     migrateLegacyStateDir(legacyUserDataDir, projectUserDataDir)
@@ -81,7 +90,7 @@ const secureStateDir = path.join(app.getPath('userData'), 'state')
 const tokenStorePath = path.join(secureStateDir, 'credentials.json')
 const protocolGuardPartitions = new Set()
 const MAX_VISIBLE_ACCOUNT_WINDOWS = 4
-const DESKTOP_DEV_SERVER_URL = 'http://127.0.0.1:5173'
+const DESKTOP_DEV_SERVER_URL = 'http://localhost:5173'
 const unreadableLegacyTokenPaths = new Set()
 const lotteryRightCacheByAccount = new Map() // accountId -> Map(roomIdOrLotteryId, { data, updatedAt, roomId, lotteryId })
 

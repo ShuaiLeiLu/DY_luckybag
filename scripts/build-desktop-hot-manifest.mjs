@@ -3,8 +3,9 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 
-const ROOT = path.resolve(new URL('..', import.meta.url).pathname)
+const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
 
 function parseArgs(argv) {
   const args = {

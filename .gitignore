@@ -12,11 +12,15 @@ out/
 # Server build output
 apps/pool-server/poolserver
 apps/pool-server/.gocache/
+apps/pool-server/static/desktop/
 
 # Local secrets and state
 tokens.json
 *.token
 *.session
+config.json
+apps/desktop/config.json
+apps/license-miniapp/config.js
 
 # Logs
 *.log
@@ -45,6 +49,8 @@ lerna-debug.log*
 .tmp/
 .npm-cache/
 .electron-cache/
+release-artifacts/
+tmp/
 
 # Env files
 .env
