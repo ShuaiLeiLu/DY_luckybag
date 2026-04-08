@@ -83,6 +83,25 @@ async function fetchBuffer(url) {
   return Buffer.from(ab)
 }
 
+function rewriteManifestBaseUrlIfNeeded(baseUrl, manifestUrl) {
+  const normalizedBaseUrl = String(baseUrl || '').trim()
+  if (!normalizedBaseUrl) return normalizedBaseUrl
+  try {
+    const parsedBase = new URL(normalizedBaseUrl)
+    const parsedManifest = new URL(String(manifestUrl || '').trim())
+    const sameHost = String(parsedBase.hostname || '').toLowerCase() === String(parsedManifest.hostname || '').toLowerCase()
+    const needsDowngrade = parsedBase.protocol === 'https:' && parsedManifest.protocol === 'http:'
+    if (!sameHost || !needsDowngrade) return parsedBase.toString()
+
+    const next = new URL(parsedBase.toString())
+    next.protocol = parsedManifest.protocol
+    next.port = parsedManifest.port
+    return next.toString()
+  } catch (_) {
+    return normalizedBaseUrl
+  }
+}
+
 function createHotUpdateService(options = {}) {
   const enabled = options.enabled === true
   const manifestUrl = String(options.manifestUrl || '').trim()
@@ -174,9 +193,10 @@ function createHotUpdateService(options = {}) {
     if (minAppVersion && compareVersions(appVersion, minAppVersion) < 0) {
       throw new Error(`当前客户端版本(${appVersion})低于热更新要求(${minAppVersion})`)
     }
-    const resolvedBaseURL = String(manifest.baseUrl || '').trim()
+    const resolvedBaseURLRaw = String(manifest.baseUrl || '').trim()
       ? new URL(String(manifest.baseUrl || '').trim(), manifestUrl).toString()
       : new URL('./', manifestUrl).toString()
+    const resolvedBaseURL = rewriteManifestBaseUrlIfNeeded(resolvedBaseURLRaw, manifestUrl)
     const normalizedFiles = files.map((raw) => {
       const item = raw && typeof raw === 'object' ? raw : {}
       const relPath = safeRelativeFilePath(item.path)

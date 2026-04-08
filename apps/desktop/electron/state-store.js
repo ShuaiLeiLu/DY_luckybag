@@ -125,6 +125,22 @@ function normalizeServerUrl(raw) {
   return String(raw || '').trim().replace(/\/+$/, '')
 }
 
+function migrateFudaiUrlToHttp9090(raw, fallback = '') {
+  const normalized = normalizeServerUrl(raw)
+  if (!normalized) return normalized
+  try {
+    const parsed = new URL(/^https?:\/\//i.test(normalized) ? normalized : `http://${normalized}`)
+    const host = String(parsed.hostname || '').trim().toLowerCase()
+    if (host !== 'fudai.shuai.help') return normalized
+    const next = new URL(parsed.toString())
+    next.protocol = 'http:'
+    next.port = '9090'
+    return normalizeServerUrl(next.toString())
+  } catch (_) {
+    return fallback || normalized
+  }
+}
+
 function isLegacyLoopbackPoolServerUrl(raw) {
   const normalized = normalizeServerUrl(raw)
   if (!normalized) return false
@@ -166,6 +182,9 @@ const DEFAULT_SETTINGS = Object.freeze(mergeSettings(BUILTIN_DEFAULT_SETTINGS, l
 
 function normalizeSettings(raw = {}) {
   const merged = mergeSettings(DEFAULT_SETTINGS, raw)
+  merged.poolServerUrl = migrateFudaiUrlToHttp9090(merged.poolServerUrl, DEFAULT_SETTINGS.poolServerUrl)
+  merged.hotUpdateManifestUrl = migrateFudaiUrlToHttp9090(merged.hotUpdateManifestUrl, DEFAULT_SETTINGS.hotUpdateManifestUrl)
+
   const mergedPoolServerUrl = normalizeServerUrl(merged.poolServerUrl)
   const defaultPoolServerUrl = normalizeServerUrl(DEFAULT_SETTINGS.poolServerUrl)
   const mergedHotUpdateManifestUrl = normalizeServerUrl(merged.hotUpdateManifestUrl)

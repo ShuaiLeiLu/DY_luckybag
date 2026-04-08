@@ -53,6 +53,79 @@ function formatPercent(value) {
   return `${(num * 100).toFixed(2)}%`
 }
 
+function normalizeText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim()
+}
+
+function extractRequiredCommentText(raw) {
+  const text = normalizeText(raw)
+  if (!text) return ''
+
+  const quotedMatch = text.match(/[“"【\[]([^"”】\]]{1,24})[”"】\]]/)
+  if (quotedMatch?.[1]) {
+    return normalizeText(quotedMatch[1]).slice(0, 24)
+  }
+
+  const keywordMatch = text.match(/(?:评论|弹幕|发言|发送|口令)\s*[:：]?\s*([^\s，,。！？!?;；]{1,24})/i)
+  if (keywordMatch?.[1]) {
+    return normalizeText(keywordMatch[1]).slice(0, 24)
+  }
+
+  if (text.length <= 20 && !/[，,。！？!?\s]/.test(text)) {
+    return text
+  }
+
+  return ''
+}
+
+function resolveJoinRequirements(lotteryInfo = null) {
+  const conditions = Array.isArray(lotteryInfo?.conditions) ? lotteryInfo.conditions : []
+  let needFanClub = false
+  let needComment = false
+  let commentText = ''
+
+  for (const condition of conditions) {
+    const typeNum = Number(condition?.type || 0)
+    const text = normalizeText([
+      condition?.content,
+      condition?.desc,
+      condition?.description,
+      condition?.title,
+      condition?.text,
+      condition?.name
+    ].filter(Boolean).join(' '))
+    const lower = text.toLowerCase()
+
+    if (
+      typeNum === 2 ||
+      /粉丝团|粉丝牌|加团|团员/.test(text) ||
+      lower.includes('fanclub') ||
+      lower.includes('fans club') ||
+      lower.includes('fan club')
+    ) {
+      needFanClub = true
+    }
+
+    if (
+      typeNum === 8 ||
+      /评论|弹幕|发言/.test(text) ||
+      lower.includes('comment') ||
+      lower.includes('chat')
+    ) {
+      needComment = true
+      if (!commentText) {
+        commentText = extractRequiredCommentText(text)
+      }
+    }
+  }
+
+  return {
+    needFanClub,
+    needComment,
+    commentText: commentText || '666'
+  }
+}
+
 /**
  * buildWaitForVisibleSelectorScript 方法：在页面内等待 selector 对应元素可见。
  * @param {string} selector CSS 选择器
@@ -403,6 +476,155 @@ async function clickLotteryJoinFallback(manager, accountId, timeoutMs = 10000) {
   return { success: true, ...res.result }
 }
 
+async function joinFanClubByUI(manager, accountId, timeoutMs = 12000) {
+  const res = await executeScriptSafely(manager, accountId, `
+    (() => new Promise((resolve) => {
+      const timeoutMs = ${Math.max(1200, Number(timeoutMs || 12000))};
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const isVisible = (el) => {
+        if (!el || typeof el.getBoundingClientRect !== 'function') return false;
+        const style = window.getComputedStyle(el);
+        if (!style || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || '1') <= 0.02) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width >= 8 && rect.height >= 8;
+      };
+      const clickNode = (el) => {
+        if (!el) return false;
+        try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_) {}
+        try {
+          if (typeof el.click === 'function') {
+            el.click();
+          } else {
+            el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+            el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+            el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          }
+          return true;
+        } catch (_) {
+          return false;
+        }
+      };
+
+      const joinRe = /(加入粉丝团|加入团|去加团|加团|点亮粉丝牌|加入粉丝牌|成为团员|加入粉丝)/;
+      const alreadyRe = /(已加入|已是团员|团员已加入|已点亮|你已加入|已在粉丝团|粉丝团已加入)/;
+      const denyRe = /(会员|VIP|vip|订阅|开通)/;
+
+      const readPanelText = () => {
+        const root = document.querySelector('#lottery_close_cotainer') || document.body;
+        return normalize(root?.innerText || '');
+      };
+
+      const initialText = readPanelText();
+      if (alreadyRe.test(initialText)) {
+        resolve({ ok: true, already: true, sample: initialText.slice(0, 120) });
+        return;
+      }
+
+      const start = Date.now();
+      const tick = () => {
+        const root = document.querySelector('#lottery_close_cotainer') || document;
+        const nodes = Array.from(root.querySelectorAll('button,[role="button"],a,div,span')).filter(isVisible);
+        const candidates = nodes
+          .map((node) => {
+            const text = normalize(node.innerText || node.textContent || node.getAttribute?.('aria-label') || node.getAttribute?.('title') || '');
+            if (!joinRe.test(text)) return null;
+            if (denyRe.test(text)) return null;
+            const rect = node.getBoundingClientRect();
+            const score = (root !== document ? 4 : 0) + Math.min(3, (rect.width * rect.height) / 5000);
+            return { node, text, score };
+          })
+          .filter(Boolean)
+          .sort((a, b) => b.score - a.score);
+
+        if (candidates.length > 0) {
+          const picked = candidates[0];
+          if (clickNode(picked.node)) {
+            setTimeout(() => {
+              const latestText = readPanelText();
+              resolve({
+                ok: true,
+                already: alreadyRe.test(latestText),
+                clickedText: picked.text.slice(0, 80),
+                sample: latestText.slice(0, 140)
+              });
+            }, 320);
+            return;
+          }
+        }
+
+        if (Date.now() - start >= timeoutMs) {
+          resolve({
+            ok: false,
+            sample: readPanelText().slice(0, 140)
+          });
+          return;
+        }
+        setTimeout(tick, 220);
+      };
+
+      tick();
+    }))()
+  `, timeoutMs + 1500, 'join.join_fanclub')
+
+  if (isBrowserGoneResult(res)) {
+    return { success: false, error: '浏览器已关闭，停止参与', code: 'BROWSER_NOT_FOUND' }
+  }
+  if (res?.code === 'EXECUTE_TIMEOUT') {
+    return { success: false, error: '页面脚本超时', code: 'EXECUTE_TIMEOUT' }
+  }
+  if (res?.code === 'EXECUTE_CONTEXT_LOST') {
+    return { success: false, error: '页面上下文切换中', code: 'EXECUTE_CONTEXT_LOST' }
+  }
+  if (!res?.success || !res?.result || typeof res.result !== 'object') {
+    return { success: false, error: '执行加粉丝团脚本失败', code: 'FANCLUB_JOIN_EXEC_FAILED' }
+  }
+  if (res.result.ok !== true) {
+    return {
+      success: false,
+      error: '未找到加入粉丝团入口',
+      code: 'FANCLUB_JOIN_NOT_FOUND',
+      sample: String(res.result.sample || '')
+    }
+  }
+  return { success: true, ...res.result }
+}
+
+async function sendRequiredComment(manager, accountId, roomId, content, retryDelays = [0, 600, 1200]) {
+  const safeRoomId = String(roomId || '').trim()
+  const safeContent = normalizeText(content).slice(0, 24)
+  if (!safeRoomId) {
+    return { success: false, error: 'room_id 缺失，无法发送评论', code: 'COMMENT_ROOM_ID_EMPTY' }
+  }
+  if (!safeContent) {
+    return { success: false, error: '评论内容为空', code: 'COMMENT_CONTENT_EMPTY' }
+  }
+
+  let lastError = ''
+  for (let i = 0; i < retryDelays.length; i++) {
+    if (!manager?.accounts?.has(accountId) || manager.isPaused(accountId)) {
+      return { success: false, error: '账号已停止', code: 'ACCOUNT_STOPPED' }
+    }
+    const delay = Number(retryDelays[i] || 0)
+    if (delay > 0) {
+      await manager.sleep(delay)
+    }
+    try {
+      const res = await manager.ipc.invoke('room-chat', {
+        roomId: safeRoomId,
+        content: safeContent,
+        accountId
+      })
+      if (res?.success) {
+        return { success: true, content: safeContent, raw: res }
+      }
+      lastError = String(res?.error || 'room-chat failed')
+    } catch (error) {
+      lastError = String(error?.message || error || 'room-chat invoke failed')
+    }
+  }
+  return { success: false, error: lastError || '发送评论失败', code: 'COMMENT_SEND_FAILED' }
+}
+
 async function runSecondInspect(manager, accountId, lotteryInfo, config = {}) {
   if (config?.secondInspect?.enabled !== true || !lotteryInfo) {
     return { passed: true }
@@ -492,6 +714,8 @@ export async function ensureCloseLiveStreamRendering(manager, accountId) {
  */
 export async function joinLotteryByUI(manager, accountId, remainingTime = 30, options = {}) {
   const currentLotteryId = String(options?.lotteryInfo?.lottery_id || options?.lotteryInfo?.lotteryId || '')
+  const accountData = options?.accountData || null
+  const onLog = accountData?.callbacks?.onLog
 
   let waitEntryResult = await waitForVisibleSelector(manager, accountId, '.dVxrjT_h', 20000)
   if (waitEntryResult?.code === 'EXECUTE_CONTEXT_LOST') {
@@ -537,6 +761,45 @@ export async function joinLotteryByUI(manager, accountId, remainingTime = 30, op
       error: secondInspect.error || '二次检查未通过',
       code: secondInspect.code || 'SECOND_INSPECT_REJECT'
     }
+  }
+
+  const requirements = resolveJoinRequirements(options?.lotteryInfo || null)
+  if (requirements.needFanClub || requirements.needComment) {
+    onLog?.('🧩 命中福袋前置条件，准备先执行加团/评论')
+  }
+
+  if (requirements.needFanClub) {
+    onLog?.('👥 检测到粉丝团门槛，尝试先加入粉丝团...')
+    const fanJoinResult = await joinFanClubByUI(manager, accountId, 12000)
+    if (!fanJoinResult?.success) {
+      return {
+        success: false,
+        error: fanJoinResult?.error || '加入粉丝团失败',
+        code: fanJoinResult?.code || 'FANCLUB_JOIN_FAILED'
+      }
+    }
+    if (fanJoinResult?.already) {
+      onLog?.('👥 已在粉丝团，跳过加团')
+    } else {
+      onLog?.('✅ 加入粉丝团完成')
+    }
+    await manager.sleep(360)
+  }
+
+  if (requirements.needComment) {
+    const roomId = String(options?.lotteryInfo?.roomId || options?.lotteryInfo?.webRid || '').trim()
+    const commentText = String(requirements.commentText || '666')
+    onLog?.(`💬 检测到评论门槛，发送评论：${commentText}`)
+    const chatResult = await sendRequiredComment(manager, accountId, roomId, commentText)
+    if (!chatResult?.success) {
+      return {
+        success: false,
+        error: chatResult?.error || '评论发送失败',
+        code: chatResult?.code || 'COMMENT_SEND_FAILED'
+      }
+    }
+    onLog?.('✅ 评论发送成功')
+    await manager.sleep(320)
   }
 
   let clickJoinResult = await clickVisibleSelector(manager, accountId, '#lottery_close_cotainer div[role="button"]', 10000)

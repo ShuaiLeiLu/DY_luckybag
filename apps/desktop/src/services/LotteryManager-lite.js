@@ -11,11 +11,9 @@ import {
   startCollectLive as collectLiveByCategory
 } from './scanCollector'
 import {
-  attendLotteryWithRetry as executeAttendWithRetry,
   autoJoinRedPacketLoop as executeAutoJoinRedPacketLoop,
   closeLiveStreamRendering as executeCloseLiveStreamRendering,
   ensureCloseLiveStreamRendering as executeEnsureCloseLiveStreamRendering,
-  isAttendSuccessLike as detectAttendSuccessLike,
   joinLotteryByUI as executeJoinLotteryByUI,
   joinRedPacketByUI as executeJoinRedPacketByUI,
   openLiveStreamRendering as executeOpenLiveStreamRendering,
@@ -4608,38 +4606,12 @@ class LotteryManager {
       return
     }
 
-    const initialLotteryId = String(
-      uiJoinResult?.lotteryId ||
-      decoratedLottery?.lottery_id ||
-      decoratedLottery?.lotteryId ||
-      ''
-    )
-    const apiJoinResult = await this.attendLotteryWithRetry(
-      accountId,
-      accountData,
-      decoratedLottery,
-      initialLotteryId
-    )
-    if (this.isAttendSuccessLike(apiJoinResult)) {
-      const apiMessage = String(apiJoinResult?.message || '🎁 接口参与成功，等待开奖')
-      await this.onJoinSuccess(
-        accountId,
-        accountData,
-        latestRemainingTime,
-        config,
-        apiMessage,
-        buildHistoryLotteryInfo(apiJoinResult?.lotteryId || initialLotteryId)
-      )
-      return
-    }
-
     const failedHistoryLotteryInfo = buildHistoryLotteryInfo()
     const uiError = String(uiJoinResult?.error || '')
-    const apiError = String(apiJoinResult?.error || '')
-    const errorText = [uiError, apiError].filter(Boolean).join('；') || '福袋参与流程失败'
+    const errorText = uiError || 'UI参与失败'
     accountData.callbacks.onLog(`❌ ${errorText}`, 'error')
     this.reportPoolTaskFeedback(accountId, 'join_failed', failedHistoryLotteryInfo, {
-      joinMode: 'UI+API',
+      joinMode: 'UI',
       remainingSec: latestRemainingTime,
       reason: errorText || 'unknown'
     }).catch(() => {})
@@ -4804,20 +4776,6 @@ class LotteryManager {
    */
   async joinLotteryByUI(accountId, remainingTime = 30, options = {}) {
     return executeJoinLotteryByUI(this, accountId, remainingTime, options)
-  }
-
-  /**
-   * isAttendSuccessLike 方法：判断参与接口返回是否属于成功或可视作成功。
-   */
-  isAttendSuccessLike(result) {
-    return detectAttendSuccessLike(result)
-  }
-
-  /**
-   * attendLotteryWithRetry 方法：执行参与福袋重试。
-   */
-  async attendLotteryWithRetry(accountId, accountData, lotteryInfo, initialLotteryId) {
-    return executeAttendWithRetry(this, accountId, accountData, lotteryInfo, initialLotteryId)
   }
 
   /**
