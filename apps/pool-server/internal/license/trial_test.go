@@ -76,3 +76,42 @@ func TestBuildLicensedStatusSetsAccessFields(t *testing.T) {
 		t.Fatalf("expected license metadata to be populated, got %#v", status)
 	}
 }
+
+func TestMachineFingerprintValidation(t *testing.T) {
+	if !isMachineFingerprint("machine_0123456789abcdef0123456789abcdef") {
+		t.Fatalf("expected machine fingerprint to be valid")
+	}
+	if isMachineFingerprint("fp_random_123") {
+		t.Fatalf("unexpected random fingerprint accepted")
+	}
+	if normalizeMachineFingerprint(" machine_0123456789abcdef0123456789abcdef ") == "" {
+		t.Fatalf("expected normalizeMachineFingerprint to keep valid fingerprint")
+	}
+	if normalizeMachineFingerprint("bad_value") != "" {
+		t.Fatalf("expected normalizeMachineFingerprint to reject invalid fingerprint")
+	}
+}
+
+func TestBuildStatusRejectsMissingFingerprintWhenBound(t *testing.T) {
+	svc := &Service{}
+	now := time.Date(2026, 4, 9, 10, 0, 0, 0, time.UTC)
+	status := svc.buildStatus(licenseRow{
+		ID:              2,
+		LicenseKey:      "DY-TEST-0002",
+		CustomerName:    "Tester",
+		PlanName:        "pro",
+		Status:          "active",
+		ExpireAt:        now.Add(24 * time.Hour),
+		MaxClients:      1,
+		MaxAccounts:     10,
+		BindClientID:    sql.NullString{String: "client-bound", Valid: true},
+		BindFingerprint: sql.NullString{String: "machine_0123456789abcdef0123456789abcdef", Valid: true},
+	}, "client-bound", "", now)
+
+	if status.Authorized {
+		t.Fatalf("expected authorized=false when fingerprint missing, got %#v", status)
+	}
+	if status.State != "invalid_fingerprint" {
+		t.Fatalf("expected invalid_fingerprint state, got %#v", status)
+	}
+}

@@ -86,9 +86,9 @@ func (s *Service) CreateBindSession(ctx context.Context, req CreateBindSessionRe
 		return BindSession{}, err
 	}
 	clientID := strings.TrimSpace(req.ClientID)
-	fingerprint := strings.TrimSpace(req.Fingerprint)
+	fingerprint := normalizeMachineFingerprint(req.Fingerprint)
 	if clientID == "" || fingerprint == "" {
-		return BindSession{}, fmt.Errorf("clientId and fingerprint required")
+		return BindSession{}, fmt.Errorf("clientId and valid fingerprint required")
 	}
 
 	currentStatus, err := s.Status(ctx, clientID, fingerprint)

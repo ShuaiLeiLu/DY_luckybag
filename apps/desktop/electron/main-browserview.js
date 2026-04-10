@@ -3,15 +3,31 @@ const path = require('path')
 const https = require('https')
 const fs = require('fs')
 const os = require('os')
+const crypto = require('crypto')
 const { douyinLiveRemote } = require('./douyinLiveRemote')
 const { createLogger } = require('./logger')
 const { createHotUpdateService } = require('./hot-update-service')
 const { createStateStore, DEFAULT_SETTINGS } = require('./state-store')
 const { createUpdateService } = require('./update-service')
 
+function resolvePackagedProjectRootDir() {
+  const execPath = path.resolve(String(process.execPath || ''))
+  if (!execPath) return process.cwd()
+  const execDir = path.dirname(execPath)
+  if (process.platform === 'darwin') {
+    const appBundleDir = path.resolve(execDir, '..', '..')
+    return path.dirname(appBundleDir)
+  }
+  return execDir
+}
+
 function resolveProjectRootDir() {
   const fromEnv = String(process.env.DY_PROJECT_ROOT || '').trim()
   if (fromEnv) return path.resolve(fromEnv)
+
+  if (app.isPackaged) {
+    return resolvePackagedProjectRootDir()
+  }
 
   const candidates = [
     path.resolve(__dirname, '..', '..', '..'),
@@ -38,27 +54,33 @@ function resolveProjectRootDir() {
   return path.resolve(__dirname, '..', '..', '..')
 }
 
-function migrateLegacyStateDir(legacyUserDataDir, projectUserDataDir) {
-  const legacyStateDir = path.join(String(legacyUserDataDir || ''), 'state')
-  const targetStateDir = path.join(projectUserDataDir, 'state')
-  if (!legacyUserDataDir || !fs.existsSync(legacyStateDir)) return
-  if (fs.existsSync(targetStateDir)) return
+function migrateLegacyUserDataDir(legacyUserDataDir, projectUserDataDir) {
+  const sourceDir = path.resolve(String(legacyUserDataDir || ''))
+  const targetDir = path.resolve(String(projectUserDataDir || ''))
+  if (!sourceDir || !targetDir) return
+  if (sourceDir === targetDir) return
+  if (!fs.existsSync(sourceDir)) return
   try {
-    fs.mkdirSync(projectUserDataDir, { recursive: true })
-    fs.cpSync(legacyStateDir, targetStateDir, { recursive: true })
-    console.log(`[desktop-storage] migrated legacy state: ${legacyStateDir} -> ${targetStateDir}`)
+    fs.mkdirSync(targetDir, { recursive: true })
+    const entries = fs.readdirSync(sourceDir)
+    let copiedCount = 0
+    for (const entry of entries) {
+      const sourcePath = path.join(sourceDir, entry)
+      const targetPath = path.join(targetDir, entry)
+      if (fs.existsSync(targetPath)) continue
+      fs.cpSync(sourcePath, targetPath, { recursive: true })
+      copiedCount += 1
+    }
+    if (copiedCount > 0) {
+      console.log(`[desktop-storage] migrated legacy userData: ${sourceDir} -> ${targetDir} (entries=${copiedCount})`)
+    }
   } catch (error) {
-    console.warn(`[desktop-storage] migrate legacy state failed: ${String(error?.message || error)}`)
+    console.warn(`[desktop-storage] migrate legacy userData failed: ${String(error?.message || error)}`)
   }
 }
 
 function configureProjectUserDataDir() {
   const legacyUserDataDir = app.getPath('userData')
-  const forceProjectUserData = String(process.env.DY_FORCE_PROJECT_USER_DATA || '').trim() === '1'
-  if (app.isPackaged && !forceProjectUserData) {
-    console.log(`[desktop-storage] userData => ${legacyUserDataDir} (packaged default)`)
-    return
-  }
   const projectRootDir = resolveProjectRootDir()
   const projectUserDataDir = path.join(projectRootDir, 'dy-fudai-desktop')
   if (/\.asar([\\/]|$)/i.test(projectUserDataDir)) {
@@ -67,7 +89,7 @@ function configureProjectUserDataDir() {
   }
   try {
     fs.mkdirSync(projectUserDataDir, { recursive: true })
-    migrateLegacyStateDir(legacyUserDataDir, projectUserDataDir)
+    migrateLegacyUserDataDir(legacyUserDataDir, projectUserDataDir)
     app.setPath('userData', projectUserDataDir)
     console.log(`[desktop-storage] userData => ${projectUserDataDir}`)
   } catch (error) {
@@ -462,11 +484,22 @@ function concealAccountWindow(accountId) {
 }
 
 function getBootstrapSnapshot() {
+  const interfaces = os.networkInterfaces()
+  const macs = []
+  Object.values(interfaces || {}).forEach((list) => {
+    ;(Array.isArray(list) ? list : []).forEach((item) => {
+      const mac = String(item?.mac || '').trim().toLowerCase()
+      if (!mac || mac === '00:00:00:00:00:00') return
+      macs.push(mac)
+    })
+  })
+  const raw = [os.hostname(), os.platform(), os.arch(), ...macs.sort()].join('|')
+  const machineFingerprint = `machine_${crypto.createHash('sha256').update(raw).digest('hex').slice(0, 32)}`
   const store = ensureStateStore()
   const update = ensureUpdateService().getSnapshot()
   return {
     appVersion: app.getVersion(),
-    machineFingerprint: '',
+    machineFingerprint,
     settings: store.getSettings(),
     update,
     events: store.listEvents(180),

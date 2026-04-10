@@ -5,6 +5,11 @@ const CLIENT_ID_STORAGE_KEY = 'DY_POOL_CLIENT_ID'
 const LICENSE_FP_STORAGE_KEY = 'DY_LICENSE_FINGERPRINT'
 const CURRENT_ACCOUNTS_STORAGE_KEY = 'DY_CURRENT_ACCOUNTS'
 
+function isMachineFingerprint(value) {
+  const text = String(value || '').trim()
+  return /^machine_[a-f0-9]{32}$/i.test(text)
+}
+
 /**
  * 规范化筛选服务地址（补协议、去结尾斜杠）。
  * @param {string} text 原始地址
@@ -114,7 +119,7 @@ export function resolvePoolClientId() {
 
 /**
  * 获取当前客户端稳定授权指纹。
- * 第一版先使用本地持久化随机指纹，避免每次重启变化。
+ * 仅接受 Electron 主进程生成的 machine 指纹，避免随机指纹绕过设备绑定。
  * @returns {string}
  */
 export function resolveLicenseFingerprint() {
@@ -122,7 +127,7 @@ export function resolveLicenseFingerprint() {
     const electronFingerprint = typeof window !== 'undefined'
       ? String(window.electronAPI?.machineFingerprint || '').trim()
       : ''
-    if (electronFingerprint) {
+    if (isMachineFingerprint(electronFingerprint)) {
       try {
         if (typeof window !== 'undefined' && window.localStorage) {
           window.localStorage.setItem(LICENSE_FP_STORAGE_KEY, electronFingerprint)
@@ -135,13 +140,10 @@ export function resolveLicenseFingerprint() {
   try {
     if (typeof window !== 'undefined' && window.localStorage) {
       const existing = String(window.localStorage.getItem(LICENSE_FP_STORAGE_KEY) || '').trim()
-      if (existing) return existing
-      const next = `fp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`
-      window.localStorage.setItem(LICENSE_FP_STORAGE_KEY, next)
-      return next
+      if (isMachineFingerprint(existing)) return existing
     }
   } catch (_) {}
-  return `fp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`
+  return ''
 }
 
 /**
@@ -757,6 +759,24 @@ export async function fetchLicenseBindSessionStatus(baseUrl, options = {}) {
   const payload = isObject(res.data) ? res.data : {}
   if (payload.ok !== true) {
     return { ok: false, status: res.status, data: payload, error: payload?.error || 'license_bind_status_failed' }
+  }
+  return { ok: true, status: res.status, data: payload }
+}
+
+/**
+ * 获取桌面端公告 Markdown 文本。
+ * @param {string} baseUrl 服务地址
+ * @param {{timeoutMs?:number}} options 请求参数
+ * @returns {Promise<object>}
+ */
+export async function fetchDesktopNotice(baseUrl, options = {}) {
+  const res = await requestJSON(baseUrl, '/desktop/notice', {
+    timeoutMs: Number(options.timeoutMs || DEFAULT_TIMEOUT_MS)
+  })
+  if (!res.ok) return res
+  const payload = isObject(res.data) ? res.data : {}
+  if (payload.ok !== true) {
+    return { ok: false, status: res.status, data: payload, error: payload?.error || 'desktop_notice_failed' }
   }
   return { ok: true, status: res.status, data: payload }
 }

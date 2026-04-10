@@ -185,6 +185,18 @@
       </div>
 
       <div class="card">
+        <div class="hd">桌面端系统公告</div>
+        <div class="bd">
+          <div class="row">
+            <textarea id="notice_markdown" style="width:100%; min-height:140px;" placeholder="支持 Markdown，例如：# 系统公告"></textarea>
+          </div>
+          <div class="row">
+            <button onclick="saveNoticeMarkdown()">保存公告</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
         <div class="hd">新增授权</div>
         <div class="bd">
           <div class="row">
@@ -230,6 +242,7 @@
     const tbody = $("tbody");
     const state = { page: 1, pageSize: 200, total: 0, items: [] };
     let unrestrictedEnabled = false;
+    let noticeMarkdown = "";
 
     function showMsg(text, ok = true) {
       msgEl.className = "msg " + (ok ? "ok" : "err");
@@ -300,12 +313,16 @@
       const statusEl = $("unrestricted_status");
       const toggleEl = $("unrestricted_toggle");
       const svcUnrestricted = $("svc_unrestricted");
+      const noticeEl = $("notice_markdown");
       statusEl.className = "pill " + (unrestrictedEnabled ? "ok" : "off");
       statusEl.textContent = unrestrictedEnabled ? "已开启，所有客户端免授权" : "已关闭，按正常授权校验";
       toggleEl.textContent = unrestrictedEnabled ? "关闭免授权" : "开启免授权";
       toggleEl.className = unrestrictedEnabled ? "danger" : "warn";
       svcUnrestricted.className = "pill " + (unrestrictedEnabled ? "ok" : "off");
       svcUnrestricted.textContent = unrestrictedEnabled ? "免授权：开启" : "免授权：关闭";
+      if (noticeEl && noticeEl.value !== noticeMarkdown) {
+        noticeEl.value = noticeMarkdown;
+      }
     }
 
     function renderMetrics() {
@@ -325,6 +342,7 @@
         const data = await request("/admin/api/license-settings");
         const result = data.result || {};
         unrestrictedEnabled = result.unrestricted === true;
+        noticeMarkdown = String(result.noticeMarkdown || "");
         renderGlobalSettings();
         $("svc_license").className = "pill ok";
         $("svc_license").textContent = "授权服务：正常";
@@ -338,15 +356,36 @@
 
     async function toggleUnrestricted() {
       try {
+        const noticeEl = $("notice_markdown");
         const data = await request("/admin/api/license-settings", "POST", {
-          unrestricted: !unrestrictedEnabled
+          unrestricted: !unrestrictedEnabled,
+          noticeMarkdown: noticeEl ? String(noticeEl.value || "") : noticeMarkdown
         });
         const result = data.result || {};
         unrestrictedEnabled = result.unrestricted === true;
+        noticeMarkdown = String(result.noticeMarkdown || "");
         renderGlobalSettings();
         showMsg(unrestrictedEnabled ? "已开启免授权，所有客户端可直接使用" : "已关闭免授权，恢复正常授权逻辑");
       } catch (err) {
         showMsg(`更新失败：${err.message}`, false);
+      }
+    }
+
+    async function saveNoticeMarkdown() {
+      try {
+        const noticeEl = $("notice_markdown");
+        const nextNotice = noticeEl ? String(noticeEl.value || "") : "";
+        const data = await request("/admin/api/license-settings", "POST", {
+          unrestricted: unrestrictedEnabled,
+          noticeMarkdown: nextNotice
+        });
+        const result = data.result || {};
+        unrestrictedEnabled = result.unrestricted === true;
+        noticeMarkdown = String(result.noticeMarkdown || "");
+        renderGlobalSettings();
+        showMsg("系统公告已保存");
+      } catch (err) {
+        showMsg(`公告保存失败：${err.message}`, false);
       }
     }
 

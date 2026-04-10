@@ -154,7 +154,6 @@ export interface DesktopSettings {
   hotUpdateEnabled: boolean
   hotUpdateManifestUrl: string
   hotUpdateReloadOnApply: boolean
-  noticeMarkdown: string
   stayDuration: number
   enableRedPacket: boolean
   randomInteraction: boolean

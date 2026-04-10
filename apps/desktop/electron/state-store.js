@@ -1,9 +1,6 @@
 const fs = require('fs')
 const path = require('path')
 
-const PROJECT_ROOT_PATH = path.resolve(__dirname, '..', '..', '..')
-const PROJECT_CONFIG_PATH = path.join(PROJECT_ROOT_PATH, 'config.json')
-const PROJECT_RUNTIME_LOGS_DIR = path.join(PROJECT_ROOT_PATH, 'runtime-logs')
 const SETTINGS_FILE_NAME = 'desktop-settings.json'
 const HISTORY_ALL_FILE_NAME = 'lottery-history-records.jsonl'
 const JOIN_RECORDS_FILE_NAME = 'lottery-join-records.jsonl'
@@ -17,7 +14,6 @@ const BUILTIN_DEFAULT_SETTINGS = Object.freeze({
   hotUpdateEnabled: true,
   hotUpdateManifestUrl: 'http://fudai.shuai.help:9090/desktop/hot-manifest.json',
   hotUpdateReloadOnApply: false,
-  noticeMarkdown: '',
   stayDuration: 18,
   enableRedPacket: true,
   randomInteraction: true,
@@ -34,6 +30,20 @@ const BUILTIN_DEFAULT_SETTINGS = Object.freeze({
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true })
+}
+
+function resolveProjectRootPath(baseDir = '') {
+  const fromEnv = String(process.env.DY_PROJECT_ROOT || '').trim()
+  if (fromEnv) return path.resolve(fromEnv)
+  const safeBaseDir = String(baseDir || '').trim()
+  if (safeBaseDir) {
+    return path.dirname(path.resolve(safeBaseDir))
+  }
+  return path.resolve(__dirname, '..', '..', '..')
+}
+
+function resolveProjectConfigPath() {
+  return path.join(resolveProjectRootPath(''), 'config.json')
 }
 
 function safeParseJSON(raw, fallback) {
@@ -106,18 +116,19 @@ function formatLocalDateParts(ms) {
 
 function mergeSettings(base, patch = {}) {
   const next = asPlainObject(patch, {})
+  const { noticeMarkdown: _legacyNoticeMarkdown, ...sanitizedNext } = next
   return {
     ...base,
-    ...next,
-    hitRate: { ...base.hitRate, ...asPlainObject(next.hitRate) },
-    secondInspect: { ...base.secondInspect, ...asPlainObject(next.secondInspect) },
-    filterFanClub: { ...base.filterFanClub, ...asPlainObject(next.filterFanClub) },
-    onlyPhysicalPrize: { ...base.onlyPhysicalPrize, ...asPlainObject(next.onlyPhysicalPrize) },
-    preferBigRedPacket: { ...base.preferBigRedPacket, ...asPlainObject(next.preferBigRedPacket) },
-    filterOnline: { ...base.filterOnline, ...asPlainObject(next.filterOnline) },
-    participationCount: { ...base.participationCount, ...asPlainObject(next.participationCount) },
-    singleAccountDuration: { ...base.singleAccountDuration, ...asPlainObject(next.singleAccountDuration) },
-    scanConfig: { ...base.scanConfig, ...asPlainObject(next.scanConfig) }
+    ...sanitizedNext,
+    hitRate: { ...base.hitRate, ...asPlainObject(sanitizedNext.hitRate) },
+    secondInspect: { ...base.secondInspect, ...asPlainObject(sanitizedNext.secondInspect) },
+    filterFanClub: { ...base.filterFanClub, ...asPlainObject(sanitizedNext.filterFanClub) },
+    onlyPhysicalPrize: { ...base.onlyPhysicalPrize, ...asPlainObject(sanitizedNext.onlyPhysicalPrize) },
+    preferBigRedPacket: { ...base.preferBigRedPacket, ...asPlainObject(sanitizedNext.preferBigRedPacket) },
+    filterOnline: { ...base.filterOnline, ...asPlainObject(sanitizedNext.filterOnline) },
+    participationCount: { ...base.participationCount, ...asPlainObject(sanitizedNext.participationCount) },
+    singleAccountDuration: { ...base.singleAccountDuration, ...asPlainObject(sanitizedNext.singleAccountDuration) },
+    scanConfig: { ...base.scanConfig, ...asPlainObject(sanitizedNext.scanConfig) }
   }
 }
 
@@ -168,9 +179,10 @@ function isLegacyLoopbackPoolServerUrl(raw) {
 }
 
 function loadDesktopConfigDefaults() {
+  const projectConfigPath = resolveProjectConfigPath()
   try {
-    if (!fs.existsSync(PROJECT_CONFIG_PATH)) return {}
-    const raw = fs.readFileSync(PROJECT_CONFIG_PATH, 'utf8')
+    if (!fs.existsSync(projectConfigPath)) return {}
+    const raw = fs.readFileSync(projectConfigPath, 'utf8')
     const parsed = asPlainObject(safeParseJSON(raw, {}), {})
     return asPlainObject(parsed.desktop, {})
   } catch (_) {
@@ -258,10 +270,11 @@ function appendJsonLine(filePath, payload) {
   fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, 'utf8')
 }
 
-function resolveRuntimeLogsDir(stateDir) {
+function resolveRuntimeLogsDir(baseDir, stateDir) {
+  const projectRuntimeLogsDir = path.join(resolveProjectRootPath(baseDir), 'runtime-logs')
   try {
-    ensureDir(PROJECT_RUNTIME_LOGS_DIR)
-    return PROJECT_RUNTIME_LOGS_DIR
+    ensureDir(projectRuntimeLogsDir)
+    return projectRuntimeLogsDir
   } catch (_) {
     const fallbackDir = path.join(stateDir, 'runtime-logs')
     ensureDir(fallbackDir)
@@ -373,7 +386,7 @@ function purgeJsonlByAccount(filePath, accountId) {
 function createStateStore(baseDir) {
   const stateDir = path.join(baseDir, 'state')
   ensureDir(stateDir)
-  const runtimeLogsDir = resolveRuntimeLogsDir(stateDir)
+  const runtimeLogsDir = resolveRuntimeLogsDir(baseDir, stateDir)
   const accountLogsDir = path.join(runtimeLogsDir, ACCOUNT_LOGS_DIR_NAME)
   ensureDir(accountLogsDir)
   const settingsPath = path.join(stateDir, SETTINGS_FILE_NAME)

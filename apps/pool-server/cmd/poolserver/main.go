@@ -1020,13 +1020,25 @@ func main() {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": result})
 		case http.MethodPost:
 			var req struct {
-				Unrestricted bool `json:"unrestricted"`
+				Unrestricted   *bool   `json:"unrestricted"`
+				NoticeMarkdown *string `json:"noticeMarkdown"`
 			}
 			if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
 				writeBodyErr(w, err)
 				return
 			}
-			result, err := licenseSvc.AdminSetUnrestricted(r.Context(), req.Unrestricted)
+			nextUnrestricted := false
+			if req.Unrestricted != nil {
+				nextUnrestricted = *req.Unrestricted
+			} else {
+				current, err := licenseSvc.AdminGetGlobalSettings(r.Context())
+				if err != nil {
+					writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_settings_update_failed"})
+					return
+				}
+				nextUnrestricted = current.Unrestricted
+			}
+			result, err := licenseSvc.AdminSetGlobalSettings(r.Context(), nextUnrestricted, req.NoticeMarkdown)
 			if err != nil {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_settings_update_failed"})
 				return
@@ -1035,6 +1047,27 @@ func main() {
 		default:
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 		}
+	})
+
+	mux.HandleFunc("/desktop/notice", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "markdown": ""})
+			return
+		}
+		markdown, err := licenseSvc.GetDesktopNoticeMarkdown(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "desktop_notice_unavailable", "markdown": ""})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "markdown": markdown})
 	})
 
 	mux.HandleFunc("/license/bind-session/create", func(w http.ResponseWriter, r *http.Request) {

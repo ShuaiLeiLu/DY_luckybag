@@ -98,13 +98,15 @@ func (s *Service) StartTrial(ctx context.Context, req TrialRequest) (Status, err
 	if s == nil || !s.cfg.Enabled {
 		return base, nil
 	}
-	if s.initErr != nil || s.db == nil {
+	if err := s.ensureRuntimeReady(ctx); err != nil {
 		base.State = "backend_unavailable"
 		base.Message = "授权服务不可用"
 		base.AccessMode = "locked"
 		base.RequiresActivation = true
-		return base, s.initErr
+		base.Available = false
+		return base, err
 	}
+	base.Available = true
 	if unrestricted, err := s.IsUnrestricted(ctx); err == nil && unrestricted {
 		return s.buildUnrestrictedStatus(now), nil
 	} else if err != nil {
@@ -116,10 +118,10 @@ func (s *Service) StartTrial(ctx context.Context, req TrialRequest) (Status, err
 	}
 
 	clientID := strings.TrimSpace(req.ClientID)
-	fingerprint := strings.TrimSpace(req.Fingerprint)
+	fingerprint := normalizeMachineFingerprint(req.Fingerprint)
 	if fingerprint == "" {
 		base.State = "invalid_fingerprint"
-		base.Message = "设备指纹不能为空"
+		base.Message = "设备指纹无效，请重启客户端后重试"
 		base.AccessMode = "locked"
 		base.RequiresActivation = true
 		return base, nil

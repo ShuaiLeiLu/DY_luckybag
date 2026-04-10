@@ -10,6 +10,7 @@ import LotteryManager from '../services/LotteryManager-lite'
 import {
   FIXED_POOL_SERVER_URL,
   activateLicense,
+  fetchDesktopNotice,
   fetchLicenseStatus,
   normalizePoolServerUrl,
   resolveLicenseFingerprint,
@@ -71,7 +72,6 @@ const defaultSettings: DesktopSettings = {
   hotUpdateEnabled: true,
   hotUpdateManifestUrl: 'http://fudai.shuai.help:9090/desktop/hot-manifest.json',
   hotUpdateReloadOnApply: false,
-  noticeMarkdown: '',
   stayDuration: 18,
   enableRedPacket: true,
   randomInteraction: true,
@@ -220,6 +220,7 @@ export default function App() {
   const [forceShowMainWhenLocked, setForceShowMainWhenLocked] = useState(false)
   const [manualShowLicenseGate, setManualShowLicenseGate] = useState(false)
   const [licenseBusy, setLicenseBusy] = useState(false)
+  const [announcementMarkdown, setAnnouncementMarkdown] = useState('')
   const lastRuntimeLogRef = useRef<Map<string, { key: string; at: number }>>(new Map())
   const {
     logs,
@@ -407,6 +408,22 @@ export default function App() {
     setLicense(normalizeLicenseSnapshot(result.data?.license || {}))
   })
 
+  const refreshDesktopNotice = useEffectEvent(async (baseUrl: string) => {
+    const normalizedBaseUrl = normalizePoolServerUrl(baseUrl) || FIXED_POOL_SERVER_URL
+    try {
+      const result = (await fetchDesktopNotice(normalizedBaseUrl, { timeoutMs: 2600 })) as ServiceResult<{ markdown?: string; noticeMarkdown?: string; notice?: string }>
+      if (!result?.ok) {
+        setAnnouncementMarkdown('')
+        return
+      }
+      const payload = result.data || {}
+      const text = String(payload.markdown ?? payload.noticeMarkdown ?? payload.notice ?? '').trim()
+      setAnnouncementMarkdown(text)
+    } catch {
+      setAnnouncementMarkdown('')
+    }
+  })
+
   const refreshDispatch = useEffectEvent(async () => {
     manager.setPoolServerConfig({ url: activePoolServerUrl }, { silent: true })
     const result = (await manager.fetchPoolTaskDebugSnapshot(buildLegacyConfig(settings), { limit: 50 })) as ServiceResult<{
@@ -449,10 +466,12 @@ export default function App() {
     try {
       const snapshot = await window.electronAPI.desktop.getBootstrap()
       const snapshotPoolServerUrl = normalizePoolServerUrl(snapshot?.settings?.poolServerUrl) || FIXED_POOL_SERVER_URL
+      const snapshotSettings = { ...(snapshot?.settings || {}) } as AnyRecord
+      delete snapshotSettings.noticeMarkdown
       setBootstrap(snapshot)
       setSettings({
         ...defaultSettings,
-        ...(snapshot.settings || {}),
+        ...snapshotSettings,
         poolServerUrl: snapshotPoolServerUrl
       })
       setUpdateState(snapshot.update || emptyUpdate)
@@ -464,6 +483,7 @@ export default function App() {
         })
       }
       setHistoryRecords(Array.isArray(snapshot.historyRecords) ? snapshot.historyRecords : [])
+      void refreshDesktopNotice(snapshotPoolServerUrl)
     } catch (error) {
       addLog(`引导信息加载失败: ${String((error as Error)?.message || error)}`, 'warning')
     }
@@ -819,7 +839,8 @@ export default function App() {
     void refreshLicense()
     void refreshDispatch()
     void refreshLearning()
-  }, [settings.poolServerUrl])
+    void refreshDesktopNotice(activePoolServerUrl)
+  }, [activePoolServerUrl])
 
   useEffect(() => {
     setAccounts((current) => current.map((account) => {
@@ -997,7 +1018,7 @@ export default function App() {
         <LicenseGate
           license={license}
           licenseKey={licenseKey}
-          announcementMarkdown={settings.noticeMarkdown}
+          announcementMarkdown={announcementMarkdown}
           bindBusy={bindBusy}
           bindSession={bindSession}
           miniAppCodeUrl={bindMiniAppCodeUrl}

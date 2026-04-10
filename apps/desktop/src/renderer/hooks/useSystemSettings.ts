@@ -8,7 +8,6 @@ export const defaultSettings: DesktopSettings = {
   hotUpdateEnabled: true,
   hotUpdateManifestUrl: 'http://fudai.shuai.help:9090/desktop/hot-manifest.json',
   hotUpdateReloadOnApply: false,
-  noticeMarkdown: '',
   stayDuration: 18,
   enableRedPacket: true,
   randomInteraction: true,
@@ -28,9 +27,11 @@ export function useSystemSettings(bootstrap: BootstrapSnapshot | null) {
 
   useEffect(() => {
     if (bootstrap?.settings) {
+      const nextSettings: Partial<DesktopSettings> & { noticeMarkdown?: string } = { ...bootstrap.settings };
+      delete nextSettings.noticeMarkdown;
       setSettings({
         ...defaultSettings,
-        ...bootstrap.settings,
+        ...nextSettings,
         poolServerUrl: FIXED_POOL_SERVER_URL // Force fixed URL
       });
     }

@@ -5,7 +5,6 @@
     "hotUpdateEnabled": true,
     "hotUpdateManifestUrl": "http://fudai.shuai.help:9090/desktop/hot-manifest.json",
     "hotUpdateReloadOnApply": false,
-    "noticeMarkdown": "# 系统公告\n\n- 欢迎使用新版服务端派单工作台。\n- **今日维护窗口**：凌晨 `02:30 - 03:00`，期间可能短暂断连。\n- 建议先完成“小程序绑定”，再批量添加执行账号。\n\n如需帮助，请联系运维同学。",
     "stayDuration": 18,
     "enableRedPacket": true,
     "randomInteraction": true,
