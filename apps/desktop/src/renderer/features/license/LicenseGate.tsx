@@ -1,4 +1,4 @@
-﻿import type { ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import type { LicenseSnapshot } from '@shared/models'
 import { formatRelative } from '../../lib/runtime'
 import type { LicenseBindSession } from './types'
@@ -33,164 +33,135 @@ export function LicenseGate(props: LicenseGateProps) {
   const miniAppPlaceholder = getMiniAppPlaceholder(props.bindSession, props.bindBusy)
 
   return (
-    <div className="grid gap-4 lg:h-full lg:grid-cols-[minmax(0,1.05fr)_minmax(320px,460px)]">
-      <section className="glass flex min-h-[320px] flex-col rounded-[32px] p-5 sm:p-6 xl:p-8">
-        <div className="flex flex-1 flex-col">
-          <div className="inline-flex items-center gap-3 rounded-full border border-cyan-400/20 bg-cyan-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.28em] text-cyan-100">
-            SERVICE DISPATCH EDITION
-          </div>
-          <h1 className="mt-6 max-w-xl text-3xl font-semibold leading-tight text-white sm:text-4xl">
-            3 天设备试用 + 正式授权
-            <br />
-            进入新的桌面调度台
-          </h1>
-          <p className="mt-4 max-w-2xl text-sm leading-7 text-slate-300">
-            当前版本采用服务端统一派单、客户端隐藏执行池与高密度账号调度。试用期内完整开放，便于快速验证执行链路和调度效果。
-          </p>
-          <div className="mt-6 flex min-h-[220px] flex-1 flex-col rounded-[24px] border border-cyan-400/25 bg-slate-950/40 p-4">
-            <div className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-100/90">公告</div>
-            <div className="mt-3 flex-1 overflow-auto rounded-2xl border border-slate-700/70 bg-slate-950/55 p-4">
-              <MarkdownNotice markdown={props.announcementMarkdown} />
+    <div className="flex min-h-full items-center justify-center p-4">
+      <section className="glass flex w-full max-w-2xl flex-col items-center rounded-[32px] p-6 shadow-2xl sm:p-8">
+        <div className="mb-6 inline-flex items-center gap-3 rounded-full border border-cyan-400/20 bg-cyan-500/10 px-4 py-1.5 text-xs font-bold uppercase tracking-[0.25em] text-cyan-200">
+          授权验证
+        </div>
+
+        <h1 className="text-center text-3xl font-extrabold tracking-tight text-white sm:text-4xl">
+          抖音福袋工作台
+        </h1>
+        <p className="mt-3 text-center text-sm leading-6 text-slate-300">
+          {props.license.message || '请开始试用或使用正式授权码激活服务'}
+        </p>
+
+        <div className="mt-8 flex w-full flex-col gap-4">
+          <div className="flex flex-col items-center justify-between gap-4 rounded-[24px] border border-slate-700/60 bg-slate-900/40 p-4 sm:flex-row">
+            <div className="flex-1">
+              <div className="text-sm font-semibold text-white">新设备首次登录</div>
+              <div className="mt-1 text-xs text-slate-400">我们将为您提供3天完整试用授权，结束后需要正式授权。</div>
             </div>
+            <button
+              className="w-full shrink-0 rounded-2xl bg-emerald-500 px-6 py-3 text-sm font-bold text-slate-950 transition hover:bg-emerald-400 sm:w-auto disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={props.busy}
+              onClick={props.onStartTrial}
+            >
+              {props.busy ? '处理中...' : '开始 3 天试用'}
+            </button>
+          </div>
+
+          <div className="flex flex-col gap-3 rounded-[24px] border border-slate-700/60 bg-slate-900/40 p-4 sm:flex-row sm:items-center">
+            <input
+              value={props.licenseKey}
+              onChange={(event) => props.onLicenseKeyChange(event.target.value)}
+              className="flex-1 rounded-2xl border border-slate-700/80 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-400/70"
+              placeholder="输入正式授权码"
+            />
+            <button
+              className="w-full shrink-0 rounded-2xl border border-cyan-400/30 bg-cyan-500/10 px-6 py-3 text-sm font-bold text-cyan-100 transition hover:bg-cyan-500/20 sm:w-auto disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={props.busy}
+              onClick={props.onActivate}
+            >
+              {props.busy ? '处理中...' : '直接激活'}
+            </button>
           </div>
         </div>
-        <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          <FeaturePanel title="服务端派单" description="候选池统一筛选，客户端只负责执行与回传。" />
-          <FeaturePanel title="隐藏执行池" description="多账号默认隐藏运行，人工检查时再拉起窗口。" />
-          <FeaturePanel title="授权状态机" description="试用、激活、过期、锁定都由服务端状态驱动。" />
-        </div>
-      </section>
 
-      <section className="glass flex flex-col rounded-[32px] p-5 sm:p-6">
-        <div>
-          <h2 className="text-2xl font-semibold text-white">设备接入</h2>
-          <p className="mt-2 text-sm text-slate-400">{props.license.message || '请先开始试用或输入授权码。'}</p>
-        </div>
-
-        <div className="mt-6 rounded-[24px] border border-amber-400/20 bg-amber-500/10 p-4 text-sm text-amber-100">
-          <div className="font-semibold">试用说明</div>
-          <div className="mt-1 text-amber-100/80">每台设备首次安装可获得 3 天完整试用。试用结束后需要正式授权才可进入主调度台。</div>
-        </div>
-
-        <button
-          className="mt-5 rounded-2xl bg-emerald-400 px-4 py-3 font-semibold text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
-          disabled={props.busy}
-          onClick={props.onStartTrial}
-        >
-          {props.busy ? '处理中...' : '开始 3 天试用'}
-        </button>
-
-        <label className="mt-6 text-xs uppercase tracking-[0.2em] text-slate-500">授权码</label>
-        <input
-          value={props.licenseKey}
-          onChange={(event) => props.onLicenseKeyChange(event.target.value)}
-          className="mt-2 rounded-2xl border border-slate-700/80 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-400/70"
-          placeholder="输入正式授权码"
-        />
-        <button
-          className="mt-4 rounded-2xl border border-cyan-400/30 bg-cyan-500/10 px-4 py-3 font-semibold text-cyan-100 transition hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-60"
-          disabled={props.busy}
-          onClick={props.onActivate}
-        >
-          {props.busy ? '处理中...' : '激活正式授权'}
-        </button>
-
-        <div className="mt-6 rounded-[24px] border border-slate-700/70 bg-slate-950/55 p-4">
-          <div className="text-sm font-semibold uppercase tracking-[0.16em] text-slate-300">小程序绑定</div>
-          <div className="mt-3 grid gap-3 sm:grid-cols-2">
-            <div className="rounded-2xl border border-cyan-400/20 bg-gradient-to-b from-slate-900/60 to-slate-950/70 p-3">
-              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-cyan-100/90">微信扫一扫直达</div>
+        <div className="mt-8 w-full">
+          <div className="flex items-center justify-between mb-4">
+            <div className="text-sm font-bold uppercase tracking-[0.16em] text-slate-300">移动端快捷签到</div>
+            <button
+              className="text-xs font-semibold text-cyan-300 underline underline-offset-2 hover:text-cyan-200 disabled:opacity-50"
+              disabled={props.bindBusy}
+              onClick={props.onCreateBindSession}
+            >
+              {props.bindBusy ? '生成中...' : '刷新签到码'}
+            </button>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="flex flex-col items-center justify-center rounded-2xl border border-slate-700/60 bg-slate-900/30 p-4">
+              <div className="mb-3 text-[11px] font-bold uppercase tracking-[0.14em] text-cyan-100/90 hover:text-white">微信扫一扫直达</div>
               {showMiniAppCode ? (
-                <div className="mx-auto flex h-44 w-44 items-center justify-center rounded-2xl border border-slate-700/70 bg-white p-2 shadow-[0_10px_28px_rgba(15,23,42,0.35)]">
+                <div className="flex h-36 w-36 items-center justify-center rounded-2xl bg-white p-2">
                   <img
                     src={props.miniAppCodeUrl}
                     alt="mini-app-launch-code"
                     className="h-full w-full rounded-xl object-contain [image-rendering:pixelated]"
-                    onError={() => {
-                      console.warn('[miniapp-code] launch-code load failed', props.miniAppCodeUrl)
-                    }}
                   />
                 </div>
               ) : (
-                <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-slate-700 px-4 text-center text-sm text-slate-400">
+                <div className="flex h-36 w-36 items-center justify-center rounded-xl border border-dashed border-slate-700 text-center text-xs text-slate-500 p-2">
                   {miniAppPlaceholder}
                 </div>
               )}
-              <div className="mt-2 text-xs leading-5 text-slate-400">用于微信首页扫一扫，直接跳转到小程序并带入绑定参数。</div>
             </div>
-            <div className="rounded-2xl border border-emerald-400/20 bg-gradient-to-b from-slate-900/60 to-slate-950/70 p-3">
-              <div className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-emerald-100/90">小程序内扫一扫</div>
+            <div className="flex flex-col items-center justify-center rounded-2xl border border-slate-700/60 bg-slate-900/30 p-4">
+              <div className="mb-3 text-[11px] font-bold uppercase tracking-[0.14em] text-emerald-100/90 hover:text-white">小程序内扫一扫</div>
               {showMiniAppScanCode ? (
-                <div className="mx-auto flex h-44 w-44 items-center justify-center rounded-2xl border border-slate-700/70 bg-white p-2 shadow-[0_10px_28px_rgba(15,23,42,0.35)]">
+                <div className="flex h-36 w-36 items-center justify-center rounded-2xl bg-white p-2">
                   <img
                     src={props.miniAppScanCodeUrl}
                     alt="mini-app-scan-code"
                     className="h-full w-full rounded-xl object-contain [image-rendering:pixelated]"
-                    onError={() => {
-                      console.warn('[miniapp-code] scan-code load failed', props.miniAppScanCodeUrl)
-                    }}
                   />
                 </div>
               ) : (
-                <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-slate-700 px-4 text-center text-sm text-slate-400">
+                <div className="flex h-36 w-36 items-center justify-center rounded-xl border border-dashed border-slate-700 text-center text-xs text-slate-500 p-2">
                   {miniAppPlaceholder}
                 </div>
               )}
-              <div className="mt-2 text-xs leading-5 text-slate-400">已进入小程序时，点击小程序内扫一扫，扫描此码可直接绑定当前桌面端。</div>
             </div>
           </div>
-          <div className="mt-3 grid gap-2 text-sm text-slate-300 sm:grid-cols-2">
-            <DeviceField label="绑定状态" value={bindStatus} />
-            <DeviceField label="剩余时长" value={bindRemaining} />
-          </div>
-          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          
+          <div className="mt-4 flex items-center justify-between text-xs text-slate-400 px-2">
+            <div className="flex items-center gap-2">
+              <span>状态：<strong className="text-slate-200">{bindStatus}</strong></span>
+              <span>/ 剩余时长：<strong className="text-slate-200">{bindRemaining}</strong></span>
+            </div>
             <button
-              className="rounded-2xl border border-cyan-400/20 bg-cyan-500/10 px-4 py-2.5 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={props.bindBusy}
-              onClick={props.onCreateBindSession}
-            >
-              {props.bindBusy ? '生成中...' : '刷新双码'}
-            </button>
-            <button
-              className="rounded-2xl border border-slate-600/80 bg-slate-900/80 px-4 py-2.5 text-sm font-semibold text-slate-100 transition hover:bg-slate-800/60 disabled:cursor-not-allowed disabled:opacity-60"
+              className="font-medium hover:text-white disabled:opacity-50"
               disabled={props.bindBusy || !bindToken}
               onClick={props.onRefreshBindStatus}
             >
-              刷新绑定状态
+              刷新状态
             </button>
           </div>
         </div>
 
+        {props.announcementMarkdown && (
+          <div className="mt-8 w-full rounded-[24px] border border-cyan-500/10 bg-cyan-950/10 p-5 shadow-inner">
+            <div className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-cyan-200/70">
+              系统公告
+            </div>
+            <div className="max-h-[160px] overflow-auto scrollbar-thin">
+              <MarkdownNotice markdown={props.announcementMarkdown} />
+            </div>
+          </div>
+        )}
+
         <button
-          className="mt-4 rounded-2xl border border-slate-600/80 bg-slate-900/85 px-4 py-3 text-sm font-semibold text-slate-100 transition hover:bg-slate-800/70"
+          className="mt-10 rounded-full border border-slate-700/60 px-6 py-2 text-sm font-medium text-slate-400 transition hover:bg-slate-800/60 hover:text-white"
           onClick={props.onBackToMain}
         >
-          返回主页面
+          返回主工作台
         </button>
       </section>
     </div>
   )
 }
 
-function FeaturePanel(props: { title: string; description: string }) {
-  return (
-    <div className="rounded-[24px] border border-slate-700/70 bg-slate-950/55 p-4">
-      <div className="text-sm font-semibold text-white">{props.title}</div>
-      <div className="mt-2 text-sm leading-6 text-slate-400">{props.description}</div>
-    </div>
-  )
-}
-
-function DeviceField(props: { label: string; value: string }) {
-  return (
-    <div className="rounded-2xl border border-slate-700/70 bg-slate-950/55 px-3 py-3">
-      <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{props.label}</div>
-      <div className="mt-2 overflow-x-auto whitespace-nowrap text-sm font-mono text-slate-100">{props.value || '-'}</div>
-    </div>
-  )
-}
-
-function MarkdownNotice(props: { markdown: string }) {
+export function MarkdownNotice(props: { markdown: string }) {
   const blocks = parseMarkdownBlocks(props.markdown)
   return (
     <div className="space-y-3 text-sm leading-7 text-slate-200">

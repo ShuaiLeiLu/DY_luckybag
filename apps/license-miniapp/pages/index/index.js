@@ -307,7 +307,7 @@ Page({
       return
     }
     if (!this.data.bindReady) {
-      wx.showToast({ title: '请先在“我的”页扫一扫绑定桌面端', icon: 'none' })
+      wx.showToast({ title: '请先扫码绑定桌面端', icon: 'none' })
       return
     }
     if (this.data.rewardDisabled) {
@@ -605,7 +605,6 @@ Page({
     return mapping[raw] || raw || '请求失败'
   }
 })
-
 
 
 

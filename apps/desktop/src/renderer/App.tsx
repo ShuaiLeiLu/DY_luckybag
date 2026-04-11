@@ -24,16 +24,18 @@ import {
   normalizeLicenseSnapshot,
   sortAccounts
 } from './lib/runtime'
-import { StatCard, ClusterBadge } from './components/ui/StatusWidgets'
+import { StatCard } from './components/ui/StatusWidgets'
 import { AccountCard } from './features/accounts/AccountCard'
 import { buildLegacyConfig } from './features/accounts/legacyConfig'
 import { DOUYIN_LOGIN_PROMPT_SCRIPT } from './features/accounts/loginPrompt'
-import { LicenseGate } from './features/license/LicenseGate'
-import { formatAccessModeText, formatHotUpdateStatusText, formatLicensePlanText, formatUpdateStatusText } from './features/license/presentation'
+import { LicenseGate, MarkdownNotice } from './features/license/LicenseGate'
+import { formatHotUpdateStatusText, formatLicensePlanText, formatUpdateStatusText } from './features/license/presentation'
 import { useLicenseBinding } from './features/license/useLicenseBinding'
 import { SettingsDrawer } from './features/settings/SettingsDrawer'
 import { TaskDetailPanel } from './features/dashboard/TaskDetailPanel'
 import { TimelinePanel } from './features/dashboard/TimelinePanel'
+import { LotteryListPanel } from './features/dashboard/LotteryListPanel'
+import { HistoryPanel } from './features/history/HistoryPanel'
 import { type UiLogEntry, useTimelineLogs } from './features/dashboard/useTimelineLogs'
 import type {
   AccountSession,
@@ -42,7 +44,6 @@ import type {
   DispatchSummary,
   LicenseSnapshot,
   LotteryHistoryRecord,
-  RecoveryEvent,
   UpdateSnapshot
 } from '@shared/models'
 
@@ -64,6 +65,8 @@ type HotUpdateSnapshot = {
   checkedAt: number
   appliedEntryFile: string
 }
+
+type MainView = 'dashboard' | 'accounts' | 'history' | 'logs'
 
 
 const defaultSettings: DesktopSettings = {
@@ -210,12 +213,12 @@ export default function App() {
   const [historyRecords, setHistoryRecords] = useState<LotteryHistoryRecord[]>([])
   const [dispatchSummary, setDispatchSummary] = useState<DispatchSummary>(emptyDispatchSummary)
   const [learningSummary, setLearningSummary] = useState<AnyRecord | null>(null)
-  const [learningItems, setLearningItems] = useState<AnyRecord[]>([])
   const [license, setLicense] = useState<LicenseSnapshot>(emptyLicense)
   const [updateState, setUpdateState] = useState<UpdateSnapshot>(emptyUpdate)
   const [hotUpdateState, setHotUpdateState] = useState<HotUpdateSnapshot>(emptyHotUpdate)
   const [licenseKey, setLicenseKey] = useState('')
   const [selectedAccountId, setSelectedAccountId] = useState('')
+  const [activeView, setActiveView] = useState<MainView>('dashboard')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [forceShowMainWhenLocked, setForceShowMainWhenLocked] = useState(false)
   const [manualShowLicenseGate, setManualShowLicenseGate] = useState(false)
@@ -455,11 +458,9 @@ export default function App() {
   const refreshLearning = useEffectEvent(async () => {
     const result = (await manager.fetchPoolLearningDebugSnapshot({ limit: 12 })) as ServiceResult<{
       summary?: AnyRecord
-      items?: AnyRecord[]
     }>
     if (!result?.ok) return
     setLearningSummary(result.data?.summary || null)
-    setLearningItems(Array.isArray(result.data?.items) ? result.data.items : [])
   })
 
   const bootstrapDesktop = useEffectEvent(async () => {
@@ -517,7 +518,7 @@ export default function App() {
 
     try {
       if (!options.reuseLoggedInBrowser) {
-        const launch = await window.electronAPI.invoke('launch-browser', { accountId, visible: false })
+        const launch = await window.electronAPI.invoke('launch-browser', { accountId, visible: true })
         if (!launch?.success) {
           addLog(`启动 ${runtime.nickname} 执行容器失败: ${launch?.error || 'unknown'}`, 'error')
           return
@@ -854,7 +855,6 @@ export default function App() {
   const totalWins = accounts.reduce((sum, account) => sum + Number(account.todayLotteryWinCount || 0), 0)
   const totalDiamonds = accounts.reduce((sum, account) => sum + Number(account.todayEarnedDiamonds || 0), 0)
   const totalParticipation = accounts.reduce((sum, account) => sum + Number(account.participationCount || 0), 0)
-  const accessModeText = formatAccessModeText(license.accessMode)
   const settingsAny = settings as AnyRecord
   const hotUpdateConfigured = settingsAny?.hotUpdateEnabled === true && String(settingsAny?.hotUpdateManifestUrl || '').trim() !== ''
   const useHotUpdateBadge = hotUpdateConfigured || hotUpdateState.enabled === true
@@ -873,6 +873,15 @@ export default function App() {
     }
     : updateState
   const licensePlanText = formatLicensePlanText(license)
+  const accountsMap = useMemo(() => {
+    return accounts.reduce((acc, account) => {
+      acc[account.id] = account.nickname || account.id
+      return acc
+    }, {} as Record<string, string>)
+  }, [accounts])
+  const sortedHistoryRecords = useMemo(() => {
+    return [...historyRecords].sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
+  }, [historyRecords])
 
   async function handleStartTrial() {
     const poolServerUrl = activePoolServerUrl
@@ -959,38 +968,6 @@ export default function App() {
     }
   }
 
-  const handleAccountWindowVisibility = useEffectEvent(async (account: AccountSession, visible: boolean) => {
-    const accountName = account.nickname || account.id
-    const actionText = visible ? '显示窗口' : '隐藏窗口'
-
-    try {
-      const requestVisibility = async () => {
-        return visible
-          ? (await window.electronAPI.desktop.showAccountWindow(account.id) as AnyRecord)
-          : (await window.electronAPI.desktop.hideAccountWindow(account.id) as AnyRecord)
-      }
-
-      let result = await requestVisibility()
-      if (!result?.success && visible && String(result?.error || '').includes('browser_window_not_found')) {
-        const launch = await window.electronAPI.invoke('launch-browser', { accountId: account.id, visible: true })
-        if (!launch?.success) {
-          addLog('[' + accountName + '] 窗口不存在且重建失败 - ' + String(launch?.error || 'unknown_error'), 'warning')
-          return
-        }
-        await window.electronAPI.invoke('navigate-to', { accountId: account.id, url: 'https://www.douyin.com' }).catch(() => {})
-        result = await requestVisibility()
-      }
-
-      if (!result?.success) {
-        addLog('[' + accountName + '] ' + actionText + '失败：' + String(result?.error || 'unknown_error'), 'warning')
-        return
-      }
-      addLog('[' + accountName + '] 已' + actionText, 'info')
-    } catch (error) {
-      addLog('[' + accountName + '] ' + actionText + '失败：' + String((error as Error)?.message || error || 'unknown_error'), 'error')
-    }
-  })
-
   const gateLocked = license.accessMode === 'locked' && license.requiresActivation
 
   const {
@@ -1011,6 +988,52 @@ export default function App() {
   })
 
   const showGate = (gateLocked && !forceShowMainWhenLocked) || manualShowLicenseGate
+  const mainViewTabs: Array<{ id: MainView; label: string }> = [
+    { id: 'dashboard', label: '总览' },
+    { id: 'accounts', label: '账号管理' },
+    { id: 'history', label: '历史记录' },
+    { id: 'logs', label: '运行日志' }
+  ]
+  const accountListPanel = (
+    <div className="glass flex flex-col rounded-[26px] p-4 2xl:min-h-[250px] 2xl:flex-1">
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-white">账号列表</h2>
+          <p className="text-sm text-slate-400">统一管理已接入账号，并支持启动、暂停和重新登录。</p>
+        </div>
+        <div className="text-sm text-slate-400">{accounts.length} 个账号</div>
+      </div>
+      <div className="scrollbar-thin grid gap-4 overflow-auto pr-1 sm:grid-cols-2">
+        {accounts.map((account) => (
+          <AccountCard
+            key={account.id}
+            account={account}
+            selected={selectedAccount?.id === account.id}
+            onSelect={() => setSelectedAccountId(account.id)}
+            onToggle={() => {
+              if (account.actionActive) {
+                void stopAccount(account.id)
+              } else {
+                void startAccountScanning(account.id)
+              }
+            }}
+            onRelogin={() => void startAccountWithLogin(account.id, true)}
+            onDelete={() => void removeAccount(account.id)}
+          />
+        ))}
+        {accounts.length === 0 ? (
+          <div className="col-span-full flex h-48 items-center justify-center rounded-[24px] border border-dashed border-slate-700/80 bg-slate-900/40 text-center text-sm text-slate-400">
+            暂无账号。点击“添加账号”后扫码登录。
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+  const lotteryListPanel = (
+    <div className="2xl:h-[300px] shrink-0">
+      <LotteryListPanel lotteriesByAccount={lotteriesByAccount} accountsMap={accountsMap} />
+    </div>
+  )
 
   return (
     <div className="h-full w-full overflow-auto p-3 sm:p-4 md:p-5">
@@ -1041,7 +1064,7 @@ export default function App() {
           <section className="glass rounded-[26px] p-3 sm:p-4">
             <div className="flex flex-col gap-2 2xl:flex-row 2xl:items-end 2xl:justify-between">
               <div className="flex flex-col gap-1.5 2xl:pr-4">
-                <h1 className="relative -top-3 text-2xl font-semibold tracking-tight text-white sm:text-3xl">抖娃福袋工作台</h1>
+                <h1 className="relative -top-3 text-2xl font-semibold tracking-tight text-white sm:text-3xl">抖音福袋工作台</h1>
                 <div className="flex flex-wrap items-center gap-2 text-sm text-slate-300">
                   <button className="w-full rounded-full bg-emerald-400 px-4 py-2 font-semibold text-slate-950 transition hover:bg-emerald-300 sm:w-auto" onClick={addAccount}>
                     添加账号
@@ -1082,76 +1105,80 @@ export default function App() {
                     版本 {bootstrap?.appVersion || displayUpdateState.currentVersion}
                   </span>
                 </div>
+                <div className="mt-1 flex flex-wrap gap-2">
+                  {mainViewTabs.map((tab) => (
+                    <button
+                      key={tab.id}
+                      className={`rounded-full border px-3 py-1.5 text-xs transition ${
+                        activeView === tab.id
+                          ? 'border-cyan-400/40 bg-cyan-500/15 text-cyan-100'
+                          : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800/60'
+                      }`}
+                      onClick={() => setActiveView(tab.id)}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
               </div>
               <div className="grid gap-2 sm:grid-cols-2 2xl:grid-cols-4">
                 <StatCard label="在线账号" value={String(runningCount)} tone="emerald" helper={`${accounts.length} 个账号已接入`} />
-                <StatCard label="候选可领" value={String(dispatchSummary.availableCandidates)} tone="cyan" helper={dispatchSummary.connected ? '共享池已连接' : dispatchSummary.error || '等待连接'} />
+                <StatCard label="可参与候选" value={String(dispatchSummary.availableCandidates)} tone="cyan" helper={dispatchSummary.connected ? '共享池已连接' : dispatchSummary.error || '等待连接'} />
                 <StatCard label="今日参与" value={String(totalParticipation)} tone="amber" helper={licensePlanText} />
                 <StatCard label="今日收益" value={`${totalDiamonds}`} tone="violet" helper={`中奖 ${totalWins} 次`} />
               </div>
             </div>
           </section>
 
-          <section className="grid gap-4 2xl:min-h-0 2xl:flex-1 2xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,420px)]">
-            <div className="grid gap-4 2xl:min-h-0">
-              <div className="glass rounded-[26px] p-4">
-                <div className="flex flex-wrap items-center gap-3 text-sm text-slate-300">
-                  <ClusterBadge label="授权模式" value={accessModeText} />
-                  <ClusterBadge label="更新状态" value={updateStatusText} />
-                  <ClusterBadge label="候选活跃" value={String(dispatchSummary.activeCandidates)} />
-                  <ClusterBadge label="候选有效" value={String(dispatchSummary.validCandidates)} />
-                  <ClusterBadge label="学习桶" value={String(learningItems.length)} />
-                </div>
-              </div>
-
-              <div className="glass flex flex-col rounded-[26px] p-4 2xl:min-h-0 2xl:flex-1">
-                <div className="mb-4 flex items-center justify-between">
-                  <div>
-                    <h2 className="text-lg font-semibold text-white">账号矩阵</h2>
-                    <p className="text-sm text-slate-400">扫描账号与执行账号共用同一调度面板，默认隐藏运行。</p>
+          {activeView === 'dashboard' ? (
+            <section className="grid gap-4 2xl:min-h-0 2xl:flex-1 2xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,420px)]">
+              <div className="flex flex-col gap-4 2xl:min-h-0">
+                <div className="glass rounded-[26px] p-5 shrink-0">
+                  <div className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-cyan-200/80">系统公告</div>
+                  <div className="max-h-[140px] overflow-auto scrollbar-thin">
+                    {announcementMarkdown ? (
+                      <MarkdownNotice markdown={announcementMarkdown} />
+                    ) : (
+                      <div className="flex h-16 items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-900/30 text-sm italic text-slate-500">
+                        后台当前暂无发布任何公告
+                      </div>
+                    )}
                   </div>
-                  <div className="text-sm text-slate-400">{accounts.length} 个账号</div>
                 </div>
-                <div className="scrollbar-thin grid gap-4 overflow-auto pr-1 sm:grid-cols-2 2xl:min-h-0 2xl:flex-1 2xl:grid-cols-2">
-                  {accounts.map((account) => (
-                    <AccountCard
-                      key={account.id}
-                      account={account}
-                      selected={selectedAccount?.id === account.id}
-                      onSelect={() => setSelectedAccountId(account.id)}
-                      onToggle={() => {
-                        if (account.actionActive) {
-                          void stopAccount(account.id)
-                        } else {
-                          void startAccountScanning(account.id)
-                        }
-                      }}
-                      onRelogin={() => void startAccountWithLogin(account.id, true)}
-                      onInspect={() => void handleAccountWindowVisibility(account, true)}
-                      onHide={() => void handleAccountWindowVisibility(account, false)}
-                      onDelete={() => void removeAccount(account.id)}
-                    />
-                  ))}
-                  {accounts.length === 0 ? (
-                    <div className="col-span-full flex h-56 items-center justify-center rounded-[24px] border border-dashed border-slate-700/80 bg-slate-900/40 text-center text-sm text-slate-400">
-                      暂无账号。点击“添加账号”后扫码登录，桌面端会在隐藏执行池中接管账号。
-                    </div>
-                  ) : null}
-                </div>
+                {accountListPanel}
+                {lotteryListPanel}
               </div>
-            </div>
 
-            <div className="grid gap-4 grid-rows-[minmax(220px,0.78fr)_minmax(360px,1.22fr)] xl:grid-cols-2 xl:grid-rows-1 2xl:min-h-0 2xl:grid-cols-1 2xl:grid-rows-[minmax(220px,0.74fr)_minmax(380px,1.26fr)]">
-              <TaskDetailPanel
-                selectedAccount={selectedAccount}
-              />
-              <TimelinePanel
-                logs={logs}
-                logListRef={logListRef}
-                onLogListScroll={handleLogListScroll}
-              />
-            </div>
-          </section>
+              <div className="grid gap-4 xl:grid-cols-2 2xl:min-h-0 2xl:grid-cols-1 2xl:grid-rows-[auto_minmax(0,1fr)]">
+                <TaskDetailPanel selectedAccount={selectedAccount} accounts={accounts} />
+                <TimelinePanel logs={logs} logListRef={logListRef} onLogListScroll={handleLogListScroll} />
+              </div>
+            </section>
+          ) : null}
+
+          {activeView === 'accounts' ? (
+            <section className="grid gap-4 2xl:min-h-0 2xl:flex-1 2xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,420px)]">
+              <div className="flex flex-col gap-4 2xl:min-h-0">
+                {accountListPanel}
+                {lotteryListPanel}
+              </div>
+              <TaskDetailPanel selectedAccount={selectedAccount} accounts={accounts} />
+            </section>
+          ) : null}
+
+          {activeView === 'history' ? (
+            <section className="2xl:min-h-0 2xl:flex-1">
+              <HistoryPanel records={sortedHistoryRecords} />
+            </section>
+          ) : null}
+
+          {activeView === 'logs' ? (
+            <section className="2xl:min-h-0 2xl:flex-1">
+              <div className="h-full">
+                <TimelinePanel logs={logs} logListRef={logListRef} onLogListScroll={handleLogListScroll} />
+              </div>
+            </section>
+          ) : null}
         </main>
       )}
 

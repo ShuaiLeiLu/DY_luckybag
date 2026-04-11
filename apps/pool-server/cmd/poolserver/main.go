@@ -53,6 +53,8 @@ type fileConfig struct {
 		Enabled              bool   `json:"enabled"`
 		Unrestricted         bool   `json:"unrestricted"`
 		AdminToken           string `json:"adminToken"`
+		AdminUsername        string `json:"adminUsername"`
+		AdminPassword        string `json:"adminPassword"`
 		AdUnlockDays         int    `json:"adUnlockDays"`
 		MiniAppEnabled       bool   `json:"miniAppEnabled"`
 		MiniAppAppID         string `json:"miniAppAppId"`
@@ -346,7 +348,6 @@ func extractAdminToken(r *http.Request) string {
 		bearer = strings.TrimSpace(auth[7:])
 	}
 	return firstNonEmpty(
-		r.URL.Query().Get("token"),
 		r.Header.Get("x-admin-token"),
 		bearer,
 	)
@@ -632,11 +633,15 @@ func main() {
 		MiniAppEnvVersion:    "release",
 	}
 	adminToken := ""
+	adminUsername := ""
+	adminPassword := ""
 	licenseAdUnlockDays := 1
 	if hasFileCfg {
 		lc.Enabled = fileCfg.License.Enabled
 		lc.DefaultUnrestricted = fileCfg.License.Unrestricted
 		adminToken = strings.TrimSpace(fileCfg.License.AdminToken)
+		adminUsername = strings.TrimSpace(fileCfg.License.AdminUsername)
+		adminPassword = strings.TrimSpace(fileCfg.License.AdminPassword)
 		if fileCfg.License.AdUnlockDays > 0 {
 			licenseAdUnlockDays = fileCfg.License.AdUnlockDays
 		}
@@ -704,6 +709,13 @@ func main() {
 	lc.MaxIdleConns = getenvInt("POOL_LICENSE_MYSQL_MAX_IDLE_CONNS", lc.MaxIdleConns)
 	lc.ConnMaxLifetimeMin = getenvInt("POOL_LICENSE_MYSQL_CONN_MAX_LIFETIME_MIN", lc.ConnMaxLifetimeMin)
 	adminToken = strings.TrimSpace(getenvStr("POOL_LICENSE_ADMIN_TOKEN", getenvStr("LICENSE_ADMIN_TOKEN", adminToken)))
+	adminUsername = strings.TrimSpace(getenvStr("POOL_LICENSE_ADMIN_USERNAME", getenvStr("LICENSE_ADMIN_USERNAME", adminUsername)))
+	adminPassword = strings.TrimSpace(getenvStr("POOL_LICENSE_ADMIN_PASSWORD", getenvStr("LICENSE_ADMIN_PASSWORD", adminPassword)))
+	if adminPassword == "" {
+		// Backward compatibility: if explicit login password is not configured,
+		// reuse admin token as the login password.
+		adminPassword = adminToken
+	}
 	licenseAdUnlockDays = getenvInt("POOL_LICENSE_AD_UNLOCK_DAYS", licenseAdUnlockDays)
 	if licenseAdUnlockDays <= 0 {
 		licenseAdUnlockDays = 1
@@ -780,7 +792,11 @@ func main() {
 		log.Printf("[pool-server-go] license=disabled")
 	}
 	if strings.TrimSpace(adminToken) != "" {
-		log.Printf("[pool-server-go] license-admin=enabled")
+		if adminUsername != "" {
+			log.Printf("[pool-server-go] license-admin=enabled login=username+password")
+		} else {
+			log.Printf("[pool-server-go] license-admin=enabled login=password-only")
+		}
 	} else {
 		log.Printf("[pool-server-go] license-admin=disabled (set POOL_LICENSE_ADMIN_TOKEN)")
 	}
@@ -996,6 +1012,46 @@ func main() {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "license": status})
+	})
+
+	mux.HandleFunc("/admin/api/login", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		var payload struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &payload); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+		if strings.TrimSpace(adminToken) == "" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "admin_not_configured"})
+			return
+		}
+		if strings.TrimSpace(adminPassword) == "" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "admin_password_not_configured"})
+			return
+		}
+		if adminUsername != "" && subtle.ConstantTimeCompare([]byte(strings.TrimSpace(payload.Username)), []byte(strings.TrimSpace(adminUsername))) != 1 {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid_credentials"})
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(payload.Password), []byte(adminPassword)) != 1 {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid_credentials"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":       true,
+			"token":    strings.TrimSpace(adminToken),
+			"username": strings.TrimSpace(adminUsername),
+		})
 	})
 
 	mux.HandleFunc("/admin/api/license-settings", func(w http.ResponseWriter, r *http.Request) {

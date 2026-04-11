@@ -1,4 +1,4 @@
-﻿import type { RefObject } from 'react'
+import type { RefObject } from 'react'
 
 export type TimelineLogEntry = {
   id: number
@@ -19,27 +19,26 @@ export type TimelinePanelProps = {
  */
 export function TimelinePanel(props: TimelinePanelProps) {
   return (
-    <aside className="glass flex flex-col rounded-[26px] p-3 2xl:min-h-0">
-      <div className="mb-2">
-        <div>
-          <h2 className="text-base font-semibold text-white">日志</h2>
-          <p className="text-xs text-slate-400">仅展示本次运行会话日志。</p>
-        </div>
+    <aside className="glass flex flex-col rounded-[26px] p-4 2xl:min-h-0">
+      <div className="mb-3">
+        <h2 className="text-lg font-semibold text-white">运行日志</h2>
+        <p className="text-sm text-slate-400">紧凑显示当前操作记录。</p>
       </div>
       <div
         ref={props.logListRef}
         onScroll={props.onLogListScroll}
-        className="scrollbar-thin flex-1 space-y-1.5 overflow-auto pr-1"
+        className="scrollbar-thin flex-1 space-y-1 overflow-auto pr-2"
       >
+        {props.logs.length === 0 && (
+          <div className="text-sm text-slate-500 italic">暂无日志输出...</div>
+        )}
         {props.logs.map((entry) => (
-          <div key={entry.id} className="rounded-2xl border border-slate-700/70 bg-slate-950/55 p-3">
-            <div className="flex items-center justify-between gap-3">
-              <span className={`rounded-full border px-2 py-1 text-[11px] uppercase tracking-[0.18em] ${toneByType(entry.type)}`}>
-                {textByType(entry.type)}
-              </span>
-              <span className="text-xs text-slate-500">{entry.time}</span>
+          <div key={entry.id} className="flex items-start gap-2 hover:bg-slate-800/40 px-1 py-0.5 rounded transition">
+            <div className="w-[68px] shrink-0 font-mono text-[11px] text-slate-500 pt-[2px]">{entry.time}</div>
+            <div className={`shrink-0 font-semibold text-[11px] mt-[1px] w-[34px] ${toneByType(entry.type)}`}>
+              {textByType(entry.type)}
             </div>
-            <div className="mt-2 text-sm leading-6 text-slate-200">{entry.message}</div>
+            <div className="text-[13px] leading-5 text-slate-300 break-all">{entry.message}</div>
           </div>
         ))}
       </div>
@@ -48,15 +47,15 @@ export function TimelinePanel(props: TimelinePanelProps) {
 }
 
 function toneByType(type: TimelineLogEntry['type']) {
-  if (type === 'success') return 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200'
-  if (type === 'warning') return 'border-amber-400/20 bg-amber-500/10 text-amber-200'
-  if (type === 'error') return 'border-rose-400/20 bg-rose-500/10 text-rose-200'
-  return 'border-slate-400/20 bg-slate-500/10 text-slate-200'
+  if (type === 'success') return 'text-emerald-400'
+  if (type === 'warning') return 'text-amber-400'
+  if (type === 'error') return 'text-rose-400'
+  return 'text-cyan-400'
 }
 
 function textByType(type: TimelineLogEntry['type']) {
-  if (type === 'warning') return '警告'
-  if (type === 'error') return '错误'
-  if (type === 'success') return '成功'
-  return '信息'
+  if (type === 'warning') return '[WARN]'
+  if (type === 'error') return '[FAIL]'
+  if (type === 'success') return '[OK]'
+  return '[INFO]'
 }
