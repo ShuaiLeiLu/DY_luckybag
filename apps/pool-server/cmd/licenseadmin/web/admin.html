@@ -1,0 +1,862 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>授权管理后台</title>
+  <style>
+    :root {
+      --bg-color: #f8fafc;
+      --card-bg: #ffffff;
+      --text-main: #0f172a;
+      --text-sub: #64748b;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --success: #10b981;
+      --success-hover: #059669;
+      --danger: #ef4444;
+      --danger-hover: #dc2626;
+      --warn: #f59e0b;
+      --warn-hover: #d97706;
+      --border: #e2e8f0;
+      --radius-lg: 16px;
+      --radius-md: 10px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg-color);
+      color: var(--text-main);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Views */
+    #login-view, #dashboard-view { display: none; }
+    #login-view.active { display: flex; }
+    #dashboard-view.active { display: block; }
+
+    /* --- Login View --- */
+    .login-wrapper {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      background: #0b1220;
+      background-image: 
+        radial-gradient(at 0% 0%, hsla(253,16%,7%,1) 0, transparent 50%), 
+        radial-gradient(at 50% 0%, hsla(225,39%,30%,1) 0, transparent 50%), 
+        radial-gradient(at 100% 0%, hsla(339,49%,30%,1) 0, transparent 50%);
+      position: relative;
+      overflow: hidden;
+    }
+    .login-wrapper::before {
+      content: '';
+      position: absolute;
+      top: -50%; left: -50%; width: 200%; height: 200%;
+      background: radial-gradient(circle, rgba(255,255,255,0.03) 1px, transparent 1px);
+      background-size: 32px 32px;
+      opacity: 0.5;
+      animation: slideBg 100s linear infinite;
+      pointer-events: none;
+    }
+    @keyframes slideBg {
+      0% { transform: translate(0, 0); }
+      100% { transform: translate(32px, 32px); }
+    }
+    .login-card {
+      position: relative;
+      background: rgba(15, 23, 42, 0.4);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      width: 100%;
+      max-width: 460px;
+      padding: 48px 40px;
+      border-radius: 28px;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+      text-align: center;
+      z-index: 10;
+    }
+    .login-card h1 {
+      font-size: 28px;
+      font-weight: 800;
+      color: #ffffff;
+      margin: 0 0 12px 0;
+      letter-spacing: -0.02em;
+    }
+    .login-card p {
+      color: #94a3b8;
+      font-size: 15px;
+      margin: 0 0 40px 0;
+    }
+    .login-input {
+      width: 100%;
+      height: 52px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 14px;
+      padding: 0 20px;
+      font-size: 15px;
+      color: #fff;
+      margin-bottom: 24px;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .login-input::placeholder { color: #64748b; }
+    .login-input:focus {
+      outline: none;
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(59, 130, 246, 0.5);
+      box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.1);
+    }
+    .login-btn {
+      width: 100%;
+      height: 52px;
+      background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+      color: #fff;
+      border: none;
+      border-radius: 14px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 4px 14px rgba(37, 99, 235, 0.3);
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .login-btn:hover { 
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(37, 99, 235, 0.4);
+    }
+    .login-btn:disabled { 
+      opacity: 0.7; 
+      cursor: not-allowed; 
+      transform: none;
+      box-shadow: none;
+    }
+
+    /* --- Dashboard View --- */
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 24px 20px 40px; }
+    
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+    }
+    .topbar h1 {
+      font-size: 22px;
+      font-weight: 800;
+      margin: 0;
+    }
+    .topbar-actions {
+      display: flex;
+      gap: 12px;
+    }
+    
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.02);
+      margin-bottom: 20px;
+      overflow: hidden;
+    }
+    .hd { 
+      padding: 16px 20px; 
+      border-bottom: 1px solid var(--border); 
+      font-weight: 700; 
+      font-size: 16px;
+      background: #fdfdfd;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .bd { padding: 20px; }
+    
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .stat-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 18px 20px;
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.02);
+      display: flex;
+      flex-direction: column;
+    }
+    .stat-label { font-size: 13px; color: var(--text-sub); font-weight: 600; margin-bottom: 8px; }
+    .stat-value { font-size: 28px; font-weight: 800; color: var(--text-main); }
+    .stat-note { font-size: 12px; color: #94a3b8; margin-top: auto; padding-top: 8px; }
+
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 20px;
+      background: #e2e8f0;
+      padding: 4px;
+      border-radius: 12px;
+      display: inline-flex;
+    }
+    .tab-btn {
+      border: none;
+      background: transparent;
+      color: var(--text-sub);
+      font-weight: 600;
+      font-size: 14px;
+      padding: 8px 20px;
+      border-radius: 9px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .tab-btn:hover { color: var(--text-main); }
+    .tab-btn.active {
+      background: #fff;
+      color: var(--text-main);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    /* Elements */
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+    .row:last-child { margin-bottom: 0; }
+    
+    input, select, textarea {
+      height: 38px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 0 12px;
+      font-size: 14px;
+      background: #fff;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input:focus, textarea:focus { border-color: var(--primary); }
+    textarea { height: 100px; padding: 10px 12px; resize: vertical; min-width: 300px; font-family: inherit; }
+    
+    button { 
+      height: 38px; 
+      padding: 0 16px;
+      font-size: 14px;
+      font-weight: 600;
+      border: none;
+      border-radius: var(--radius-md);
+      cursor: pointer; 
+      background: var(--primary); 
+      color: #fff; 
+      transition: background 0.2s, opacity 0.2s;
+    }
+    button:hover { background: var(--primary-hover); }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    button.secondary { background: #f1f5f9; color: #475569; }
+    button.secondary:hover { background: #e2e8f0; }
+    button.success { background: var(--success); }
+    button.success:hover { background: var(--success-hover); }
+    button.warn { background: var(--warn); }
+    button.warn:hover { background: var(--warn-hover); }
+    button.danger { background: var(--danger); }
+    button.danger:hover { background: var(--danger-hover); }
+    button.sm { height: 28px; padding: 0 10px; font-size: 12px; border-radius: 6px; }
+
+    .pill { 
+      display: inline-flex; align-items: center; height: 26px; padding: 0 10px; 
+      border-radius: 999px; font-size: 12px; font-weight: 600; 
+    }
+    .pill.ok { background: #dcfce7; color: #166534; }
+    .pill.off { background: #fee2e2; color: #991b1b; }
+    .pill.info { background: #e0f2fe; color: #0369a1; }
+    .pill.warn { background: #fef3c7; color: #92400e; }
+
+    .msg-toast {
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-20px);
+      background: #334155;
+      color: #fff;
+      padding: 10px 20px;
+      border-radius: 999px;
+      font-size: 14px;
+      font-weight: 500;
+      z-index: 9999;
+      opacity: 0;
+      pointer-events: none;
+      transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275), opacity 0.3s;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }
+    .msg-toast.show {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+    }
+    .msg-toast.err { background: var(--danger); }
+
+    table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+    th, td { 
+      border-bottom: 1px solid var(--border); 
+      text-align: left; 
+      padding: 14px 12px; 
+      vertical-align: middle; 
+    }
+    th { color: var(--text-sub); font-weight: 600; background: #f8fafc; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+    th:first-child { border-top-left-radius: 8px; }
+    th:last-child { border-top-right-radius: 8px; }
+    td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #475569; }
+    .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    
+    .empty-state { padding: 40px; text-align: center; color: var(--text-sub); }
+
+    @media (max-width: 768px) {
+      .topbar { flex-direction: column; align-items: flex-start; gap: 16px; }
+      .row { flex-direction: column; align-items: stretch; }
+      button { width: 100%; }
+      .actions button { width: auto; flex: 1; }
+      .tabs { width: 100%; overflow-x: auto; white-space: nowrap; }
+    }
+  </style>
+</head>
+<body>
+
+  <div id="msgToast" class="msg-toast"></div>
+
+  <!-- Login View -->
+  <div id="login-view" class="login-wrapper">
+    <div class="login-card">
+      <h1>授权管理后台</h1>
+      <p>请输入管理员账号和密码</p>
+      <input id="login-user" type="text" class="login-input" placeholder="管理员账号" onkeyup="if(event.key === 'Enter') doLogin()" />
+      <input id="login-pwd" type="password" class="login-input" placeholder="管理员密码" onkeyup="if(event.key === 'Enter') doLogin()" />
+      <button id="login-btn" class="login-btn" onclick="doLogin()">登录后台</button>
+    </div>
+  </div>
+
+  <!-- Dashboard View -->
+  <div id="dashboard-view" class="wrap">
+    <div class="topbar">
+      <h1>授权控制台 <span style="font-size:14px; font-weight:500; color:var(--text-sub); margin-left:8px;">v2.1</span></h1>
+      <div class="topbar-actions">
+        <button class="secondary" onclick="refreshAll()">刷新数据</button>
+        <button class="danger" onclick="logout()">退出登录</button>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="overview">概览</button>
+      <button class="tab-btn" data-tab="clients">运行客户端</button>
+      <button class="tab-btn" data-tab="licenses">授权列表</button>
+      <button class="tab-btn" data-tab="config">系统设置</button>
+    </div>
+
+    <section id="tab-overview" class="tab-panel active">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">授权总数</div>
+          <div id="metric_total" class="stat-value">0</div>
+          <div id="metric_note" class="stat-note">-</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">有效授权</div>
+          <div id="metric_active" class="stat-value" style="color:var(--success);">0</div>
+          <div class="stat-note">当前状态为 active</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">已绑定设备</div>
+          <div id="metric_bound" class="stat-value">0</div>
+          <div class="stat-note">存在绑定客户端 ID</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">微信绑定数</div>
+          <div id="metric_wechat" class="stat-value">0</div>
+          <div class="stat-note">已关联微信 OpenID</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hd">服务状态</div>
+        <div class="bd">
+          <div class="row">
+            <span id="svc_license" class="pill info">授权服务：正常</span>
+            <span id="svc_unrestricted" class="pill off">免授权模式：关闭</span>
+            <span class="pill ok">存储：MySQL</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-clients" class="tab-panel">
+      <div class="card">
+        <div class="hd">运行客户端记录</div>
+        <div class="bd" style="padding: 0; overflow-x: auto;">
+          <table>
+            <thead>
+            <tr>
+              <th>客户端 ID</th>
+              <th>机器码</th>
+              <th>授权模式</th>
+              <th>授权状态</th>
+              <th>计划</th>
+              <th>版本</th>
+              <th>最近活跃</th>
+            </tr>
+            </thead>
+            <tbody id="runtimeTbody">
+              <tr><td colspan="7" class="empty-state">缓冲加载中...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-licenses" class="tab-panel">
+      <div class="card">
+        <div class="hd">
+          授权实例列表
+          <button class="success sm" onclick="document.querySelector('.tab-btn[data-tab=\'config\']').click()">+ 新建授权</button>
+        </div>
+        <div class="bd" style="padding: 0; overflow-x: auto;">
+          <table>
+            <thead>
+            <tr>
+              <th>ID</th>
+              <th>授权码</th>
+              <th>微信绑定</th>
+              <th>当前状态</th>
+              <th>到期期限</th>
+              <th>绑定客户端</th>
+              <th>最近活跃</th>
+              <th style="min-width: 180px;">操作</th>
+            </tr>
+            </thead>
+            <tbody id="tbody">
+              <tr><td colspan="8" class="empty-state">缓冲加载中...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-config" class="tab-panel">
+      <div class="card">
+        <div class="hd" style="border-bottom-color: var(--warn); border-bottom-width: 2px;">免授权模式</div>
+        <div class="bd">
+          <div class="row" style="margin-bottom: 6px;">
+            <span style="font-weight: 600;">全局放行：</span>
+            <span id="unrestricted_status" class="pill off">状态同步中...</span>
+          </div>
+          <p style="font-size: 13px; color: var(--text-sub); margin-top: 0; margin-bottom: 16px;">
+            开启后，服务端将跳过授权校验，所有客户端均视为已授权。仅建议用于应急排障。
+          </p>
+          <div class="row">
+            <button id="unrestricted_toggle" class="warn" onclick="toggleUnrestricted()">切换免授权模式</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hd">批量生成授权码</div>
+        <div class="bd">
+          <div class="row">
+            <input id="create_days" type="number" min="1" max="3650" value="30" placeholder="有效天数（如 30）" />
+            <input id="create_quantity" type="number" min="1" max="500" value="1" placeholder="生成数量（如 1）" />
+            <button class="success" onclick="createLicense()">生成授权码</button>
+          </div>
+          <div class="row" style="margin-top: 16px;">
+            <textarea id="created_keys" readonly placeholder="生成后的授权码会显示在这里，支持按行批量复制。" style="background: #f8fafc; border-style: dashed;"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hd">桌面公告配置</div>
+        <div class="bd">
+          <div class="row">
+            <textarea id="notice_markdown" placeholder="支持 Markdown。\n\n## 维护通知\n- 今晚 23:00 进行服务升级" style="height: 140px;"></textarea>
+          </div>
+          <div class="row" style="margin-top: 16px;">
+            <button class="secondary" onclick="saveNoticeMarkdown()">保存并发布公告</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    let toastTimeout = null;
+    function showMsg(text, isErr = false) {
+      const el = document.getElementById("msgToast");
+      el.textContent = text;
+      el.className = "msg-toast " + (isErr ? "err" : "") + " show";
+      clearTimeout(toastTimeout);
+      toastTimeout = setTimeout(() => { el.classList.remove("show"); }, 3000);
+    }
+
+    const state = {
+      page: 1,
+      pageSize: 500,
+      total: 0,
+      items: [],
+      runtimePage: 1,
+      runtimePageSize: 200,
+      runtimeTotal: 0,
+      runtimeItems: []
+    };
+    let unrestrictedEnabled = false;
+    let noticeMarkdown = "";
+
+    function setView(view) {
+      document.getElementById("login-view").classList.remove("active");
+      document.getElementById("dashboard-view").classList.remove("active");
+      document.getElementById(view).classList.add("active");
+    }
+
+    function getToken() {
+      return localStorage.getItem("DY_LICENSE_ADMIN_TOKEN") || "";
+    }
+    
+    function logout() {
+      localStorage.removeItem("DY_LICENSE_ADMIN_TOKEN");
+      setView("login-view");
+    }
+
+    async function request(path, method = "GET", body = null) {
+      const token = getToken();
+      const res = await fetch(path, {
+        method,
+        headers: {
+          "content-type": "application/json",
+          "x-admin-token": token
+        },
+        body: body ? JSON.stringify(body) : undefined
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok !== true) {
+        if (res.status === 401) {
+          logout();
+          throw new Error("unauthorized");
+        }
+        throw new Error(data.error || data.message || `http_${res.status}`);
+      }
+      return data;
+    }
+
+    async function doLogin() {
+      const username = document.getElementById("login-user").value.trim();
+      const pwd = document.getElementById("login-pwd").value.trim();
+      if (!username) return showMsg("请输入管理员账号", true);
+      if (!pwd) return showMsg("请输入管理员密码", true);
+      const btn = document.getElementById("login-btn");
+      btn.disabled = true;
+      btn.textContent = "验证中...";
+      
+      try {
+        const res = await fetch("/admin/api/login", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ username, password: pwd })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          localStorage.setItem("DY_LICENSE_ADMIN_TOKEN", data.token || pwd);
+          showMsg("登录成功，正在加载数据...");
+          document.getElementById("login-user").value = "";
+          document.getElementById("login-pwd").value = "";
+          await checkAuth();
+        } else {
+          throw new Error(data.error || "验证失败");
+        }
+      } catch(err) {
+        showMsg("登录失败：" + err.message, true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "登录后台";
+      }
+    }
+
+    async function checkAuth() {
+      if (!getToken()) { setView("login-view"); return; }
+      try {
+        await loadGlobalSettings(); // as a ping
+        setView("dashboard-view");
+        refreshAll();
+      } catch (err) {
+        if (err.message === "unauthorized") {
+          setView("login-view");
+        } else {
+          // System error (e.g. backend down), but we can still show dashboard and errors there
+          setView("dashboard-view");
+          showMsg("无法连接到后端服务：" + err.message, true);
+        }
+      }
+    }
+
+    function fmtTime(ms) {
+      if (!ms || Number(ms) <= 0) return "-";
+      const d = new Date(Number(ms));
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mm = String(d.getMinutes()).padStart(2, "0");
+      return `${y}-${m}-${day} ${hh}:${mm}`;
+    }
+
+    async function createLicense() {
+      try {
+        const days = Number(document.getElementById("create_days").value || 30);
+        const quantity = Number(document.getElementById("create_quantity").value || 1);
+        const data = await request("/admin/api/licenses/create", "POST", { days, quantity });
+        const result = data.result || {};
+        const keys = Array.isArray(result.keys) ? result.keys : [];
+        document.getElementById("created_keys").value = keys.join("\n");
+        showMsg(`生成成功：共 ${Number(result.count || keys.length || 0)} 个授权码`);
+        await loadLicenses();
+      } catch (err) {
+        showMsg(`生成失败：${err.message}`, true);
+      }
+    }
+
+    function renderGlobalSettings() {
+      const statusEl = document.getElementById("unrestricted_status");
+      const toggleEl = document.getElementById("unrestricted_toggle");
+      const svcUnrestricted = document.getElementById("svc_unrestricted");
+      const noticeEl = document.getElementById("notice_markdown");
+      
+      statusEl.className = "pill " + (unrestrictedEnabled ? "warn" : "ok");
+      statusEl.textContent = unrestrictedEnabled ? "已开启（高风险）" : "已关闭（推荐）";
+      
+      toggleEl.textContent = unrestrictedEnabled ? "关闭免授权模式" : "开启免授权模式";
+      toggleEl.className = unrestrictedEnabled ? "success" : "warn";
+      
+      svcUnrestricted.className = "pill " + (unrestrictedEnabled ? "warn" : "off");
+      svcUnrestricted.textContent = unrestrictedEnabled ? "免授权模式：开启" : "免授权模式：关闭";
+      
+      if (noticeEl && noticeEl.value !== noticeMarkdown) {
+        noticeEl.value = noticeMarkdown;
+      }
+    }
+
+    function renderMetrics() {
+      const items = Array.isArray(state.items) ? state.items : [];
+      const runtimeItems = Array.isArray(state.runtimeItems) ? state.runtimeItems : [];
+      const activeCount = items.filter((item) => String(item.status) === "active").length;
+      const boundCount = runtimeItems.filter((item) => String(item.fingerprint || "").trim() !== "").length;
+      const wechatCount = items.filter((item) => String(item.wechatOpenId || "").trim() !== "").length;
+      
+      document.getElementById("metric_total").textContent = String(state.total || items.length);
+      document.getElementById("metric_active").textContent = String(activeCount);
+      document.getElementById("metric_bound").textContent = String(boundCount);
+      document.getElementById("metric_wechat").textContent = String(wechatCount);
+      document.getElementById("metric_note").textContent = state.runtimeTotal > runtimeItems.length ? `客户端展示 ${runtimeItems.length} 条` : "已加载全部数据";
+    }
+
+    async function loadGlobalSettings() {
+      const data = await request("/admin/api/license-settings");
+      const result = data.result || {};
+      unrestrictedEnabled = result.unrestricted === true;
+      noticeMarkdown = String(result.noticeMarkdown || "");
+      renderGlobalSettings();
+      document.getElementById("svc_license").className = "pill ok";
+      document.getElementById("svc_license").textContent = "授权服务：正常";
+    }
+
+    async function toggleUnrestricted() {
+      if(unrestrictedEnabled) {
+         if(!confirm("确认关闭免授权模式并恢复标准校验吗？")) return;
+      } else {
+         if(!confirm("确认开启免授权模式？开启后所有客户端都将被视为已授权。")) return;
+      }
+      try {
+        const noticeEl = document.getElementById("notice_markdown");
+        const data = await request("/admin/api/license-settings", "POST", {
+          unrestricted: !unrestrictedEnabled,
+          noticeMarkdown: noticeEl ? String(noticeEl.value || "") : noticeMarkdown
+        });
+        const result = data.result || {};
+        unrestrictedEnabled = result.unrestricted === true;
+        noticeMarkdown = String(result.noticeMarkdown || "");
+        renderGlobalSettings();
+        showMsg("配置已更新。");
+      } catch (err) {
+        showMsg(`更新配置失败：${err.message}`, true);
+      }
+    }
+
+    async function saveNoticeMarkdown() {
+      try {
+        const noticeEl = document.getElementById("notice_markdown");
+        const nextNotice = noticeEl ? String(noticeEl.value || "") : "";
+        const data = await request("/admin/api/license-settings", "POST", {
+          unrestricted: unrestrictedEnabled,
+          noticeMarkdown: nextNotice
+        });
+        const result = data.result || {};
+        unrestrictedEnabled = result.unrestricted === true;
+        noticeMarkdown = String(result.noticeMarkdown || "");
+        renderGlobalSettings();
+        showMsg("公告已发布。");
+      } catch (err) {
+        showMsg(`保存公告失败：${err.message}`, true);
+      }
+    }
+
+    async function setStatus(id, status) {
+      if(!confirm(`确认修改该授权状态吗？`)) return;
+      try {
+        await request("/admin/api/licenses/status", "POST", { id, status });
+        showMsg(`状态已更新为 [${status}]`);
+        await loadLicenses();
+      } catch (err) {
+        showMsg(`更新状态失败：${err.message}`, true);
+      }
+    }
+
+    async function extendLicense(id, days = 30) {
+      try {
+        await request("/admin/api/licenses/extend", "POST", { id, days });
+        showMsg(`续期成功：+${days} 天`);
+        await loadLicenses();
+      } catch (err) {
+        showMsg(`续期失败：${err.message}`, true);
+      }
+    }
+
+    async function unbindLicense(id) {
+      try {
+        await request("/admin/api/licenses/unbind", "POST", { id });
+        showMsg("解绑成功，可重新绑定新设备。");
+        await loadLicenses();
+      } catch (err) {
+        showMsg(`解绑失败：${err.message}`, true);
+      }
+    }
+
+    async function deleteLicense(id) {
+      if (!confirm("确认删除该授权？此操作不可恢复。")) return;
+      try {
+        await request("/admin/api/licenses/delete", "POST", { id });
+        showMsg("删除成功。");
+        await loadLicenses();
+      } catch (err) {
+        showMsg(`删除失败：${err.message}`, true);
+      }
+    }
+
+    function renderRows(items = []) {
+      const tbody = document.getElementById("tbody");
+      if(!items.length) {
+         tbody.innerHTML = '<tr><td colspan="8" class="empty-state">暂无授权数据</td></tr>';
+         return;
+      }
+      tbody.innerHTML = items.map(item => {
+        const status = String(item.status || "");
+        const statusClass = status === "active" ? "ok" : "off";
+        return `
+          <tr>
+            <td>#${item.id}</td>
+            <td class="mono">
+              <span style="background:var(--bg-color); border:1px solid var(--border); padding:2px 6px; border-radius:4px; font-size:12px;">
+                ${item.licenseKey || ""}
+              </span>
+            </td>
+            <td>
+              <div style="font-size:13px; font-weight:600; color:var(--text-main); margin-bottom:2px;">${item.wechatNickname || "未绑定"}</div>
+              <div class="mono" style="font-size:11px;">${item.wechatOpenId || ""}</div>
+            </td>
+            <td><span class="pill ${statusClass}">${status === 'active' ? '有效' : '禁用'}</span></td>
+            <td>${fmtTime(item.expireAt)}</td>
+            <td class="mono" style="font-size:11px;">${item.bindClientId || "-"}</td>
+            <td style="font-size:12px;">${fmtTime(item.lastSeenAt)}</td>
+            <td class="actions">
+              <button class="sm secondary" onclick="extendLicense(${item.id}, 30)" title="续期 30 天">+30d</button>
+              <button class="sm secondary" onclick="unbindLicense(${item.id})" title="解绑当前设备">解绑</button>
+              ${status === "active"
+                ? `<button class="sm warn" onclick="setStatus(${item.id}, 'disabled')">停用</button>`
+                : `<button class="sm success" onclick="setStatus(${item.id}, 'active')">启用</button>`}
+              <button class="sm danger" onclick="deleteLicense(${item.id})">删除</button>
+            </td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    function renderRuntimeRows(items = []) {
+      const tbody = document.getElementById("runtimeTbody");
+      if(!items.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty-state">暂无客户端记录</td></tr>';
+        return;
+      }
+      tbody.innerHTML = items.map(item => {
+        const accessMode = String(item.accessMode || "-");
+        const authorized = item.authorized === true;
+        const statusClass = authorized ? "ok" : "off";
+        const statusText = authorized ? "已授权" : "未授权";
+        return `
+          <tr>
+            <td class="mono" style="font-size:11px;">${item.clientId || "-"}</td>
+            <td class="mono" style="font-size:11px;">${item.fingerprint || "-"}</td>
+            <td>${accessMode}</td>
+            <td><span class="pill ${statusClass}">${statusText}</span></td>
+            <td>${item.licensePlan || "-"}</td>
+            <td>${item.appVersion || "-"}</td>
+            <td>${fmtTime(item.lastSeenAt)}</td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    async function loadLicenses() {
+      try {
+        const data = await request(`/admin/api/licenses?page=${state.page}&pageSize=${state.pageSize}`);
+        const result = data.result || { total: 0, items: [] };
+        state.total = Number(result.total || 0);
+        state.items = Array.isArray(result.items) ? result.items : [];
+        renderRows(state.items);
+        renderMetrics();
+      } catch (err) {
+        showMsg(`加载授权列表失败：${err.message}`, true);
+      }
+    }
+
+    async function loadRuntimeClients() {
+      try {
+        const data = await request(`/admin/api/runtime-clients?page=${state.runtimePage}&pageSize=${state.runtimePageSize}`);
+        const result = data.result || { total: 0, items: [] };
+        state.runtimeTotal = Number(result.total || 0);
+        state.runtimeItems = Array.isArray(result.items) ? result.items : [];
+        renderRuntimeRows(state.runtimeItems);
+        renderMetrics();
+      } catch (err) {
+        showMsg(`加载客户端记录失败：${err.message}`, true);
+      }
+    }
+
+    function refreshAll() {
+      if(!getToken()) return;
+      loadGlobalSettings()
+        .then(() => Promise.all([loadRuntimeClients(), loadLicenses()]))
+        .then(() => showMsg("数据已刷新。"));
+    }
+
+    function setupTabs() {
+      const buttons = Array.from(document.querySelectorAll(".tab-btn"));
+      buttons.forEach(btn => {
+        btn.addEventListener("click", () => {
+          buttons.forEach((el) => el.classList.remove("active"));
+          btn.classList.add("active");
+          const tab = btn.getAttribute("data-tab");
+          document.querySelectorAll(".tab-panel").forEach(panel => {
+            panel.classList.toggle("active", panel.id === `tab-${tab}`);
+          });
+        });
+      });
+    }
+
+    // Initialize
+    setupTabs();
+    checkAuth();
+  </script>
+</body>
+</html>
