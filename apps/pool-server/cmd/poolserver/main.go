@@ -169,16 +169,11 @@ func resolveConfigPath() string {
 	if p := strings.TrimSpace(os.Getenv("POOL_CONFIG_FILE")); p != "" {
 		return p
 	}
-	candidates := []string{
-		"config.json",
-		"../../config.json",
+	const rootConfig = "../../config.json"
+	if st, err := os.Stat(rootConfig); err == nil && !st.IsDir() {
+		return rootConfig
 	}
-	for _, p := range candidates {
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			return p
-		}
-	}
-	return "config.json"
+	return rootConfig
 }
 
 func resolveDesktopStaticDir() (string, bool) {
@@ -2126,6 +2121,111 @@ func main() {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "recorded": true})
+	})
+
+	mux.HandleFunc("/lottery/history/upload", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			writeJSON(w, http.StatusNoContent, map[string]any{})
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		if !ensureLicenseAuthorized(w, r, licenseSvc) {
+			return
+		}
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
+			return
+		}
+
+		var req struct {
+			LocalHistoryID       int64          `json:"localHistoryId"`
+			RecordType           string         `json:"recordType"`
+			ClientID             string         `json:"clientId"`
+			Fingerprint          string         `json:"fingerprint"`
+			AppVersion           string         `json:"appVersion"`
+			AccountID            string         `json:"accountId"`
+			AccountNickname      string         `json:"accountNickname"`
+			RoomID               string         `json:"roomId"`
+			WebRid               string         `json:"webRid"`
+			LotteryID            string         `json:"lotteryId"`
+			AuthorNickname       string         `json:"authorNickname"`
+			LotteryName          string         `json:"lotteryName"`
+			PredictedProbability float64        `json:"predictedProbability"`
+			PredictedJoinTotal   float64        `json:"predictedJoinTotal"`
+			JoinTotal            float64        `json:"joinTotal"`
+			LuckyCount           float64        `json:"luckyCount"`
+			OnlineTotal          float64        `json:"onlineTotal"`
+			TotalAmount          float64        `json:"totalAmount"`
+			PrizeType            any            `json:"prizeType"`
+			PrizeInfo            map[string]any `json:"prizeInfo"`
+			Conditions           []any          `json:"conditions"`
+			RemainingSec         float64        `json:"remainingSec"`
+			ServerScore          float64        `json:"serverScore"`
+			StartTime            int64          `json:"startTime"`
+			JoinMode             string         `json:"joinMode"`
+			JoinStatus           string         `json:"joinStatus"`
+			ResultStatus         string         `json:"resultStatus"`
+			ResultReason         string         `json:"resultReason"`
+			JoinedAt             int64          `json:"joinedAt"`
+			EndTime              int64          `json:"endTime"`
+			RewardAmount         float64        `json:"rewardAmount"`
+			CreatedAt            int64          `json:"createdAt"`
+		}
+		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
+			writeBodyErr(w, err)
+			return
+		}
+
+		clientID, fingerprint := extractLicenseIdentity(r)
+		if v := strings.TrimSpace(req.ClientID); v != "" {
+			clientID = v
+		}
+		if v := strings.TrimSpace(req.Fingerprint); v != "" {
+			fingerprint = v
+		}
+
+		err := licenseSvc.SaveLotteryParticipationRecord(r.Context(), licensepkg.LotteryParticipationRecord{
+			LocalHistoryID:       req.LocalHistoryID,
+			RecordType:           req.RecordType,
+			ClientID:             clientID,
+			Fingerprint:          fingerprint,
+			AppVersion:           req.AppVersion,
+			AccountID:            req.AccountID,
+			AccountNickname:      req.AccountNickname,
+			RoomID:               req.RoomID,
+			WebRid:               req.WebRid,
+			LotteryID:            req.LotteryID,
+			AuthorNickname:       req.AuthorNickname,
+			LotteryName:          req.LotteryName,
+			PredictedProbability: req.PredictedProbability,
+			PredictedJoinTotal:   req.PredictedJoinTotal,
+			JoinTotal:            req.JoinTotal,
+			LuckyCount:           req.LuckyCount,
+			OnlineTotal:          req.OnlineTotal,
+			TotalAmount:          req.TotalAmount,
+			PrizeType:            req.PrizeType,
+			PrizeInfo:            req.PrizeInfo,
+			Conditions:           req.Conditions,
+			RemainingSec:         req.RemainingSec,
+			ServerScore:          req.ServerScore,
+			StartTimeMS:          req.StartTime,
+			JoinMode:             req.JoinMode,
+			JoinStatus:           req.JoinStatus,
+			ResultStatus:         req.ResultStatus,
+			ResultReason:         req.ResultReason,
+			JoinedAtMS:           req.JoinedAt,
+			EndTimeMS:            req.EndTime,
+			RewardAmount:         req.RewardAmount,
+			CreatedAtMS:          req.CreatedAt,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "saved": true})
 	})
 
 	mux.HandleFunc("/task/debug", func(w http.ResponseWriter, r *http.Request) {

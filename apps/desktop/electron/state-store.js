@@ -7,26 +7,7 @@ const JOIN_RECORDS_FILE_NAME = 'lottery-join-records.jsonl'
 const WIN_RECORDS_FILE_NAME = 'lottery-win-records.jsonl'
 const ACCOUNT_LOGS_DIR_NAME = 'account-logs'
 const TIMELINE_LOGS_FILE_NAME = 'timeline-runtime.txt'
-const BUILTIN_DEFAULT_SETTINGS = Object.freeze({
-  // Packaged desktop should keep working even without a project-level config.json.
-  poolServerUrl: 'http://fudai.shuai.help:9090',
-  updateFeedUrl: '',
-  hotUpdateEnabled: true,
-  hotUpdateManifestUrl: 'http://fudai.shuai.help:9090/desktop/hot-manifest.json',
-  hotUpdateReloadOnApply: false,
-  stayDuration: 18,
-  enableRedPacket: true,
-  randomInteraction: true,
-  hitRate: { enabled: true, value: 0.08 },
-  secondInspect: { enabled: true, value: 0.05 },
-  filterFanClub: { enabled: true },
-  onlyPhysicalPrize: { enabled: false },
-  preferBigRedPacket: { enabled: true, threshold: 40 },
-  filterOnline: { enabled: false, value: 0 },
-  participationCount: { enabled: false, value: 120 },
-  singleAccountDuration: { enabled: false, value: 6 },
-  scanConfig: { countPerPage: 15, pagesPerCategory: 12, allCount: 24 }
-})
+const BUILTIN_DEFAULT_SETTINGS = Object.freeze(require('../src/shared/defaultSettings.json'))
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true })

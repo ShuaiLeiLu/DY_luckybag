@@ -1,9 +1,9 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
 	_ "embed"
 	"encoding/base64"
@@ -40,8 +40,6 @@ type fileConfig struct {
 		Enabled              bool   `json:"enabled"`
 		Unrestricted         bool   `json:"unrestricted"`
 		AdminToken           string `json:"adminToken"`
-		AdminUsername        string `json:"adminUsername"`
-		AdminPassword        string `json:"adminPassword"`
 		AdUnlockDays         int    `json:"adUnlockDays"`
 		MiniAppEnabled       bool   `json:"miniAppEnabled"`
 		MiniAppAppID         string `json:"miniAppAppId"`
@@ -147,13 +145,11 @@ func resolveConfigPath() string {
 	if p := strings.TrimSpace(os.Getenv("POOL_CONFIG_FILE")); p != "" {
 		return p
 	}
-	candidates := []string{"config.json", "../../config.json"}
-	for _, p := range candidates {
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			return p
-		}
+	const rootConfig = "../../config.json"
+	if st, err := os.Stat(rootConfig); err == nil && !st.IsDir() {
+		return rootConfig
 	}
-	return "config.json"
+	return rootConfig
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -321,14 +317,12 @@ func main() {
 		MiniAppEnvVersion:    "release",
 	}
 	adminToken := ""
-	adminUsername := ""
-	adminPassword := ""
+	bootstrapUsername := ""
+	bootstrapPassword := ""
 	if hasFileCfg {
 		lc.Enabled = fileCfg.License.Enabled
 		lc.DefaultUnrestricted = fileCfg.License.Unrestricted
 		adminToken = strings.TrimSpace(fileCfg.License.AdminToken)
-		adminUsername = strings.TrimSpace(fileCfg.License.AdminUsername)
-		adminPassword = strings.TrimSpace(fileCfg.License.AdminPassword)
 		lc.MiniAppEnabled = fileCfg.License.MiniAppEnabled
 		lc.MiniAppAppID = strings.TrimSpace(fileCfg.License.MiniAppAppID)
 		lc.MiniAppAppSecret = strings.TrimSpace(fileCfg.License.MiniAppAppSecret)
@@ -393,14 +387,8 @@ func main() {
 	lc.MaxIdleConns = getenvInt("POOL_LICENSE_MYSQL_MAX_IDLE_CONNS", lc.MaxIdleConns)
 	lc.ConnMaxLifetimeMin = getenvInt("POOL_LICENSE_MYSQL_CONN_MAX_LIFETIME_MIN", lc.ConnMaxLifetimeMin)
 	adminToken = strings.TrimSpace(getenvStr("POOL_LICENSE_ADMIN_TOKEN", getenvStr("LICENSE_ADMIN_TOKEN", adminToken)))
-	adminUsername = strings.TrimSpace(getenvStr("POOL_LICENSE_ADMIN_USERNAME", getenvStr("LICENSE_ADMIN_USERNAME", adminUsername)))
-	adminPassword = strings.TrimSpace(getenvStr("POOL_LICENSE_ADMIN_PASSWORD", getenvStr("LICENSE_ADMIN_PASSWORD", adminPassword)))
-	if adminUsername == "" {
-		log.Fatalf("admin username missing (set POOL_LICENSE_ADMIN_USERNAME)")
-	}
-	if adminPassword == "" {
-		log.Fatalf("admin password missing (set POOL_LICENSE_ADMIN_PASSWORD)")
-	}
+	bootstrapUsername = strings.TrimSpace(getenvStr("POOL_LICENSE_ADMIN_USERNAME", getenvStr("LICENSE_ADMIN_USERNAME", bootstrapUsername)))
+	bootstrapPassword = strings.TrimSpace(getenvStr("POOL_LICENSE_ADMIN_PASSWORD", getenvStr("LICENSE_ADMIN_PASSWORD", bootstrapPassword)))
 
 	sessionSecret := strings.TrimSpace(getenvStr("POOL_ADMIN_SESSION_SECRET", adminToken))
 	sessionHours := getenvInt("POOL_ADMIN_SESSION_TTL_HOURS", 12)
@@ -422,6 +410,11 @@ func main() {
 			_ = licenseSvc.Close()
 		}
 	}()
+	if licenseSvc != nil {
+		if err := licenseSvc.EnsureAdminBootstrapUser(context.Background(), bootstrapUsername, bootstrapPassword); err != nil {
+			log.Fatalf("bootstrap admin user failed: %v", err)
+		}
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -481,17 +474,18 @@ func main() {
 			writeBodyErr(w, err)
 			return
 		}
-		if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(payload.Username)), []byte(strings.TrimSpace(adminUsername))) != 1 {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid_credentials"})
+		if licenseSvc == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
 			return
 		}
-		if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(payload.Password)), []byte(strings.TrimSpace(adminPassword))) != 1 {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid_credentials"})
+		user, err := licenseSvc.AuthenticateAdminUser(r.Context(), payload.Username, payload.Password)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
 		now := time.Now()
 		expireAt := now.Add(sessionTTL)
-		username := strings.TrimSpace(adminUsername)
+		username := strings.TrimSpace(user.Username)
 		token, err := signAdminSession(sessionSecret, adminSessionClaims{
 			Username:   username,
 			IssuedAtMS: now.UnixMilli(),

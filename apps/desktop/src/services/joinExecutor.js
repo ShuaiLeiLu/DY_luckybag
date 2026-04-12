@@ -748,7 +748,7 @@ async function runSecondInspect(manager, accountId, lotteryInfo, config = {}) {
   }
 
   const log = manager.accounts.get(accountId)?.callbacks?.onLog
-  log?.(`🧮 等待最新参与人数后执行二次检查（阈值 ${formatPercent(threshold)}）`)
+  log?.(`等待最新参与人数后执行二次检查（阈值 ${formatPercent(threshold)}）`)
   await manager.sleep(2000)
 
   try {
@@ -757,7 +757,7 @@ async function runSecondInspect(manager, accountId, lotteryInfo, config = {}) {
     const winningTotal = Number(snapshot?.winningTotal || snapshot?.luckyCount || 0)
     const probability = winningTotal / joinTotal
     if (probability >= threshold) {
-      log?.(`✅ 二次检查通过：${formatPercent(probability)}`)
+      log?.(`二次检查通过：${formatPercent(probability)}`)
       return { passed: true, snapshot }
     }
     return {
@@ -893,7 +893,7 @@ export async function joinLotteryByUI(manager, accountId, remainingTime = 30, op
     if (fanJoinResult?.already) {
       onLog?.('👥 已在粉丝团，跳过加团')
     } else {
-      onLog?.('✅ 加入粉丝团完成')
+      onLog?.('加入粉丝团完成')
     }
     await manager.sleep(360)
   }
@@ -920,7 +920,7 @@ export async function joinLotteryByUI(manager, accountId, remainingTime = 30, op
     await manager.sleep(360)
     commentShortcutResult = await clickCommentJoinShortcut(manager, accountId, 6000)
     if (commentShortcutResult?.success) {
-      onLog?.(`✅ 已执行评论参与动作：${String(commentShortcutResult?.text || '一键评论参与福袋')}`)
+      onLog?.(`已执行评论参与动作：${String(commentShortcutResult?.text || '一键评论参与福袋')}`)
       await manager.sleep(420)
     } else {
       const roomId = String(
@@ -931,19 +931,19 @@ export async function joinLotteryByUI(manager, accountId, remainingTime = 30, op
         || ''
       ).trim()
       const commentText = String(requirements.commentText || '666')
-      onLog?.(`⚠️ 未找到一键评论参与按钮，尝试先发送评论：${commentText}`, 'warning')
+      onLog?.(`未找到一键评论参与按钮，尝试先发送评论：${commentText}`, 'warning')
       const chatResult = await sendRequiredComment(manager, accountId, roomId, commentText)
       if (!chatResult?.success) {
         const errorText = String(chatResult?.error || '评论发送失败')
-        onLog?.(`⚠️ 评论发送失败，继续尝试点击评论参与：${errorText}`, 'warning')
+        onLog?.(`评论发送失败，继续尝试点击评论参与：${errorText}`, 'warning')
       } else {
-        onLog?.('✅ 评论发送成功')
+        onLog?.('评论发送成功')
         await manager.sleep(320)
       }
 
       commentShortcutResult = await clickCommentJoinShortcut(manager, accountId, 4500)
       if (commentShortcutResult?.success) {
-        onLog?.(`✅ 已执行评论参与动作：${String(commentShortcutResult?.text || '一键评论参与福袋')}`)
+        onLog?.(`已执行评论参与动作：${String(commentShortcutResult?.text || '一键评论参与福袋')}`)
         await manager.sleep(420)
       } else {
         return {
@@ -978,7 +978,7 @@ export async function joinLotteryByUI(manager, accountId, remainingTime = 30, op
   }
 
   if (!confirmJoined && accountData && options?.lotteryInfo) {
-    onLog?.('⚠️ UI未确认参与，继续补一次执行请求...', 'warning')
+    onLog?.('UI未确认参与，继续补一次执行请求...', 'warning')
     const attendResult = await attendLotteryWithRetry(
       manager,
       accountId,
@@ -1079,7 +1079,7 @@ export async function attendLotteryWithRetry(manager, accountId, accountData, lo
     }
 
     if (Number(result?.statusCode) === 10001) {
-      accountData.callbacks.onLog('⚠️ 接口返回10001（上下文或ID未就绪），继续重试...')
+      accountData.callbacks.onLog('接口返回10001（上下文或ID未就绪），继续重试...')
     }
   }
 
@@ -1114,11 +1114,11 @@ export async function autoJoinRedPacketLoop(manager, accountId, accountData, rou
     totalSkippedRestricted += skippedRestrictedCount
 
     if (clickedCount > 0) {
-      accountData.callbacks.onLog(`🧧 检测到红包入口并尝试领取 ${clickedCount} 次`)
+      accountData.callbacks.onLog(`检测到红包入口并尝试领取 ${clickedCount} 次`)
     } else if (skippedRestrictedCount > 0 && i === 0) {
       accountData.callbacks.onLog(`🚫 跳过 ${skippedRestrictedCount} 个仅会员/粉丝团可参与红包`)
     } else if (!loggedNoEntry && i === 0) {
-      accountData.callbacks.onLog('🧧 当前直播间未检测到可抢红包入口')
+      accountData.callbacks.onLog('当前直播间未检测到可抢红包入口')
       loggedNoEntry = true
     }
 

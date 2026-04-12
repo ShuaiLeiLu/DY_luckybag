@@ -1,0 +1,45 @@
+{
+  "poolServerUrl": "http://fudai.shuai.help:9090",
+  "updateFeedUrl": "",
+  "hotUpdateEnabled": true,
+  "hotUpdateManifestUrl": "http://fudai.shuai.help:9090/desktop/hot-manifest.json",
+  "hotUpdateReloadOnApply": false,
+  "stayDuration": 18,
+  "enableRedPacket": true,
+  "randomInteraction": true,
+  "hitRate": {
+    "enabled": true,
+    "value": 0.08
+  },
+  "secondInspect": {
+    "enabled": true,
+    "value": 0.05
+  },
+  "filterFanClub": {
+    "enabled": true
+  },
+  "onlyPhysicalPrize": {
+    "enabled": false
+  },
+  "preferBigRedPacket": {
+    "enabled": true,
+    "threshold": 40
+  },
+  "filterOnline": {
+    "enabled": false,
+    "value": 0
+  },
+  "participationCount": {
+    "enabled": false,
+    "value": 120
+  },
+  "singleAccountDuration": {
+    "enabled": false,
+    "value": 6
+  },
+  "scanConfig": {
+    "countPerPage": 15,
+    "pagesPerCategory": 12,
+    "allCount": 24
+  }
+}

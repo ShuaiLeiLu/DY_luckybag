@@ -12,6 +12,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Config 描述授权模块的 MySQL 配置。
@@ -139,6 +140,51 @@ type AdminRuntimeClientListResult struct {
 	Items    []AdminRuntimeClient `json:"items"`
 }
 
+type AdminUser struct {
+	ID          int64  `json:"id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"displayName"`
+	Status      string `json:"status"`
+	LastLoginAt int64  `json:"lastLoginAt"`
+	CreatedAt   int64  `json:"createdAt"`
+	UpdatedAt   int64  `json:"updatedAt"`
+}
+
+type LotteryParticipationRecord struct {
+	LocalHistoryID       int64          `json:"localHistoryId"`
+	RecordType           string         `json:"recordType"`
+	ClientID             string         `json:"clientId"`
+	Fingerprint          string         `json:"fingerprint"`
+	AppVersion           string         `json:"appVersion"`
+	AccountID            string         `json:"accountId"`
+	AccountNickname      string         `json:"accountNickname"`
+	RoomID               string         `json:"roomId"`
+	WebRid               string         `json:"webRid"`
+	LotteryID            string         `json:"lotteryId"`
+	AuthorNickname       string         `json:"authorNickname"`
+	LotteryName          string         `json:"lotteryName"`
+	PredictedProbability float64        `json:"predictedProbability"`
+	PredictedJoinTotal   float64        `json:"predictedJoinTotal"`
+	JoinTotal            float64        `json:"joinTotal"`
+	LuckyCount           float64        `json:"luckyCount"`
+	OnlineTotal          float64        `json:"onlineTotal"`
+	TotalAmount          float64        `json:"totalAmount"`
+	PrizeType            any            `json:"prizeType"`
+	PrizeInfo            map[string]any `json:"prizeInfo"`
+	Conditions           []any          `json:"conditions"`
+	RemainingSec         float64        `json:"remainingSec"`
+	ServerScore          float64        `json:"serverScore"`
+	StartTimeMS          int64          `json:"startTime"`
+	JoinMode             string         `json:"joinMode"`
+	JoinStatus           string         `json:"joinStatus"`
+	ResultStatus         string         `json:"resultStatus"`
+	ResultReason         string         `json:"resultReason"`
+	JoinedAtMS           int64          `json:"joinedAt"`
+	EndTimeMS            int64          `json:"endTime"`
+	RewardAmount         float64        `json:"rewardAmount"`
+	CreatedAtMS          int64          `json:"createdAt"`
+}
+
 // AdminCreateRequest 描述授权管理后台创建授权请求。
 type AdminCreateRequest struct {
 	LicenseKey   string
@@ -226,6 +272,17 @@ type runtimeClientRow struct {
 	Unrestricted bool
 	FirstSeenAt  time.Time
 	LastSeenAt   time.Time
+}
+
+type adminUserRow struct {
+	ID           int64
+	Username     string
+	PasswordHash string
+	DisplayName  string
+	Status       string
+	LastLoginAt  sql.NullTime
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 // NewService 初始化授权服务。初始化失败时仍返回可读状态服务，便于前端展示异常。
@@ -416,6 +473,21 @@ func (s *Service) ensureSettingsSchema(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(schemaCtx, `
+		CREATE TABLE IF NOT EXISTS license_admin_users (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			username VARCHAR(64) NOT NULL,
+			password_hash VARCHAR(255) NOT NULL,
+			display_name VARCHAR(128) NOT NULL DEFAULT '',
+			status VARCHAR(24) NOT NULL DEFAULT 'active',
+			last_login_at DATETIME NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+			UNIQUE KEY uniq_admin_username (username)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+	`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(schemaCtx, `
 		CREATE TABLE IF NOT EXISTS license_runtime_clients (
 			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
 			client_id VARCHAR(128) NOT NULL,
@@ -435,6 +507,52 @@ func (s *Service) ensureSettingsSchema(ctx context.Context) error {
 			CONSTRAINT fk_runtime_client_license
 				FOREIGN KEY (license_id) REFERENCES licenses(id)
 				ON DELETE SET NULL
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+	`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(schemaCtx, `
+		CREATE TABLE IF NOT EXISTS lottery_participation_records (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			local_history_id BIGINT NOT NULL,
+			record_type VARCHAR(24) NOT NULL DEFAULT 'join',
+			client_id VARCHAR(128) NOT NULL,
+			fingerprint VARCHAR(128) NOT NULL DEFAULT '',
+			app_version VARCHAR(32) NOT NULL DEFAULT '',
+			account_id VARCHAR(128) NOT NULL DEFAULT '',
+			account_nickname VARCHAR(128) NOT NULL DEFAULT '',
+			room_id VARCHAR(128) NOT NULL DEFAULT '',
+			web_rid VARCHAR(128) NOT NULL DEFAULT '',
+			lottery_id VARCHAR(128) NOT NULL DEFAULT '',
+			author_nickname VARCHAR(128) NOT NULL DEFAULT '',
+			lottery_name VARCHAR(255) NOT NULL DEFAULT '',
+			predicted_probability DOUBLE NOT NULL DEFAULT 0,
+			predicted_join_total DOUBLE NOT NULL DEFAULT 0,
+			join_total DOUBLE NOT NULL DEFAULT 0,
+			lucky_count DOUBLE NOT NULL DEFAULT 0,
+			online_total DOUBLE NOT NULL DEFAULT 0,
+			total_amount DOUBLE NOT NULL DEFAULT 0,
+			prize_type_json JSON NULL,
+			prize_info_json JSON NULL,
+			conditions_json JSON NULL,
+			remaining_sec DOUBLE NOT NULL DEFAULT 0,
+			server_score DOUBLE NOT NULL DEFAULT 0,
+			start_time_ms BIGINT NOT NULL DEFAULT 0,
+			join_mode VARCHAR(32) NOT NULL DEFAULT '',
+			join_status VARCHAR(32) NOT NULL DEFAULT '',
+			result_status VARCHAR(32) NOT NULL DEFAULT '',
+			result_reason VARCHAR(255) NOT NULL DEFAULT '',
+			joined_at_ms BIGINT NOT NULL DEFAULT 0,
+			end_time_ms BIGINT NOT NULL DEFAULT 0,
+			reward_amount DOUBLE NOT NULL DEFAULT 0,
+			created_at_ms BIGINT NOT NULL DEFAULT 0,
+			uploaded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+			UNIQUE KEY uniq_participation_client_record (client_id, local_history_id),
+			KEY idx_participation_fingerprint (fingerprint),
+			KEY idx_participation_lottery (lottery_id),
+			KEY idx_participation_account (account_id),
+			KEY idx_participation_joined_at (joined_at_ms)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 	`); err != nil {
 		return err
@@ -988,6 +1106,242 @@ func (s *Service) GetDesktopNoticeMarkdown(ctx context.Context) (string, error) 
 		return "", err
 	}
 	return s.loadDesktopNoticeSetting(ctx)
+}
+
+// EnsureAdminBootstrapUser 仅在管理员表为空时创建首个管理员账号。
+func (s *Service) EnsureAdminBootstrapUser(ctx context.Context, username, password string) error {
+	if err := s.ensureAdminReady(); err != nil {
+		return err
+	}
+	username = strings.TrimSpace(username)
+	password = strings.TrimSpace(password)
+	if username == "" || password == "" {
+		return nil
+	}
+
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM license_admin_users`).Scan(&total); err != nil {
+		return err
+	}
+	if total > 0 {
+		return nil
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO license_admin_users (
+			username,
+			password_hash,
+			display_name,
+			status,
+			created_at,
+			updated_at
+		) VALUES (?, ?, ?, 'active', NOW(), NOW())
+	`, username, string(hash), username)
+	return err
+}
+
+// AuthenticateAdminUser 使用数据库中的管理员用户完成登录认证。
+func (s *Service) AuthenticateAdminUser(ctx context.Context, username, password string) (AdminUser, error) {
+	if err := s.ensureAdminReady(); err != nil {
+		return AdminUser{}, err
+	}
+	row, err := s.findAdminUserByUsername(ctx, username)
+	if err != nil {
+		return AdminUser{}, err
+	}
+	if strings.TrimSpace(strings.ToLower(row.Status)) != "active" {
+		return AdminUser{}, fmt.Errorf("admin_user_disabled")
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(row.PasswordHash), []byte(strings.TrimSpace(password))); err != nil {
+		return AdminUser{}, fmt.Errorf("invalid_credentials")
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE license_admin_users SET last_login_at = NOW(), updated_at = NOW() WHERE id = ?`, row.ID); err != nil {
+		return AdminUser{}, err
+	}
+	row.LastLoginAt = sql.NullTime{Time: time.Now(), Valid: true}
+	return adminUserFromRow(row), nil
+}
+
+func (s *Service) findAdminUserByUsername(ctx context.Context, username string) (adminUserRow, error) {
+	row := adminUserRow{}
+	err := s.db.QueryRowContext(ctx, `
+		SELECT
+			id,
+			username,
+			password_hash,
+			display_name,
+			status,
+			last_login_at,
+			created_at,
+			updated_at
+		FROM license_admin_users
+		WHERE username = ?
+		LIMIT 1
+	`, strings.TrimSpace(username)).Scan(
+		&row.ID,
+		&row.Username,
+		&row.PasswordHash,
+		&row.DisplayName,
+		&row.Status,
+		&row.LastLoginAt,
+		&row.CreatedAt,
+		&row.UpdatedAt,
+	)
+	return row, err
+}
+
+func adminUserFromRow(row adminUserRow) AdminUser {
+	item := AdminUser{
+		ID:          row.ID,
+		Username:    strings.TrimSpace(row.Username),
+		DisplayName: strings.TrimSpace(row.DisplayName),
+		Status:      strings.TrimSpace(row.Status),
+		CreatedAt:   row.CreatedAt.UnixMilli(),
+		UpdatedAt:   row.UpdatedAt.UnixMilli(),
+	}
+	if row.LastLoginAt.Valid {
+		item.LastLoginAt = row.LastLoginAt.Time.UnixMilli()
+	}
+	return item
+}
+
+// SaveLotteryParticipationRecord 持久化桌面端上传的福袋参与历史。
+func (s *Service) SaveLotteryParticipationRecord(ctx context.Context, record LotteryParticipationRecord) error {
+	if err := s.ensureAdminReady(); err != nil {
+		return err
+	}
+	clientID := strings.TrimSpace(record.ClientID)
+	fingerprint := normalizeMachineFingerprint(record.Fingerprint)
+	if clientID == "" || fingerprint == "" {
+		return fmt.Errorf("clientId and fingerprint required")
+	}
+	if record.LocalHistoryID <= 0 {
+		return fmt.Errorf("localHistoryId required")
+	}
+	recordType := strings.TrimSpace(strings.ToLower(record.RecordType))
+	if recordType != "win" {
+		recordType = "join"
+	}
+	prizeTypeJSON, err := json.Marshal(record.PrizeType)
+	if err != nil {
+		prizeTypeJSON = []byte("null")
+	}
+	prizeInfoJSON, err := json.Marshal(record.PrizeInfo)
+	if err != nil {
+		prizeInfoJSON = []byte("{}")
+	}
+	conditionsJSON, err := json.Marshal(record.Conditions)
+	if err != nil {
+		conditionsJSON = []byte("[]")
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO lottery_participation_records (
+			local_history_id,
+			record_type,
+			client_id,
+			fingerprint,
+			app_version,
+			account_id,
+			account_nickname,
+			room_id,
+			web_rid,
+			lottery_id,
+			author_nickname,
+			lottery_name,
+			predicted_probability,
+			predicted_join_total,
+			join_total,
+			lucky_count,
+			online_total,
+			total_amount,
+			prize_type_json,
+			prize_info_json,
+			conditions_json,
+			remaining_sec,
+			server_score,
+			start_time_ms,
+			join_mode,
+			join_status,
+			result_status,
+			result_reason,
+			joined_at_ms,
+			end_time_ms,
+			reward_amount,
+			created_at_ms,
+			uploaded_at,
+			updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON), CAST(? AS JSON), CAST(? AS JSON), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+		ON DUPLICATE KEY UPDATE
+			record_type = VALUES(record_type),
+			fingerprint = VALUES(fingerprint),
+			app_version = VALUES(app_version),
+			account_id = VALUES(account_id),
+			account_nickname = VALUES(account_nickname),
+			room_id = VALUES(room_id),
+			web_rid = VALUES(web_rid),
+			lottery_id = VALUES(lottery_id),
+			author_nickname = VALUES(author_nickname),
+			lottery_name = VALUES(lottery_name),
+			predicted_probability = VALUES(predicted_probability),
+			predicted_join_total = VALUES(predicted_join_total),
+			join_total = VALUES(join_total),
+			lucky_count = VALUES(lucky_count),
+			online_total = VALUES(online_total),
+			total_amount = VALUES(total_amount),
+			prize_type_json = VALUES(prize_type_json),
+			prize_info_json = VALUES(prize_info_json),
+			conditions_json = VALUES(conditions_json),
+			remaining_sec = VALUES(remaining_sec),
+			server_score = VALUES(server_score),
+			start_time_ms = VALUES(start_time_ms),
+			join_mode = VALUES(join_mode),
+			join_status = VALUES(join_status),
+			result_status = VALUES(result_status),
+			result_reason = VALUES(result_reason),
+			joined_at_ms = VALUES(joined_at_ms),
+			end_time_ms = VALUES(end_time_ms),
+			reward_amount = VALUES(reward_amount),
+			created_at_ms = VALUES(created_at_ms),
+			updated_at = NOW()
+	`,
+		record.LocalHistoryID,
+		recordType,
+		clientID,
+		fingerprint,
+		strings.TrimSpace(record.AppVersion),
+		strings.TrimSpace(record.AccountID),
+		strings.TrimSpace(record.AccountNickname),
+		strings.TrimSpace(record.RoomID),
+		strings.TrimSpace(record.WebRid),
+		strings.TrimSpace(record.LotteryID),
+		strings.TrimSpace(record.AuthorNickname),
+		strings.TrimSpace(record.LotteryName),
+		record.PredictedProbability,
+		record.PredictedJoinTotal,
+		record.JoinTotal,
+		record.LuckyCount,
+		record.OnlineTotal,
+		record.TotalAmount,
+		string(prizeTypeJSON),
+		string(prizeInfoJSON),
+		string(conditionsJSON),
+		record.RemainingSec,
+		record.ServerScore,
+		record.StartTimeMS,
+		strings.TrimSpace(record.JoinMode),
+		strings.TrimSpace(record.JoinStatus),
+		strings.TrimSpace(record.ResultStatus),
+		strings.TrimSpace(record.ResultReason),
+		record.JoinedAtMS,
+		record.EndTimeMS,
+		record.RewardAmount,
+		record.CreatedAtMS,
+	)
+	return err
 }
 
 // ListAdminRuntimeClients 返回后台记录到的运行客户端列表。

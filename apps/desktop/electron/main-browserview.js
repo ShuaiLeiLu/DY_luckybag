@@ -1,6 +1,5 @@
 const { app, BrowserWindow, ipcMain, safeStorage, powerSaveBlocker } = require('electron')
 const path = require('path')
-const https = require('https')
 const fs = require('fs')
 const os = require('os')
 const crypto = require('crypto')
@@ -9,6 +8,26 @@ const { createLogger } = require('./logger')
 const { createHotUpdateService } = require('./hot-update-service')
 const { createStateStore, DEFAULT_SETTINGS } = require('./state-store')
 const { createUpdateService } = require('./update-service')
+const { requestJson } = require('./request-json')
+const {
+  revealAccountWindow,
+  concealAccountWindow
+} = require('./account-window-manager')
+const {
+  configureTokenStore,
+  readTokenStore,
+  writeTokenStore,
+  buildCookieStringFromTokenRecord
+} = require('./token-store')
+const {
+  normalizeCookieHeaderString,
+  buildCookieStringForHost,
+  normalizeCookieSnapshotItem,
+  resolveCookieUrlFromSnapshot,
+  parseCookieString,
+  normalizeCookieValue
+} = require('./cookie-utils')
+const { createDesktopWindow } = require('./desktop-window')
 
 function resolvePackagedProjectRootDir() {
   const execPath = path.resolve(String(process.execPath || ''))
@@ -110,10 +129,9 @@ let hotUpdateService = null
 const logger = createLogger('main-browserview', { defaultLevel: 'warn' })
 const secureStateDir = path.join(app.getPath('userData'), 'state')
 const tokenStorePath = path.join(secureStateDir, 'credentials.json')
+configureTokenStore({ path: tokenStorePath, safeStorage, logger })
 const protocolGuardPartitions = new Set()
-const MAX_VISIBLE_ACCOUNT_WINDOWS = 4
 const DESKTOP_DEV_SERVER_URL = 'http://localhost:5173'
-const unreadableLegacyTokenPaths = new Set()
 const lotteryRightCacheByAccount = new Map() // accountId -> Map(roomIdOrLotteryId, { data, updatedAt, roomId, lotteryId })
 
 /**
@@ -418,71 +436,6 @@ function appendRuntimeAccountLog(accountId = '', level = 'info', message = '', s
   }
 }
 
-function listVisibleAccountWindows(excludeAccountId = '') {
-  return Array.from(browserViews.entries())
-    .filter(([accountId, browserData]) => {
-      if (excludeAccountId && accountId === excludeAccountId) return false
-      if (!browserData?.window || browserData.window.isDestroyed()) return false
-      return browserData.window.isVisible()
-    })
-    .sort((a, b) => Number(a[1]?.lastShownAt || 0) - Number(b[1]?.lastShownAt || 0))
-}
-
-function enforceVisibleWindowLimit(excludeAccountId = '') {
-  const visibleEntries = listVisibleAccountWindows(excludeAccountId)
-  while (visibleEntries.length >= MAX_VISIBLE_ACCOUNT_WINDOWS) {
-    const [accountId, browserData] = visibleEntries.shift() || []
-    if (!browserData?.window || browserData.window.isDestroyed()) continue
-    browserData.window.hide()
-    browserData.lastHiddenAt = Date.now()
-    browserData.requestedVisible = false
-    appendRuntimeEvent('info', `预览位已满，自动隐藏账号 ${accountId}`, 'preview')
-  }
-}
-
-function revealAccountWindow(accountId, focus = true) {
-  const browserData = browserViews.get(accountId)
-  if (!browserData || !browserData.window || browserData.window.isDestroyed()) {
-    return { success: false, error: 'browser_window_not_found' }
-  }
-  enforceVisibleWindowLimit(accountId)
-  if (browserData.window.isMinimized()) {
-    browserData.window.restore()
-  }
-  browserData.window.setSkipTaskbar(false)
-  browserData.requestedVisible = true
-  browserData.lastShownAt = Date.now()
-  browserData.window.show()
-  if (typeof browserData.window.moveTop === 'function') {
-    browserData.window.moveTop()
-  }
-  if (focus) {
-    browserData.window.focus()
-    if (typeof browserData.window.moveTop === 'function') {
-      browserData.window.moveTop()
-    }
-  }
-  return {
-    success: true,
-    visible: browserData.window.isVisible(),
-    focused: browserData.window.isFocused()
-  }
-}
-
-function concealAccountWindow(accountId) {
-  const browserData = browserViews.get(accountId)
-  if (!browserData || !browserData.window || browserData.window.isDestroyed()) {
-    return { success: false, error: 'browser_window_not_found' }
-  }
-  browserData.requestedVisible = false
-  browserData.lastHiddenAt = Date.now()
-  browserData.window.hide()
-  return {
-    success: true,
-    visible: browserData.window.isVisible()
-  }
-}
-
 function getBootstrapSnapshot() {
   const interfaces = os.networkInterfaces()
   const macs = []
@@ -532,216 +485,12 @@ try {
 
 // ==================== 工具函数 ====================
 
-function canUseSafeStorage() {
-  try {
-    return safeStorage && typeof safeStorage.isEncryptionAvailable === 'function' && safeStorage.isEncryptionAvailable()
-  } catch (e) {
-    logger.debug('safeStorage 检测失败，降级普通存储', e)
-    return false
-  }
-}
-
-function getLegacyTokenStorePaths() {
-  const candidates = [
-    path.resolve(process.cwd(), 'tokens.json'),
-    path.resolve(__dirname, '../../../tokens.json'),
-    path.resolve((typeof app.getAppPath === 'function' ? app.getAppPath() : process.cwd()), 'tokens.json')
-  ]
-  const primary = path.resolve(tokenStorePath)
-  return Array.from(new Set(candidates.map((item) => path.resolve(String(item || '')))))
-    .filter((item) => item && item !== primary && fs.existsSync(item))
-}
-
-function mergeTokenRecords(current = {}, incoming = {}) {
-  const currentScore = Math.max(Number(current?.savedAt || 0), Number(current?.cookieUpdatedAt || 0))
-  const incomingScore = Math.max(Number(incoming?.savedAt || 0), Number(incoming?.cookieUpdatedAt || 0))
-  const newer = incomingScore >= currentScore ? incoming : current
-  const older = incomingScore >= currentScore ? current : incoming
-  return {
-    ...older,
-    ...newer
-  }
-}
-
-function readTokenStoreFile(filePath) {
-  const normalizedPath = path.resolve(String(filePath || tokenStorePath))
-  if (!fs.existsSync(normalizedPath)) return {}
-
-  const raw = fs.readFileSync(normalizedPath, 'utf8')
-  if (!raw || !raw.trim()) return {}
-
-  const parsed = JSON.parse(raw)
-  if (!parsed || typeof parsed !== 'object') return {}
-
-  if (parsed.__encrypted === true && typeof parsed.payload === 'string') {
-    if (!canUseSafeStorage()) {
-      throw new Error('当前系统不支持解密本地Token，请在原系统环境使用')
-    }
-    const decrypted = safeStorage.decryptString(Buffer.from(parsed.payload, 'base64'))
-    const tokens = JSON.parse(decrypted)
-    return (tokens && typeof tokens === 'object') ? tokens : {}
-  }
-
-  return parsed
-}
-
-function writeTokenStoreFile(filePath, tokens) {
-  const normalizedPath = path.resolve(String(filePath || tokenStorePath))
-  fs.mkdirSync(path.dirname(normalizedPath), { recursive: true })
-  const payloadObj = tokens && typeof tokens === 'object' ? tokens : {}
-  const jsonText = JSON.stringify(payloadObj)
-
-  if (canUseSafeStorage()) {
-    const encrypted = safeStorage.encryptString(jsonText).toString('base64')
-    fs.writeFileSync(
-      normalizedPath,
-      JSON.stringify({ __encrypted: true, payload: encrypted }, null, 2)
-    )
-    return { encrypted: true }
-  }
-
-  fs.writeFileSync(normalizedPath, JSON.stringify(payloadObj, null, 2))
-  return { encrypted: false }
-}
-
 /**
  * readTokenStore 方法：读取Token存储。
  */
-function readTokenStore() {
-  const legacyPaths = getLegacyTokenStorePaths()
-  const merged = {}
-  const sourcePaths = [tokenStorePath, ...legacyPaths]
-
-  sourcePaths.forEach((filePath) => {
-    try {
-      const tokens = readTokenStoreFile(filePath)
-      Object.entries(tokens || {}).forEach(([accountId, tokenInfo]) => {
-        merged[accountId] = mergeTokenRecords(merged[accountId], tokenInfo)
-      })
-    } catch (error) {
-      if (path.resolve(filePath) !== path.resolve(tokenStorePath)) {
-        if (!unreadableLegacyTokenPaths.has(filePath)) {
-          unreadableLegacyTokenPaths.add(filePath)
-          logger.warn(`跳过旧Token存储: ${filePath} ${error?.message || error}`)
-        }
-        return
-      }
-      logger.warn(`读取Token失败: ${filePath} ${error?.message || error}`)
-    }
-  })
-
-  if (legacyPaths.length > 0) {
-    try {
-      writeTokenStoreFile(tokenStorePath, merged)
-    } catch (error) {
-      logger.warn(`同步旧Token到新存储失败: ${error?.message || error}`)
-    }
-  }
-
-  return merged
-}
-
 /**
  * writeTokenStore 方法：写入Token存储。
  */
-function writeTokenStore(tokens) {
-  const targets = Array.from(new Set([tokenStorePath, ...getLegacyTokenStorePaths()].map((item) => path.resolve(item))))
-  let encrypted = false
-  let primaryError = null
-
-  targets.forEach((filePath, index) => {
-    try {
-      const result = writeTokenStoreFile(filePath, tokens)
-      encrypted = encrypted || result.encrypted === true
-    } catch (error) {
-      if (index === 0) {
-        primaryError = error
-        return
-      }
-      logger.warn(`同步Token到兼容存储失败: ${filePath} ${error?.message || error}`)
-    }
-  })
-
-  if (primaryError) {
-    throw primaryError
-  }
-
-  return { encrypted }
-}
-
-/**
- * 生成随机msToken
- * @param {number} length - token长度，默认120
- * @returns {string} 随机token
- */
-function generateMsToken(length = 120) {
-  const chars = 'ABCDEFGHIGKLMNOPQRSTUVWXYZabcdefghigklmnopqrstuvwxyz0123456789='
-  let token = ''
-  for (let i = 0; i < length; i++) {
-    token += chars[Math.floor(Math.random() * chars.length)]
-  }
-  return token
-}
-
-/**
- * 从cookie字符串中提取参数
- * @param {string} cookieString - cookie字符串
- * @returns {object} 提取的参数对象
- */
-function extractParamsFromCookie(cookieString) {
-  const cookies = {}
-  if (cookieString) {
-    cookieString.split(';').forEach(cookie => {
-      const [key, value] = cookie.trim().split('=')
-      if (key && value) {
-        cookies[key] = value
-      }
-    })
-  }
-  
-  return {
-    msToken: generateMsToken(),
-    verifyFp: cookies.s_v_web_id || null,
-    fp: cookies.s_v_web_id || null,
-    screen_width: cookies.dy_swidth || '2560',
-    screen_height: cookies.dy_sheight || '1440',
-    cpu_core_num: cookies.device_web_cpu_core || '24',
-    device_memory: cookies.device_web_memory_size || '8'
-  }
-}
-
-/**
- * 将cookie对象转换为字符串
- * @param {object} cookieObj - cookie对象
- * @returns {string} cookie字符串
- */
-function cookieObjToString(cookieObj) {
-  const parts = []
-  for (const [key, value] of Object.entries(cookieObj)) {
-    if (value) {
-      parts.push(`${key}=${value}`)
-    }
-  }
-  return parts.join('; ')
-}
-
-/**
- * normalizeCookieValue 方法：清洗 cookie 值（兼容“name=value; path=...”格式）。
- */
-function normalizeCookieValue(name, rawValue) {
-  let value = String(rawValue ?? '').trim().replace(/[\r\n]/g, '')
-  if (!value) return ''
-  const kvPrefix = `${name}=`
-  if (value.startsWith(kvPrefix)) {
-    value = value.slice(kvPrefix.length).trim()
-  }
-  const semiIdx = value.indexOf(';')
-  if (semiIdx >= 0) {
-    value = value.slice(0, semiIdx).trim()
-  }
-  return value
-}
-
 /**
  * setCookieWithFallback 方法：按多组参数回退写入 cookie，提升兼容性。
  */
@@ -795,88 +544,6 @@ async function getAccountCookiesAndString(accountId) {
     .map(c => `${c.name}=${c.value}`)
     .join('; ')
   return { cookies, cookieString }
-}
-
-function normalizeCookieHeaderString(raw = '') {
-  return String(raw || '')
-    .replace(/\r?\n/g, '')
-    .replace(/\s{2,}/g, ' ')
-    .trim()
-}
-
-function doesCookieDomainMatchHost(domain = '', host = '') {
-  const normalizedDomain = String(domain || '').replace(/^\./, '').trim().toLowerCase()
-  const normalizedHost = String(host || '').trim().toLowerCase()
-  if (!normalizedDomain || !normalizedHost) return false
-  return normalizedHost === normalizedDomain || normalizedHost.endsWith(`.${normalizedDomain}`)
-}
-
-function cookieHostScore(cookie = {}, host = '') {
-  const normalizedHost = String(host || '').trim().toLowerCase()
-  const domain = String(cookie?.domain || '').replace(/^\./, '').trim().toLowerCase()
-  if (!domain) return 0
-  if (domain === normalizedHost) return 3
-  if (domain === 'douyin.com') return 2
-  if (normalizedHost.endsWith(`.${domain}`)) return 1
-  return 0
-}
-
-function buildCookieStringForHost(cookies = [], host = 'live.douyin.com') {
-  const normalizedHost = String(host || '').trim().toLowerCase()
-  const bestByName = new Map()
-  for (const item of Array.isArray(cookies) ? cookies : []) {
-    const name = String(item?.name || '').trim()
-    const value = String(item?.value || '').trim()
-    if (!name || !value) continue
-    const domain = String(item?.domain || '').trim()
-    if (domain && !doesCookieDomainMatchHost(domain, normalizedHost)) continue
-    const current = bestByName.get(name)
-    if (!current) {
-      bestByName.set(name, item)
-      continue
-    }
-    const currentScore = cookieHostScore(current, normalizedHost)
-    const nextScore = cookieHostScore(item, normalizedHost)
-    if (nextScore > currentScore) {
-      bestByName.set(name, item)
-      continue
-    }
-    if (nextScore === currentScore) {
-      const currentPathLen = String(current?.path || '').length
-      const nextPathLen = String(item?.path || '').length
-      if (nextPathLen > currentPathLen) {
-        bestByName.set(name, item)
-      }
-    }
-  }
-  const header = Array.from(bestByName.values())
-    .filter(c => c?.name && c?.value)
-    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
-    .map(c => `${c.name}=${c.value}`)
-    .join('; ')
-  return normalizeCookieHeaderString(header)
-}
-
-function buildCookieStringFromTokenRecord(accountId, host = 'live.douyin.com') {
-  const tokens = readTokenStore()
-  const tokenInfo = tokens?.[accountId] || {}
-  if (!tokenInfo || typeof tokenInfo !== 'object') return ''
-  const snapshot = Array.isArray(tokenInfo.cookieSnapshot) ? tokenInfo.cookieSnapshot : []
-  if (snapshot.length > 0) {
-    const fromSnapshot = buildCookieStringForHost(snapshot, host)
-    if (fromSnapshot) return fromSnapshot
-  }
-  const pairs = []
-  const pushPair = (name) => {
-    const value = String(tokenInfo?.[name] || '').trim()
-    if (!value) return
-    pairs.push(`${name}=${value}`)
-  }
-  pushPair('sessionid')
-  pushPair('sessionid_ss')
-  pushPair('ttwid')
-  pushPair('passport_csrf_token')
-  return normalizeCookieHeaderString(pairs.join('; '))
 }
 
 function pushCookieCandidate(pool = [], seen = new Set(), rawCookie = '', source = '') {
@@ -940,29 +607,6 @@ async function buildDetailCookiePool(primaryAccountId, host = 'live.douyin.com',
   return pool.slice(0, safeLimit)
 }
 
-function normalizeCookieSnapshotItem(cookie = {}) {
-  const name = String(cookie?.name || '').trim()
-  const value = String(cookie?.value || '').trim()
-  if (!name || !value) return null
-  const domain = String(cookie?.domain || '').trim()
-  const pathValue = String(cookie?.path || '/').trim() || '/'
-  const sameSiteRaw = String(cookie?.sameSite || 'unspecified').trim().toLowerCase()
-  const sameSite = ['no_restriction', 'lax', 'strict', 'unspecified'].includes(sameSiteRaw)
-    ? sameSiteRaw
-    : 'unspecified'
-  return {
-    name,
-    value,
-    domain,
-    path: pathValue,
-    secure: cookie?.secure !== false,
-    httpOnly: !!cookie?.httpOnly,
-    session: !!cookie?.session,
-    expirationDate: Number(cookie?.expirationDate || 0),
-    sameSite
-  }
-}
-
 function buildCookieSnapshot(cookies = []) {
   return (Array.isArray(cookies) ? cookies : [])
     .map(normalizeCookieSnapshotItem)
@@ -998,26 +642,6 @@ async function refreshTokenSnapshotFromSession(accountId, reason = 'sync') {
     logger.debug(`[${accountId}] cookie 快照更新失败(${reason})`, error?.message || error)
     return { success: false, error: error?.message || 'snapshot_failed' }
   }
-}
-
-function parseCookieString(cookieString = '') {
-  const result = {}
-  String(cookieString || '')
-    .split(';')
-    .forEach((item) => {
-      const index = item.indexOf('=')
-      if (index <= 0) return
-      const key = item.slice(0, index).trim()
-      const value = item.slice(index + 1).trim()
-      if (key) result[key] = value
-    })
-  return result
-}
-
-function resolveCookieUrlFromSnapshot(cookie = {}) {
-  const domain = String(cookie?.domain || '').replace(/^\./, '').trim().toLowerCase()
-  if (domain.includes('live.douyin.com')) return 'https://live.douyin.com/'
-  return 'https://www.douyin.com/'
 }
 
 async function restoreCookieSnapshot(accountSession, snapshot = [], currentTime) {
@@ -1073,45 +697,6 @@ async function safeGetAccountCookieString(accountId, options = {}) {
     logger.warn('⚠️ 获取Cookie失败:', e.message)
     return buildCookieStringFromTokenRecord(accountId, host)
   }
-}
-
-/**
- * 主进程直连接口，避免页面脚本跨域限制
- * @param {string} url
- * @param {object} headers
- * @param {number} timeout
- * @returns {Promise<object>}
- */
-function requestJson(url, headers = {}, timeout = 10000) {
-  return new Promise((resolve, reject) => {
-    const req = https.request(url, {
-      method: 'GET',
-      headers,
-      timeout
-    }, (res) => {
-      let body = ''
-      res.on('data', (chunk) => { body += chunk })
-      res.on('end', () => {
-        const statusCode = res.statusCode || 0
-        if (statusCode < 200 || statusCode >= 300) {
-          return reject(new Error(`HTTP ${statusCode}`))
-        }
-        const trimmed = (body || '').trim()
-        if (!trimmed) return reject(new Error('空响应'))
-        if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html')) {
-          return reject(new Error('响应不是JSON(HTML)'))
-        }
-        try {
-          resolve(JSON.parse(trimmed))
-        } catch (e) {
-          reject(new Error(`JSON解析失败: ${e.message}`))
-        }
-      })
-    })
-    req.on('error', reject)
-    req.on('timeout', () => req.destroy(new Error('请求超时')))
-    req.end()
-  })
 }
 
 /**
@@ -1267,166 +852,16 @@ async function resolveUserInfo(accountId, options = {}) {
   return null
 }
 
-function getBundledDesktopIndexFile() {
-  return path.join(__dirname, '../dist/index.html')
-}
-
-function getDesktopIndexFile() {
-  const service = ensureHotUpdateService()
-  const hotEntry = service.getAppliedEntryFile()
-  if (hotEntry && fs.existsSync(hotEntry)) {
-    return hotEntry
-  }
-  return getBundledDesktopIndexFile()
-}
-
-function buildDesktopFailureHtml(message = '', detail = '') {
-  const escapeHtml = (value) => String(value || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-
-  return `<!DOCTYPE html>
-  <html lang="zh-CN">
-    <head>
-      <meta charset="UTF-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-      <title>抖娃福袋工作台</title>
-      <style>
-        html, body {
-          margin: 0;
-          width: 100%;
-          height: 100%;
-          background: linear-gradient(160deg, #05111f, #0d1b2a 48%, #091625 100%);
-          color: #ecf4ff;
-          font-family: "IBM Plex Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
-        }
-        body {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 24px;
-          box-sizing: border-box;
-        }
-        .panel {
-          width: min(720px, 100%);
-          padding: 28px;
-          border-radius: 28px;
-          border: 1px solid rgba(148, 163, 184, 0.18);
-          background: linear-gradient(180deg, rgba(15, 29, 46, 0.92), rgba(8, 18, 30, 0.78));
-          box-shadow: 0 18px 60px rgba(3, 10, 18, 0.42);
-        }
-        h1 {
-          margin: 0 0 12px;
-          font-size: 24px;
-        }
-        p {
-          margin: 0;
-          line-height: 1.7;
-          color: #b8c6db;
-        }
-        pre {
-          margin: 18px 0 0;
-          white-space: pre-wrap;
-          word-break: break-word;
-          padding: 16px;
-          border-radius: 18px;
-          background: rgba(2, 6, 23, 0.45);
-          color: #dbeafe;
-          font-size: 13px;
-          line-height: 1.6;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="panel">
-        <h1>桌面端启动失败</h1>
-        <p>${escapeHtml(message || '前端页面未能正常加载。')}</p>
-        ${detail ? `<pre>${escapeHtml(detail)}</pre>` : ''}
-      </div>
-    </body>
-  </html>`
-}
-
-function attachMainWindowDiagnostics(windowRef) {
-  if (!windowRef || windowRef.isDestroyed()) return
-
-  windowRef.webContents.on('console-message', (_event, level, message, line, sourceId) => {
-    const normalized = String(message || '').trim()
-    if (!normalized) return
-    logger.warn(`[desktop-console:${level}] ${normalized} (${sourceId || 'unknown'}:${line || 0})`)
-  })
-
-  windowRef.webContents.on('render-process-gone', (_event, details) => {
-    logger.error(`[desktop] render-process-gone: ${details?.reason || 'unknown'}`)
-  })
-
-  windowRef.webContents.on('unresponsive', () => {
-    logger.error('[desktop] window became unresponsive')
-  })
-
-  windowRef.webContents.on('did-finish-load', () => {
-    logger.info('[desktop] did-finish-load')
-  })
-
-  windowRef.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
-    if (!isMainFrame) return
-    logger.error(`[desktop] did-fail-load code=${errorCode} url=${validatedURL || ''} error=${errorDescription || 'unknown'}`)
-  })
-
-  windowRef.webContents.on('preload-error', (_event, preloadPath, error) => {
-    logger.error(`[desktop] preload-error: ${preloadPath} ${error?.message || error}`)
-  })
-}
-
-/**
- * createWindow 方法：创建窗口配置。
- */
 function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1720,
-    height: 1060,
-    minWidth: 1360,
-    minHeight: 860,
-    backgroundColor: '#081320',
-    autoHideMenuBar: true,
-    titleBarStyle: 'hiddenInset',
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: false,
-      preload: path.join(__dirname, 'preload.js'),
-      backgroundThrottling: false
-    }
+  mainWindow = createDesktopWindow({
+    BrowserWindow,
+    app,
+    logger,
+    DESKTOP_DEV_SERVER_URL,
+    getHotUpdateEntry: () => ensureHotUpdateService().getAppliedEntryFile(),
+    preloadPath: path.join(__dirname, 'preload.js')
   })
-  attachMainWindowDiagnostics(mainWindow)
-
-  // 开发环境加载 Vite 服务器
-  const isDev = !app.isPackaged
-  if (isDev) {
-    mainWindow.loadURL(DESKTOP_DEV_SERVER_URL).catch(async (error) => {
-      logger.error(`[desktop] dev server load failed: ${error?.message || error}`)
-      const fallbackFile = getBundledDesktopIndexFile()
-      if (fs.existsSync(fallbackFile)) {
-        await mainWindow.loadFile(fallbackFile).catch(async (fallbackError) => {
-          await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildDesktopFailureHtml('开发服务器未能加载，本地兜底页面也加载失败。', `${error?.message || error}\n${fallbackError?.message || fallbackError}`))}`)
-        })
-        return
-      }
-      await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildDesktopFailureHtml('开发服务器未能加载。', error?.message || error))}`)
-    })
-    // mainWindow.webContents.openDevTools() // 已禁用：不需要自动打开控制台
-  } else {
-    const desktopIndexFile = getDesktopIndexFile()
-    mainWindow.loadFile(desktopIndexFile).catch(async (error) => {
-      logger.error(`[desktop] loadFile failed: ${desktopIndexFile} ${error?.message || error}`)
-      await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildDesktopFailureHtml('本地桌面页面未能加载。', `${desktopIndexFile}\n${error?.message || error}`))}`)
-    })
-  }
 }
-
 app.whenReady().then(createWindow)
 app.whenReady().then(() => {
   fs.mkdirSync(secureStateDir, { recursive: true })
@@ -1968,7 +1403,9 @@ ipcMain.handle('launch-browser', async (event, payload) => {
 
     browserWindow.once('ready-to-show', () => {
       if (!browserWindow.isDestroyed() && instanceData.requestedVisible) {
-        revealAccountWindow(accountId)
+        revealAccountWindow(browserViews, accountId, {
+          appendRuntimeEvent
+        })
       }
     })
 
@@ -2201,7 +1638,9 @@ ipcMain.handle('desktop:save-settings', async (_event, payload = {}) => {
 
 ipcMain.handle('desktop:show-account-window', async (_event, { accountId } = {}) => {
   try {
-    return revealAccountWindow(String(accountId || '').trim())
+    return revealAccountWindow(browserViews, String(accountId || '').trim(), {
+      appendRuntimeEvent
+    })
   } catch (error) {
     return { success: false, error: error.message }
   }
@@ -2209,7 +1648,7 @@ ipcMain.handle('desktop:show-account-window', async (_event, { accountId } = {})
 
 ipcMain.handle('desktop:hide-account-window', async (_event, { accountId } = {}) => {
   try {
-    return concealAccountWindow(String(accountId || '').trim())
+    return concealAccountWindow(browserViews, String(accountId || '').trim())
   } catch (error) {
     return { success: false, error: error.message }
   }

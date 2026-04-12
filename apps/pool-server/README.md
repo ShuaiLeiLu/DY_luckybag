@@ -25,10 +25,11 @@ go run ./cmd/licenseadmin
 常用环境变量：
 
 - `POOL_ADMIN_HOST` / `POOL_ADMIN_PORT`
-- `POOL_LICENSE_ADMIN_USERNAME`
-- `POOL_LICENSE_ADMIN_PASSWORD`
 - `POOL_ADMIN_SESSION_SECRET`
 - `POOL_ADMIN_SESSION_TTL_HOURS`
+- `POOL_LICENSE_ADMIN_USERNAME` / `POOL_LICENSE_ADMIN_PASSWORD`
+  仅在数据库管理员表为空时用于首个管理员引导创建，后续登录认证走数据库。
+  不建议写入 `config.json`，推荐只通过环境变量提供。
 
 兼容说明：
 
@@ -40,7 +41,6 @@ go run ./cmd/licenseadmin
 
 1. `POOL_CONFIG_FILE`
 2. 仓库根目录 `config.json`
-3. 当前目录 `config.json`（兼容旧路径）
 
 统一配置读取 `config.json` 的 `poolServer` 节点。
 

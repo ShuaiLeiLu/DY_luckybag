@@ -9,19 +9,15 @@ import {
 import LotteryManager from '../services/LotteryManager-lite'
 import {
   FIXED_POOL_SERVER_URL,
-  activateLicense,
-  fetchDesktopNotice,
-  fetchLicenseStatus,
   normalizePoolServerUrl,
   resolveLicenseFingerprint,
   resolvePoolClientId,
-  startLicenseTrial
+  uploadLotteryHistoryRecord
 } from '../services/poolClient'
 import {
   deriveRuntimeState,
   formatRelative,
   mergeAccountModel,
-  normalizeLicenseSnapshot,
   sortAccounts
 } from './lib/runtime'
 import { AccountCard } from './features/accounts/AccountCard'
@@ -30,12 +26,15 @@ import { DOUYIN_LOGIN_PROMPT_SCRIPT } from './features/accounts/loginPrompt'
 import { LicenseGate } from './features/license/LicenseGate'
 import { formatHotUpdateStatusText, formatUpdateStatusText } from './features/license/presentation'
 import { useLicenseBinding } from './features/license/useLicenseBinding'
+import { useAdaptivePolling } from './hooks/useAdaptivePolling'
+import { useAccountSelection } from './hooks/useAccountSelection'
 import { SettingsDrawer } from './features/settings/SettingsDrawer'
 import { TaskDetailPanel } from './features/dashboard/TaskDetailPanel'
 import { TimelinePanel } from './features/dashboard/TimelinePanel'
 import { LotteryListPanel } from './features/dashboard/LotteryListPanel'
 import { HistoryPanel } from './features/history/HistoryPanel'
 import { type UiLogEntry, useTimelineLogs } from './features/dashboard/useTimelineLogs'
+import { useAccountLifecycle } from './features/accounts/useAccountLifecycle'
 import type {
   AccountSession,
   BootstrapSnapshot,
@@ -45,6 +44,9 @@ import type {
   LotteryHistoryRecord,
   UpdateSnapshot
 } from '@shared/models'
+import { DEFAULT_DESKTOP_SETTINGS } from '@shared/defaultSettings'
+import { useLicenseNotice } from './hooks/useLicenseNotice'
+import { emptyHotUpdate, emptyUpdate } from './lib/defaultSnapshots'
 
 type AnyRecord = Record<string, any>
 type ServiceResult<T = AnyRecord> = {
@@ -53,40 +55,10 @@ type ServiceResult<T = AnyRecord> = {
   error?: unknown
 }
 
-type HotUpdateSnapshot = {
-  status: string
-  enabled: boolean
-  manifestUrl: string
-  reloadOnApply: boolean
-  currentVersion: string
-  latestVersion: string
-  message: string
-  checkedAt: number
-  appliedEntryFile: string
-}
-
 type MainView = 'dashboard' | 'accounts' | 'history' | 'logs'
 
 
-const defaultSettings: DesktopSettings = {
-  poolServerUrl: FIXED_POOL_SERVER_URL,
-  updateFeedUrl: '',
-  hotUpdateEnabled: true,
-  hotUpdateManifestUrl: 'http://fudai.shuai.help:9090/desktop/hot-manifest.json',
-  hotUpdateReloadOnApply: false,
-  stayDuration: 18,
-  enableRedPacket: true,
-  randomInteraction: true,
-  hitRate: { enabled: true, value: 0.08 },
-  secondInspect: { enabled: true, value: 0.05 },
-  filterFanClub: { enabled: true },
-  onlyPhysicalPrize: { enabled: false },
-  preferBigRedPacket: { enabled: true, threshold: 40 },
-  filterOnline: { enabled: false, value: 0 },
-  participationCount: { enabled: false, value: 120 },
-  singleAccountDuration: { enabled: false, value: 6 },
-  scanConfig: { countPerPage: 15, pagesPerCategory: 12, allCount: 24 }
-}
+const defaultSettings: DesktopSettings = { ...DEFAULT_DESKTOP_SETTINGS }
 
 const emptyDispatchSummary: DispatchSummary = {
   enabled: false,
@@ -97,51 +69,7 @@ const emptyDispatchSummary: DispatchSummary = {
   updatedAt: 0
 }
 
-const emptyLicense: LicenseSnapshot = {
-  enabled: false,
-  available: false,
-  authorized: false,
-  unrestricted: false,
-  state: 'disabled',
-  message: '未连接授权服务',
-  accessMode: 'disabled',
-  trialState: 'none',
-  trialExpireAt: 0,
-  trialRemainingSec: 0,
-  requiresActivation: false,
-  licensePlan: '',
-  features: {},
-  featureFlags: {},
-  checkedAt: 0
-}
 
-const emptyUpdate: UpdateSnapshot = {
-  status: 'disabled',
-  currentVersion: '0.0.0',
-  latestVersion: '',
-  progress: 0,
-  message: '未配置更新源',
-  feedUrl: '',
-  checkedAt: 0
-}
-
-const emptyHotUpdate: HotUpdateSnapshot = {
-  status: 'disabled',
-  enabled: false,
-  manifestUrl: '',
-  reloadOnApply: false,
-  currentVersion: '',
-  latestVersion: '',
-  message: '热更新未启用',
-  checkedAt: 0,
-  appliedEntryFile: ''
-}
-
-
-
-function wait(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms))
-}
 
 function mapHotUpdateToInstallerStatus(status: string): UpdateSnapshot['status'] {
   const key = String(status || '').trim().toLowerCase()
@@ -159,32 +87,22 @@ function simplifyRuntimeLogMessage(message: string) {
 
   const hiddenPatterns = [
     /^━━━━━━━━/,
-    /^📊 排序说明/,
+    /^排序说明/,
     /^•/,
     /^   /,
-    /^💬 等待开奖随机弹幕:/,
-    /^🎲 等待开奖阶段已启用随机弹幕互动$/,
-    /^🔎 抢后停留期间优先扫描后续福袋/
+    /^等待开奖随机弹幕:/,
+    /^等待开奖阶段已启用随机弹幕互动$/,
+    /^抢后停留期间优先扫描后续福袋/
   ]
   if (hiddenPatterns.some((pattern) => pattern.test(raw))) {
     return { keep: false, message: '' }
   }
 
   const replaced = raw
-    .replace(/^🎯 选择目标福袋:\s*/, '选择目标福袋：')
-    .replace(/^🎯 选择最优福袋:\s*/, '选择最优福袋：')
-    .replace(/^🔗 正在进入目标直播间\.\.\.$/, '正在进入目标直播间')
-    .replace(/^✅ 已进入直播间，等待福袋入口并立即执行参与\.\.\.$/, '已进入直播间，准备参与福袋')
-    .replace(/^↪️ /, '')
-    .replace(/^ℹ️ /, '')
-    .replace(/^✅ /, '')
-    .replace(/^⚠️ /, '')
-    .replace(/^⏱️ /, '')
-    .replace(/^⏳ /, '')
-    .replace(/^📡 /, '')
-    .replace(/^🔄 /, '')
-    .replace(/^🧧 /, '')
-    .replace(/^🔐 /, '')
+    .replace(/^选择目标福袋:\s*/, '选择目标福袋：')
+    .replace(/^选择最优福袋:\s*/, '选择最优福袋：')
+    .replace(/^正在进入目标直播间\.\.\.$/, '正在进入目标直播间')
+    .replace(/^已进入直播间，等待福袋入口并立即执行参与\.\.\.$/, '已进入直播间，准备参与福袋')
 
   return { keep: true, message: replaced }
 }
@@ -220,17 +138,11 @@ export default function App() {
   const [historyRecords, setHistoryRecords] = useState<LotteryHistoryRecord[]>([])
   const [dispatchSummary, setDispatchSummary] = useState<DispatchSummary>(emptyDispatchSummary)
   const [learningSummary, setLearningSummary] = useState<AnyRecord | null>(null)
-  const [license, setLicense] = useState<LicenseSnapshot>(emptyLicense)
-  const [updateState, setUpdateState] = useState<UpdateSnapshot>(emptyUpdate)
-  const [hotUpdateState, setHotUpdateState] = useState<HotUpdateSnapshot>(emptyHotUpdate)
-  const [licenseKey, setLicenseKey] = useState('')
   const [selectedAccountId, setSelectedAccountId] = useState('')
   const [activeView, setActiveView] = useState<MainView>('dashboard')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [forceShowMainWhenLocked, setForceShowMainWhenLocked] = useState(false)
   const [manualShowLicenseGate, setManualShowLicenseGate] = useState(false)
-  const [licenseBusy, setLicenseBusy] = useState(false)
-  const [announcementMarkdown, setAnnouncementMarkdown] = useState('')
   const lastRuntimeLogRef = useRef<Map<string, { key: string; at: number }>>(new Map())
   const {
     logs,
@@ -266,11 +178,47 @@ export default function App() {
     }
   })
 
+  const handleRuntimeLog = (accountId: string, message: string, type: UiLogEntry['type']) => {
+    const simplified = simplifyRuntimeLogMessage(message)
+    if (!simplified.keep) return false
+    const dedupKey = buildRuntimeLogDedupKey(simplified.message)
+    const now = Date.now()
+    const prev = lastRuntimeLogRef.current.get(accountId)
+    if (prev && prev.key === dedupKey && now - prev.at < 2200) {
+      return false
+    }
+    lastRuntimeLogRef.current.set(accountId, { key: dedupKey, at: now })
+    addLog(simplified.message, type)
+    return true
+  }
+
   const poolClientId = useMemo(() => resolvePoolClientId(), [])
   const activePoolServerUrl = useMemo(() => {
     return normalizePoolServerUrl(settings.poolServerUrl) || FIXED_POOL_SERVER_URL
   }, [settings.poolServerUrl])
   const poolFingerprint = useMemo(() => resolveLicenseFingerprint(), [])
+
+  const {
+    license,
+    licenseKey,
+    licenseBusy,
+    announcementMarkdown,
+    updateState,
+    hotUpdateState,
+    refreshLicense,
+    handleStartTrial,
+    handleActivate,
+    setLicenseKey,
+    setUpdateState,
+    setHotUpdateState
+  } = useLicenseNotice({
+    poolServerUrl: activePoolServerUrl,
+    poolClientId,
+    poolFingerprint,
+    appVersion: bootstrap?.appVersion || '3.0.0',
+    onLog: addLog,
+    getCurrentAccounts: () => accounts.length
+  })
 
   const selectedAccount = accounts.find((item) => item.id === selectedAccountId) || accounts[0] || null
   const syncRuntimeRef = (account: AccountSession) => {
@@ -279,49 +227,6 @@ export default function App() {
       ...account
     })
   }
-
-  const patchAccount = useEffectEvent((accountId: string, patch: Partial<AccountSession>) => {
-    const runtime = runtimeAccountsRef.current.get(accountId)
-    if (runtime) {
-      syncRuntimeRef(mergeAccountModel(runtime, patch, license))
-    }
-    startTransition(() => {
-      setAccounts((current) => sortAccounts(current.map((item) => {
-        if (item.id !== accountId) return item
-        const next = mergeAccountModel(item, patch, license)
-        syncRuntimeRef(next)
-        return next
-      })))
-    })
-  })
-
-  const upsertAccount = useEffectEvent((base: Partial<AccountSession> & AnyRecord) => {
-    const model = mergeAccountModel(runtimeAccountsRef.current.get(String(base.id || '')) || {}, base, license)
-    syncRuntimeRef(model)
-    startTransition(() => {
-      setAccounts((current) => {
-        const index = current.findIndex((item) => item.id === model.id)
-        if (index >= 0) {
-          const next = [...current]
-          next[index] = mergeAccountModel(next[index], model, license)
-          syncRuntimeRef(next[index])
-          return sortAccounts(next)
-        }
-        syncRuntimeRef(model)
-        return sortAccounts([...current, model])
-      })
-    })
-    if (!selectedAccountId) setSelectedAccountId(model.id)
-    return model
-  })
-
-  const stopLoginPolling = useEffectEvent((accountId: string) => {
-    const timer = loginTimersRef.current.get(accountId)
-    if (timer) {
-      window.clearInterval(timer)
-      loginTimersRef.current.delete(accountId)
-    }
-  })
   const persistHistoryRecord = useEffectEvent(async (record: Partial<LotteryHistoryRecord> & AnyRecord) => {
     const rewardAmount = Number(record.rewardAmount || 0)
     const recordType: LotteryHistoryRecord['recordType'] = record.recordType === 'win' || String(record.resultStatus || '').trim().toLowerCase() === 'won' || rewardAmount > 0
@@ -337,6 +242,40 @@ export default function App() {
     try {
       const saved = await window.electronAPI.desktop.appendHistoryRecord(normalizedRecord)
       const nextRecord = saved?.item || normalizedRecord
+      void uploadLotteryHistoryRecord(activePoolServerUrl, {
+        localHistoryId: Number(nextRecord?.id || normalizedRecord.id || 0),
+        recordType: String(nextRecord?.recordType || normalizedRecord.recordType || ''),
+        clientId: poolClientId,
+        fingerprint: poolFingerprint,
+        appVersion: String(bootstrap?.appVersion || ''),
+        accountId: String(nextRecord?.accountId || normalizedRecord.accountId || ''),
+        accountNickname: String(nextRecord?.accountNickname || normalizedRecord.accountNickname || ''),
+        roomId: String(nextRecord?.roomId || normalizedRecord.roomId || ''),
+        webRid: String(nextRecord?.webRid || normalizedRecord.webRid || ''),
+        lotteryId: String(nextRecord?.lotteryId || normalizedRecord.lotteryId || ''),
+        authorNickname: String(nextRecord?.authorNickname || normalizedRecord.authorNickname || ''),
+        lotteryName: String(nextRecord?.lotteryName || normalizedRecord.lotteryName || ''),
+        predictedProbability: Number(nextRecord?.predictedProbability || normalizedRecord.predictedProbability || 0),
+        predictedJoinTotal: Number(nextRecord?.predictedJoinTotal || normalizedRecord.predictedJoinTotal || 0),
+        joinTotal: Number(nextRecord?.joinTotal || normalizedRecord.joinTotal || 0),
+        luckyCount: Number(nextRecord?.luckyCount || normalizedRecord.luckyCount || 0),
+        onlineTotal: Number(nextRecord?.onlineTotal || normalizedRecord.onlineTotal || 0),
+        totalAmount: Number(nextRecord?.totalAmount || normalizedRecord.totalAmount || 0),
+        prizeType: nextRecord?.prizeType ?? normalizedRecord.prizeType ?? null,
+        prizeInfo: (nextRecord?.prizeInfo || normalizedRecord.prizeInfo || {}) as Record<string, unknown>,
+        conditions: Array.isArray(nextRecord?.conditions) ? nextRecord.conditions : (Array.isArray(normalizedRecord.conditions) ? normalizedRecord.conditions : []),
+        remainingSec: Number(nextRecord?.remainingSec || normalizedRecord.remainingSec || 0),
+        serverScore: Number(nextRecord?.serverScore || normalizedRecord.serverScore || 0),
+        startTime: Number(nextRecord?.startTime || normalizedRecord.startTime || 0),
+        joinMode: String(nextRecord?.joinMode || normalizedRecord.joinMode || ''),
+        joinStatus: String(nextRecord?.joinStatus || normalizedRecord.joinStatus || ''),
+        resultStatus: String(nextRecord?.resultStatus || normalizedRecord.resultStatus || ''),
+        resultReason: String(nextRecord?.resultReason || normalizedRecord.resultReason || ''),
+        joinedAt: Number(nextRecord?.joinedAt || normalizedRecord.joinedAt || 0),
+        endTime: Number(nextRecord?.endTime || normalizedRecord.endTime || 0),
+        rewardAmount: Number(nextRecord?.rewardAmount || normalizedRecord.rewardAmount || 0),
+        createdAt: Number(nextRecord?.createdAt || normalizedRecord.createdAt || 0)
+      }).catch(() => {})
       startTransition(() => {
         setHistoryRecords((current) => [nextRecord as LotteryHistoryRecord, ...current].slice(0, 240))
       })
@@ -347,91 +286,31 @@ export default function App() {
     }
   })
 
-  const ensureAccountLoginPrompt = useEffectEvent(async (accountId: string, nickname: string) => {
-    let prompted = false
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      if (attempt > 0) {
-        await wait(attempt < 3 ? 900 : 1400)
-      }
-      const result = await window.electronAPI.invoke('execute-script', {
-        accountId,
-        script: DOUYIN_LOGIN_PROMPT_SCRIPT,
-        timeoutMs: 6000,
-        label: 'login.ensure_prompt'
-      }).catch(() => null)
-      if (!result?.success) continue
-      const payload = result.result || {}
-      const state = String(payload.state || '')
-      if (!prompted && (state === 'login_clicked' || state === 'qr_tab_clicked')) {
-        prompted = true
-        addLog(`账号 ${nickname} 已触发登录面板`, 'info')
-      }
-      if (state === 'qr_ready') {
-        addLog(`账号 ${nickname} 二维码已就绪，请扫码登录`, 'info')
-        return
-      }
-    }
-    addLog(`账号 ${nickname} 未自动弹出二维码，请点击窗口右上角“登录”后扫码`, 'warning')
-  })
-
-  const refreshLicense = useEffectEvent(async () => {
-    const baseUrl = activePoolServerUrl
-    const requestStatus = async (timeoutMs: number) => (await fetchLicenseStatus(baseUrl, {
-      clientId: poolClientId,
-      fingerprint: poolFingerprint,
-      timeoutMs
-    })) as ServiceResult<{ license?: AnyRecord }>
-
-    let result = await requestStatus(3000)
-    const firstError = String(result?.error || '')
-    if (!result?.ok && /timeout/i.test(firstError)) {
-      result = await requestStatus(9000)
-    }
-
-    if (!result?.ok) {
-      const errorText = String(result?.error || '未知错误')
-      const keepCurrent = license.authorized
-        || license.unrestricted
-        || license.accessMode === 'unrestricted'
-        || license.accessMode === 'licensed'
-        || license.accessMode === 'trial'
-      if (keepCurrent) {
-        setLicense((current) => ({
-          ...current,
-          message: `授权服务请求超时：${errorText}（保持当前授权状态）`,
-          checkedAt: Date.now()
-        }))
-        return
-      }
-      setLicense({
-        ...emptyLicense,
-        enabled: true,
-        available: false,
-        accessMode: 'locked',
-        requiresActivation: true,
-        state: 'backend_unavailable',
-        message: `授权服务不可用：${errorText}`,
-        checkedAt: Date.now()
-      })
-      return
-    }
-    setLicense(normalizeLicenseSnapshot(result.data?.license || {}))
-  })
-
-  const refreshDesktopNotice = useEffectEvent(async (baseUrl: string) => {
-    const normalizedBaseUrl = normalizePoolServerUrl(baseUrl) || FIXED_POOL_SERVER_URL
-    try {
-      const result = (await fetchDesktopNotice(normalizedBaseUrl, { timeoutMs: 2600 })) as ServiceResult<{ markdown?: string; noticeMarkdown?: string; notice?: string }>
-      if (!result?.ok) {
-        setAnnouncementMarkdown('')
-        return
-      }
-      const payload = result.data || {}
-      const text = String(payload.markdown ?? payload.noticeMarkdown ?? payload.notice ?? '').trim()
-      setAnnouncementMarkdown(text)
-    } catch {
-      setAnnouncementMarkdown('')
-    }
+  const {
+    patchAccount,
+    upsertAccount,
+    startAccountScanning,
+    stopAccount,
+    startAccountWithLogin,
+    addAccount,
+    removeAccount,
+    stopLoginPolling
+  } = useAccountLifecycle({
+    accounts,
+    settings,
+    license,
+    manager,
+    activePoolServerUrl,
+    addLog,
+    onRuntimeLog: handleRuntimeLog,
+    appendAccountLog,
+    persistHistoryRecord,
+    setAccounts,
+    setLotteriesByAccount,
+    setHistoryRecords,
+    setDispatchSummary,
+    runtimeAccountsRef,
+    loginTimersRef
   })
 
   const refreshDispatch = useEffectEvent(async () => {
@@ -491,7 +370,6 @@ export default function App() {
         })
       }
       setHistoryRecords(Array.isArray(snapshot.historyRecords) ? snapshot.historyRecords : [])
-      void refreshDesktopNotice(snapshotPoolServerUrl)
     } catch (error) {
       addLog(`引导信息加载失败: ${String((error as Error)?.message || error)}`, 'warning')
     }
@@ -515,259 +393,6 @@ export default function App() {
     }
   })
 
-  const startAccountScanning = useEffectEvent(async (accountId: string, options: { reuseLoggedInBrowser?: boolean; tokenInfo?: AnyRecord } = {}) => {
-    const runtime = runtimeAccountsRef.current.get(accountId)
-    if (!runtime) return
-    if (!runtime.token && !options.tokenInfo) return
-    if (runtime._starting) return
-    if (runtime._stopping) return
-    runtime._starting = true
-
-    try {
-      if (!options.reuseLoggedInBrowser) {
-        const launch = await window.electronAPI.invoke('launch-browser', { accountId, visible: true })
-        if (!launch?.success) {
-          addLog(`启动 ${runtime.nickname} 执行容器失败: ${launch?.error || 'unknown'}`, 'error')
-          return
-        }
-        const tokenResult = await window.electronAPI.invoke('load-token', accountId)
-        if (!tokenResult?.success || !tokenResult?.tokenInfo) {
-          addLog(`账号 ${runtime.nickname} 缺少有效登录态，请重新扫码`, 'warning')
-          patchAccount(accountId, { state: 'waiting', actionActive: false })
-          return
-        }
-        const setResult = await window.electronAPI.invoke('set-cookies', { accountId, tokenInfo: tokenResult.tokenInfo })
-        if (!setResult?.success || setResult?.isLoginCookieReady === false) {
-          addLog(`账号 ${runtime.nickname} 登录态恢复失败，请重新扫码`, 'warning')
-          patchAccount(accountId, { state: 'waiting', actionActive: false })
-          return
-        }
-        void window.electronAPI.invoke('navigate-to', { accountId, url: 'https://www.douyin.com' }).catch(() => {})
-      }
-
-      await window.electronAPI.desktop.setAccountMonitoring(accountId, true)
-      patchAccount(accountId, {
-        state: 'running',
-        actionActive: true,
-        scanRole: runtime.scanRole || 'worker'
-      })
-      manager.setScanConfig(settings.scanConfig)
-      manager.setPoolServerConfig({ url: activePoolServerUrl }, { silent: true })
-      manager.startAccount(runtime, buildLegacyConfig(settings), {
-        onStatusUpdate: (update: AnyRecord) => {
-          patchAccount(accountId, {
-            ...update,
-            state: String(update.state || runtime.state || 'running'),
-            actionActive: update.actionActive === undefined ? true : update.actionActive === true
-          })
-
-          const hasPoolSummary = update && (
-            Object.prototype.hasOwnProperty.call(update, 'poolActiveCandidates') ||
-            Object.prototype.hasOwnProperty.call(update, 'poolValidCandidates') ||
-            Object.prototype.hasOwnProperty.call(update, 'poolAvailableCandidates')
-          )
-          if (hasPoolSummary) {
-            setDispatchSummary((current) => ({
-              ...current,
-              enabled: true,
-              connected: true,
-              error: '',
-              activeCandidates: Number(
-                update.poolActiveCandidates !== undefined
-                  ? update.poolActiveCandidates
-                  : current.activeCandidates
-              ),
-              validCandidates: Number(
-                update.poolValidCandidates !== undefined
-                  ? update.poolValidCandidates
-                  : current.validCandidates
-              ),
-              availableCandidates: Number(
-                update.poolAvailableCandidates !== undefined
-                  ? update.poolAvailableCandidates
-                  : current.availableCandidates
-              ),
-              updatedAt: Number(update.poolSummaryAt || Date.now())
-            }))
-          }
-        },
-        onLotteryListUpdate: ({ accountId: nextId, list }: { accountId: string; list: AnyRecord[] }) => {
-          startTransition(() => {
-            setLotteriesByAccount((current) => ({
-              ...current,
-              [nextId]: Array.isArray(list) ? list : []
-            }))
-          })
-        },
-        onHistoryRecord: (record: AnyRecord) => {
-          void persistHistoryRecord(record)
-        },
-        onLog: (message: string, type: UiLogEntry['type']) => {
-          const simplified = simplifyRuntimeLogMessage(message)
-          if (!simplified.keep) return
-          const dedupKey = buildRuntimeLogDedupKey(simplified.message)
-          const now = Date.now()
-          const prev = lastRuntimeLogRef.current.get(accountId)
-          if (prev && prev.key === dedupKey && now - prev.at < 2200) {
-            return
-          }
-          lastRuntimeLogRef.current.set(accountId, { key: dedupKey, at: now })
-          addLog(simplified.message, type)
-          void appendAccountLog(accountId, simplified.message, type)
-        },
-        onTokenInvalid: async ({ id, reason }: { id: string; reason: string }) => {
-          const runtimeSnapshot = runtimeAccountsRef.current.get(id)
-          const accountName = runtimeSnapshot?.nickname || id
-          addLog(`账号 ${accountName} 登录态失效: ${reason || '需要重新扫码登录'}`, 'warning')
-          stopLoginPolling(id)
-          patchAccount(id, { state: 'waiting', actionActive: false })
-
-          await window.electronAPI.desktop.setAccountMonitoring(id, false).catch(() => {})
-          await window.electronAPI.invoke('clear-account-cache', id).catch(() => {})
-          await window.electronAPI.invoke('delete-token', id).catch(() => {})
-          await manager.stopAccount(id).catch(() => {})
-
-          addLog(`账号 ${accountName} 正在切换到扫码登录...`, 'info')
-          window.setTimeout(() => {
-            startAccountWithLogin(id, true)
-          }, 180)
-        }
-      }, {
-        reuseLoggedInBrowser: options.reuseLoggedInBrowser === true,
-        tokenInfo: options.tokenInfo
-      })
-    } catch (error) {
-      addLog(`启动账号失败: ${String((error as Error)?.message || error)}`, 'error')
-      patchAccount(accountId, { state: 'error', actionActive: false })
-    } finally {
-      runtime._starting = false
-    }
-  })
-
-  const stopAccount = useEffectEvent(async (accountId: string) => {
-    const runtime = runtimeAccountsRef.current.get(accountId)
-    if (runtime?._stopping) return
-    if (runtime) runtime._stopping = true
-    try {
-      await manager.stopAccount(accountId)
-      await window.electronAPI.desktop.setAccountMonitoring(accountId, false)
-      patchAccount(accountId, {
-        state: 'paused',
-        actionActive: false,
-        currentTaskStage: '',
-        currentTaskLabel: '',
-        currentTaskLotteryName: '',
-        currentTaskAnchor: '',
-        currentTaskLeaseId: '',
-        currentTaskLeaseRemainingSec: 0,
-        currentTaskScore: 0
-      })
-    } catch (error) {
-      addLog(`暂停账号失败: ${String((error as Error)?.message || error)}`, 'warning')
-    } finally {
-      const latest = runtimeAccountsRef.current.get(accountId)
-      if (latest) latest._stopping = false
-    }
-  })
-
-  const startAccountWithLogin = useEffectEvent(async (accountId: string, autoStart = true) => {
-    const runtime = runtimeAccountsRef.current.get(accountId)
-    if (!runtime) return
-    try {
-      const launch = await window.electronAPI.invoke('launch-browser', { accountId, visible: true })
-      if (!launch?.success) {
-        addLog(`打开登录窗口失败: ${launch?.error || 'unknown'}`, 'error')
-        return
-      }
-      patchAccount(accountId, { state: 'opened', actionActive: false })
-      await window.electronAPI.desktop.setAccountMonitoring(accountId, false)
-      await window.electronAPI.invoke('navigate-to', { accountId, url: 'https://www.douyin.com' })
-      await window.electronAPI.desktop.showAccountWindow(accountId).catch(() => {})
-      void ensureAccountLoginPrompt(accountId, runtime.nickname || accountId)
-      stopLoginPolling(accountId)
-      const timer = window.setInterval(async () => {
-        const tokenResult = await window.electronAPI.invoke('get-login-token', accountId)
-        if (!tokenResult?.success || !tokenResult.isLoggedIn) return
-        stopLoginPolling(accountId)
-        const userInfoResult = await window.electronAPI.invoke('get-user-info', accountId).catch(() => ({ success: false }))
-        const userInfo = userInfoResult?.success ? userInfoResult.userInfo : tokenResult.userInfo
-        await window.electronAPI.invoke('save-token', {
-          accountId,
-          tokenInfo: tokenResult.tokenInfo,
-          userInfo
-        })
-        upsertAccount({
-          id: accountId,
-          nickname: userInfo?.nickname || runtime.nickname,
-          userId: userInfo?.userId || runtime.userId || accountId,
-          token: tokenResult.tokenInfo?.sessionid || tokenResult.tokenInfo?.sessionid_ss || 'session',
-          state: 'waiting',
-          actionActive: false,
-          scanRole: runtime.scanRole || 'worker'
-        })
-        addLog(`账号 ${userInfo?.nickname || runtime.nickname} 登录成功`, 'success')
-        if (autoStart) {
-          window.setTimeout(() => {
-            startAccountScanning(accountId, {
-              reuseLoggedInBrowser: true,
-              tokenInfo: tokenResult.tokenInfo
-            })
-          }, 280)
-        }
-      }, 2800)
-      loginTimersRef.current.set(accountId, timer)
-    } catch (error) {
-      stopLoginPolling(accountId)
-      addLog(`登录流程异常: ${String((error as Error)?.message || error)}`, 'error')
-    }
-  })
-
-  const addAccount = useEffectEvent(() => {
-    const nextIndex = accounts.reduce((max, account) => {
-      const parsed = Number(account.id.replace(/[^\d]/g, ''))
-      return Number.isFinite(parsed) ? Math.max(max, parsed) : max
-    }, 0) + 1
-    const accountId = `account_${nextIndex}`
-    upsertAccount({
-      id: accountId,
-      nickname: `账号${nextIndex}`,
-      userId: accountId,
-      state: 'waiting',
-      actionActive: false,
-      scanRole: 'worker'
-    })
-    addLog(`请为账号${nextIndex} 扫码登录`, 'info')
-    startAccountWithLogin(accountId, true)
-  })
-
-  const removeAccount = useEffectEvent(async (accountId: string) => {
-    const runtime = runtimeAccountsRef.current.get(accountId)
-    if (runtime) {
-      manager.stopAccount(accountId)
-      runtimeAccountsRef.current.delete(accountId)
-    }
-    stopLoginPolling(accountId)
-    await window.electronAPI.desktop.setAccountMonitoring(accountId, false).catch(() => {})
-    await window.electronAPI.invoke('delete-token', accountId).catch(() => {})
-    const purgeResult: { success: boolean; result?: AnyRecord; error?: string } =
-      await window.electronAPI.desktop.purgeAccountData(accountId).catch(() => ({ success: false, error: 'invoke_failed' }))
-    startTransition(() => {
-      setAccounts((current) => current.filter((item) => item.id !== accountId))
-      setLotteriesByAccount((current) => {
-        const next = { ...current }
-        delete next[accountId]
-        return next
-      })
-      setHistoryRecords((current) => current.filter((item) => item.accountId !== accountId))
-    })
-    setSelectedAccountId((current) => (current === accountId ? '' : current))
-    if (purgeResult?.success) {
-      addLog(`账号 ${accountId} 已彻底删除（历史${purgeResult?.result?.deletedHistoryRows || 0}条，日志文件${purgeResult?.result?.deletedAccountLogFiles || 0}个）`, 'success')
-    } else {
-      addLog(`账号 ${accountId} 已删除，但本地记录清理失败: ${String(purgeResult?.error || 'unknown')}`, 'warning')
-    }
-  })
-
   const persistSettings = useEffectEvent(async (nextSettings: DesktopSettings) => {
     const normalizedSettings: DesktopSettings = {
       ...nextSettings,
@@ -787,15 +412,6 @@ export default function App() {
     void bootstrapDesktop()
     manager.setScanConfig(defaultSettings.scanConfig)
 
-    const offUpdate = window.electronAPI.desktop.onUpdateState((snapshot) => {
-      setUpdateState(snapshot)
-    })
-    const offHotUpdate = window.electronAPI.desktop.onHotUpdateState((snapshot) => {
-      setHotUpdateState((current) => ({
-        ...current,
-        ...snapshot
-      }))
-    })
     const offBrowserClosed = window.electronAPI.on('browser-closed', ({ accountId }: { accountId: string }) => {
       stopLoginPolling(accountId)
       void (async () => {
@@ -810,16 +426,6 @@ export default function App() {
       }
     })
 
-    const summaryTimer = window.setInterval(() => {
-      void refreshDispatch()
-    }, 2600)
-    const learningTimer = window.setInterval(() => {
-      void refreshLearning()
-    }, 5200)
-    const licenseTimer = window.setInterval(() => {
-      void refreshLicense()
-    }, 3200)
-
     const handleBeforeUnload = () => {
       accounts.forEach((account) => stopLoginPolling(account.id))
       manager.shutdownAllAccounts()
@@ -828,14 +434,9 @@ export default function App() {
 
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload)
-      window.clearInterval(summaryTimer)
-      window.clearInterval(learningTimer)
-      window.clearInterval(licenseTimer)
-      offUpdate()
-      offHotUpdate()
       offBrowserClosed()
       offDouyinResponse()
-      loginTimersRef.current.forEach((timer) => window.clearInterval(timer))
+      loginTimersRef.current.forEach((timer) => window.clearTimeout(timer))
       loginTimersRef.current.clear()
     }
   }, [])
@@ -848,7 +449,6 @@ export default function App() {
     void refreshLicense()
     void refreshDispatch()
     void refreshLearning()
-    void refreshDesktopNotice(activePoolServerUrl)
   }, [activePoolServerUrl])
 
   useEffect(() => {
@@ -859,15 +459,18 @@ export default function App() {
     }))
   }, [license.accessMode, license.authorized, license.trialState])
 
-  useEffect(() => {
-    if (!accounts.length) {
-      if (selectedAccountId) setSelectedAccountId('')
-      return
-    }
-    if (!selectedAccountId || !accounts.some((account) => account.id === selectedAccountId)) {
-      setSelectedAccountId(accounts[0].id)
-    }
-  }, [accounts, selectedAccountId])
+  useAccountSelection({
+    accounts,
+    selectedAccountId,
+    onSelectedAccountIdChange: setSelectedAccountId
+  })
+
+  useAdaptivePolling({
+    hasActiveAccounts: accounts.some((account) => account.actionActive),
+    refreshDispatch: () => void refreshDispatch(),
+    refreshLicense: () => void refreshLicense(),
+    refreshLearning: () => void refreshLearning()
+  })
 
   const runningCount = accounts.filter((account) => account.actionActive).length
   const totalWins = accounts.reduce((sum, account) => sum + Number(account.todayLotteryWinCount || 0), 0)
@@ -899,91 +502,6 @@ export default function App() {
   const sortedHistoryRecords = useMemo(() => {
     return [...historyRecords].sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
   }, [historyRecords])
-
-  async function handleStartTrial() {
-    const poolServerUrl = activePoolServerUrl
-    setLicenseBusy(true)
-    try {
-      const result = (await startLicenseTrial(poolServerUrl, {
-        clientId: poolClientId,
-        fingerprint: poolFingerprint,
-        appVersion: bootstrap?.appVersion || '3.0.0',
-        timeoutMs: 3000
-      })) as ServiceResult<{ license?: AnyRecord }>
-      if (!result?.ok) {
-        const errorText = String(result?.data?.license?.message || result?.error || '未知错误')
-        const message = `试用开启失败：${errorText}`
-        setLicense((current) => ({
-          ...current,
-          message,
-          checkedAt: Date.now()
-        }))
-        addLog(message, 'error')
-        await refreshLicense()
-        return
-      }
-      const nextLicense = normalizeLicenseSnapshot(result.data?.license || {})
-      setLicense(nextLicense)
-      addLog(nextLicense.authorized ? '试用已开启' : nextLicense.message, nextLicense.authorized ? 'success' : 'warning')
-    } catch (error) {
-      const errorText = String((error as Error)?.message || error || '未知错误')
-      const message = `试用开启失败：${errorText}`
-      setLicense((current) => ({
-        ...current,
-        message,
-        checkedAt: Date.now()
-      }))
-      addLog(message, 'error')
-    } finally {
-      setLicenseBusy(false)
-    }
-  }
-
-  async function handleActivate() {
-    const poolServerUrl = activePoolServerUrl
-    if (!licenseKey.trim()) {
-      addLog('请输入授权码', 'warning')
-      return
-    }
-    setLicenseBusy(true)
-    try {
-      const result = (await activateLicense(poolServerUrl, {
-        licenseKey,
-        clientId: poolClientId,
-        fingerprint: poolFingerprint,
-        appVersion: bootstrap?.appVersion || '3.0.0',
-        currentAccounts: accounts.length,
-        timeoutMs: 3000
-      })) as ServiceResult<{ license?: AnyRecord }>
-      if (!result?.ok) {
-        const errorText = String(result?.data?.license?.message || result?.error || '未知错误')
-        const message = `授权激活失败：${errorText}`
-        setLicense((current) => ({
-          ...current,
-          message,
-          checkedAt: Date.now()
-        }))
-        addLog(message, 'error')
-        await refreshLicense()
-        return
-      }
-      const nextLicense = normalizeLicenseSnapshot(result.data?.license || {})
-      setLicense(nextLicense)
-      setLicenseKey('')
-      addLog(nextLicense.authorized ? '授权激活成功' : nextLicense.message, nextLicense.authorized ? 'success' : 'warning')
-    } catch (error) {
-      const errorText = String((error as Error)?.message || error || '未知错误')
-      const message = `授权激活失败：${errorText}`
-      setLicense((current) => ({
-        ...current,
-        message,
-        checkedAt: Date.now()
-      }))
-      addLog(message, 'error')
-    } finally {
-      setLicenseBusy(false)
-    }
-  }
 
   const gateLocked = license.accessMode === 'locked' && license.requiresActivation
 

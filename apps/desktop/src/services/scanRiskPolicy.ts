@@ -1,8 +1,47 @@
-/**
- * 创建扫描风控状态对象。
- * @returns {{level:number,riskScore:number,stableScore:number,cooldownUntil:number}}
- */
-export function createScanRiskState() {
+export type ScanRiskState = {
+  level: number
+  riskScore: number
+  stableScore: number
+  cooldownUntil: number
+}
+
+export type ScanConfigLike = {
+  countPerPage?: number
+  pagesPerCategory?: number
+  allCount?: number
+}
+
+export type AdaptiveScanProfile = {
+  level: number
+  allTimes: number
+  allCount: number
+  pagesPerCategory: number
+  countPerPage: number
+  maxAllRounds: number
+  noGrowthBreakRounds: number
+  maxCategoryPages: number
+  categoryNoGrowthBreakPages: number
+  detailConcurrency: number
+  detailRoomCap: number
+  itemGapMs: number
+  cycleDelayMinMs: number
+  cycleDelayMaxMs: number
+  cooldownRemainMs: number
+}
+
+export type ScanRiskStats = {
+  successCount?: number
+  hardRiskCount?: number
+}
+
+export type ScanRiskUpdateResult = {
+  state: ScanRiskState
+  raised: boolean
+  lowered: boolean
+  cooldownMs: number
+}
+
+export function createScanRiskState(): ScanRiskState {
   return {
     level: 0,
     riskScore: 0,
@@ -11,24 +50,14 @@ export function createScanRiskState() {
   }
 }
 
-/**
- * 将数字约束在指定区间内。
- * @param {number} num 原始值
- * @param {number} min 最小值
- * @param {number} max 最大值
- * @returns {number}
- */
-function clamp(num, min, max) {
+function clamp(num: number, min: number, max: number) {
   return Math.min(max, Math.max(min, Number(num || 0)))
 }
 
-/**
- * 根据当前风控等级计算本轮扫描参数。
- * @param {object} state 风控状态
- * @param {object} scanConfig 基础扫描配置
- * @returns {object} 自适应扫描配置
- */
-export function calcAdaptiveScanProfile(state, scanConfig) {
+export function calcAdaptiveScanProfile(
+  state?: Partial<ScanRiskState> | null,
+  scanConfig?: ScanConfigLike | null
+): AdaptiveScanProfile {
   const safeState = state || createScanRiskState()
   const level = Math.max(0, Number(safeState.level || 0))
   const safeScan = scanConfig || { countPerPage: 15, pagesPerCategory: 5, allCount: 24 }
@@ -36,7 +65,7 @@ export function calcAdaptiveScanProfile(state, scanConfig) {
   const baseCountPerPage = clamp(safeScan.countPerPage || 15, 10, 20)
   const basePagesPerCategory = clamp(safeScan.pagesPerCategory || 5, 5, 80)
 
-  const levelProfiles = {
+  const levelProfiles: Record<number, Omit<AdaptiveScanProfile, 'level' | 'cooldownRemainMs'>> = {
     0: {
       allTimes: 10,
       allCount: baseAllCount,
@@ -102,31 +131,16 @@ export function calcAdaptiveScanProfile(state, scanConfig) {
 
   return {
     level,
-    allTimes: profile.allTimes,
-    allCount: profile.allCount,
-    pagesPerCategory: profile.pagesPerCategory,
-    countPerPage: profile.countPerPage,
-    maxAllRounds: profile.maxAllRounds,
-    noGrowthBreakRounds: profile.noGrowthBreakRounds,
-    maxCategoryPages: profile.maxCategoryPages,
-    categoryNoGrowthBreakPages: profile.categoryNoGrowthBreakPages,
-    detailConcurrency: profile.detailConcurrency,
-    detailRoomCap: profile.detailRoomCap,
-    itemGapMs: profile.itemGapMs,
-    cycleDelayMinMs: profile.cycleDelayMinMs,
-    cycleDelayMaxMs: profile.cycleDelayMaxMs,
+    ...profile,
     cooldownRemainMs: Math.max(0, Number(safeState.cooldownUntil || 0) - Date.now())
   }
 }
 
-/**
- * 根据本轮扫描结果更新风控状态，并给出是否升降级。
- * @param {object} state 当前风控状态
- * @param {object} stats 本轮统计（successCount / hardRiskCount）
- * @returns {{state: object, raised: boolean, lowered: boolean, cooldownMs: number}}
- */
-export function updateScanRiskState(state, stats) {
-  const next = { ...(state || createScanRiskState()) }
+export function updateScanRiskState(
+  state?: Partial<ScanRiskState> | null,
+  stats?: ScanRiskStats | null
+): ScanRiskUpdateResult {
+  const next: ScanRiskState = { ...createScanRiskState(), ...(state || {}) }
   const hardRiskCount = Number(stats?.hardRiskCount || 0)
   const successCount = Number(stats?.successCount || 0)
   const prevLevel = next.level
@@ -145,7 +159,7 @@ export function updateScanRiskState(state, stats) {
   if (next.riskScore >= upThreshold && next.level < 3) {
     next.level += 1
     next.riskScore = 0
-    next.stableScore = 0 // 升级时同步重置，防止累积的 stableScore 导致立即触发降级
+    next.stableScore = 0
     cooldownMs = [0, 25000, 45000, 70000][next.level] || (next.level * 25000)
     next.cooldownUntil = now + cooldownMs
   }

@@ -1,6 +1,6 @@
 {
   "desktop": {
-    "poolServerUrl": "https://fudai.shuai.help",
+    "poolServerUrl": "127.0.0.1:9090",
     "updateFeedUrl": "",
     "hotUpdateEnabled": true,
     "hotUpdateManifestUrl": "https://fudai.shuai.help/desktop/hot-manifest.json",
@@ -46,7 +46,7 @@
   },
   "miniapp": {
     "baseUrl": "https://fudai.shuai.help/admin",
-    "rewardedVideoAdUnitId": "adunit-3258e3a8e5773f65",
+    "rewardedVideoAdUnitId": "YOUR_AD_UNIT_ID_HERE",
     "signinRewardDays": 1,
     "adUnlockDays": 1
   },
@@ -67,28 +67,28 @@
     "license": {
       "enabled": true,
       "unrestricted": false,
-      "host": "43.155.204.215",
-      "adminToken": "0UevuhsEJZY3TMTLvittxud7iwgE4EFuCxfNrsO8",
+      "host": "YOUR_DB_HOST_HERE",
+      "adminToken": "YOUR_ADMIN_TOKEN_HERE",
       "adUnlockDays": 1,
       "miniAppEnabled": true,
-      "miniAppAppId": "wx91a036cbc18bfd39",
-      "miniAppAppSecret": "a8d0f9fa3dbf50ca41f674caa219f22f",
-      "miniAppSessionSecret": "1a7af707955d8c5485e23b26ffc45969e792e598db0670cf6563a7c589b81daf",
+      "miniAppAppId": "YOUR_WECHAT_APP_ID_HERE",
+      "miniAppAppSecret": "YOUR_WECHAT_APP_SECRET_HERE",
+      "miniAppSessionSecret": "YOUR_SESSION_SECRET_HERE",
       "miniAppSessionTTLMin": 1440,
       "miniAppPagePath": "pages/index/index",
       "miniAppEnvVersion": "release",
       "port": 3306,
       "user": "root",
-      "password": "Lushuailei0825",
+      "password": "YOUR_DB_PASSWORD_HERE",
       "database": "dy_fudai_prod",
-      "params": "charset=utf8mb4\u0026parseTime=true\u0026loc=Local",
+      "params": "charset=utf8mb4&parseTime=true&loc=Local",
       "maxOpenConns": 8,
       "maxIdleConns": 4,
       "connMaxLifetimeMin": 30
     },
     "redis": {
       "enabled": true,
-      "addr": "43.155.204.215:6379",
+      "addr": "YOUR_REDIS_HOST_HERE:6379",
       "password": "",
       "db": 0,
       "prefix": "lottery_pool",

@@ -159,7 +159,7 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
         hintedRooms: roomInfoList.length,
         detailRequested: roomInfoList.length
       })
-      safeOnLog(accountData, `🔍 第${i + 1}/${totalTimes}轮开始扫描福袋（候选${roomInfoList.length}）`)
+      safeOnLog(accountData, `第${i + 1}/${totalTimes}轮开始扫描福袋（候选${roomInfoList.length}）`)
 
       const detailResult = await getLotteryInfo(manager, roomInfoList, accountId, scanProfile)
       const settled = Array.isArray(detailResult?.settled) ? detailResult.settled : []

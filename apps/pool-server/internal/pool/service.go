@@ -346,6 +346,9 @@ type Service struct {
 	seq   atomic.Int64
 	dirty atomic.Bool
 
+	changeEpoch atomic.Int64
+	topEpoch    atomic.Int64
+
 	topMu    sync.RWMutex
 	topCache []ScoredCandidate
 	topMeta  TopMeta
@@ -368,6 +371,11 @@ type Service struct {
 
 	allScanMu     sync.Mutex
 	allScanCursor allScanCursorState
+}
+
+func (s *Service) markDirty() {
+	s.dirty.Store(true)
+	s.changeEpoch.Add(1)
 }
 
 // NewService 方法：创建服务。
@@ -396,7 +404,7 @@ func NewService(cfg Config) *Service {
 		scanPermits:    make(map[string]scanPermitState),
 		allScanCursor:  defaultAllScanCursorState(time.Now().UnixMilli()),
 	}
-	s.dirty.Store(true)
+	s.markDirty()
 	heap.Init(&s.exp)
 	return s
 }
@@ -659,7 +667,7 @@ func (s *Service) UpdateProfile(patch map[string]any) (FilterProfile, int64) {
 
 	s.profile = p
 	s.profileVersion++
-	s.dirty.Store(true)
+	s.markDirty()
 	return s.profile, s.profileVersion
 }
 
@@ -741,7 +749,7 @@ func (s *Service) upsertOne(c Candidate, nowMS int64) string {
 		Key: c.Key, ExpireAtMS: exp, Version: c.Version,
 	})
 	s.expMu.Unlock()
-	s.dirty.Store(true)
+	s.markDirty()
 
 	if wasExisting {
 		return "updated"
@@ -777,7 +785,7 @@ func (s *Service) SweepExpired(nowMS int64) {
 			s.leaseMu.Lock()
 			delete(s.joined, top.Key)
 			s.leaseMu.Unlock()
-			s.dirty.Store(true)
+			s.markDirty()
 		}
 	}
 
@@ -1305,7 +1313,7 @@ func (s *Service) FinishTaskLease(owner ClaimOwner, leaseID string, result strin
 		s.leaseMu.Lock()
 		delete(s.joined, candidateKey)
 		s.leaseMu.Unlock()
-		s.dirty.Store(true)
+		s.markDirty()
 	}
 	return true, nil
 }
@@ -1386,11 +1394,28 @@ func (s *Service) TaskDebug(profile FilterProfile, owner ClaimOwner, leaseLimit 
 // RefreshTop 方法：刷新优选结果。
 func (s *Service) RefreshTop(force bool) {
 	now := time.Now().UnixMilli()
-	if !force && !s.dirty.Load() && now-s.topMeta.BuiltAtMS < s.cfg.TopRefreshMS {
-		return
+	guardTTL := s.cfg.TopRefreshMS > 0
+	var lastBuilt int64
+	if guardTTL {
+		s.topMu.RLock()
+		lastBuilt = s.topMeta.BuiltAtMS
+		s.topMu.RUnlock()
+		if !force && !s.dirty.Load() && now-lastBuilt < s.cfg.TopRefreshMS {
+			return
+		}
 	}
 
 	s.SweepExpired(now)
+
+	if guardTTL && !force && !s.dirty.Load() && now-lastBuilt >= s.cfg.TopRefreshMS {
+		s.topMu.Lock()
+		meta := s.topMeta
+		meta.BuiltAtMS = now
+		s.topMeta = meta
+		s.topMu.Unlock()
+		return
+	}
+
 	profile, _ := s.Profile()
 	all := s.store.snapshot()
 	capSize := s.cfg.TopCacheMax
@@ -1409,12 +1434,13 @@ func (s *Service) RefreshTop(force bool) {
 	}
 	s.topMu.Unlock()
 	s.dirty.Store(false)
+	s.topEpoch.Store(s.changeEpoch.Load())
 }
 
 // Top 方法：处理优选结果。
 func (s *Service) Top(limit int) (items []ScoredCandidate, meta TopMeta, profileVersion int64) {
 	limit = normalizeTopLimit(limit, s.cfg.TopCacheMax)
-	s.RefreshTop(true)
+	s.RefreshTop(false)
 
 	s.topMu.RLock()
 	defer s.topMu.RUnlock()
@@ -1461,7 +1487,7 @@ func (s *Service) RecordTaskFeedback(feedback TaskFeedback) error {
 	}
 	applyTaskFeedback(bucket, normalized, now)
 	s.learningMu.Unlock()
-	s.dirty.Store(true)
+	s.markDirty()
 	if err := appendFeedbackJSONL(s.cfg.FeedbackLogPath, normalized); err != nil {
 		return err
 	}
