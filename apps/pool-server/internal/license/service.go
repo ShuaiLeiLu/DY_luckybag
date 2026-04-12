@@ -117,6 +117,28 @@ type AdminListResult struct {
 	Items    []AdminLicense `json:"items"`
 }
 
+// AdminRuntimeClient 描述后台可见的运行中客户端记录。
+type AdminRuntimeClient struct {
+	ClientID     string `json:"clientId"`
+	Fingerprint  string `json:"fingerprint"`
+	AppVersion   string `json:"appVersion"`
+	AccessMode   string `json:"accessMode"`
+	LicenseID    int64  `json:"licenseId"`
+	LicensePlan  string `json:"licensePlan"`
+	Authorized   bool   `json:"authorized"`
+	Unrestricted bool   `json:"unrestricted"`
+	FirstSeenAt  int64  `json:"firstSeenAt"`
+	LastSeenAt   int64  `json:"lastSeenAt"`
+}
+
+// AdminRuntimeClientListResult 描述后台客户端列表分页结果。
+type AdminRuntimeClientListResult struct {
+	Total    int                  `json:"total"`
+	Page     int                  `json:"page"`
+	PageSize int                  `json:"pageSize"`
+	Items    []AdminRuntimeClient `json:"items"`
+}
+
 // AdminCreateRequest 描述授权管理后台创建授权请求。
 type AdminCreateRequest struct {
 	LicenseKey   string
@@ -191,6 +213,19 @@ type adminLicenseRow struct {
 	UpdatedAt       time.Time
 	ActivationCount int
 	LastSeenAt      sql.NullTime
+}
+
+type runtimeClientRow struct {
+	ClientID     string
+	Fingerprint  string
+	AppVersion   string
+	AccessMode   string
+	LicenseID    sql.NullInt64
+	LicensePlan  string
+	Authorized   bool
+	Unrestricted bool
+	FirstSeenAt  time.Time
+	LastSeenAt   time.Time
 }
 
 // NewService 初始化授权服务。初始化失败时仍返回可读状态服务，便于前端展示异常。
@@ -376,6 +411,30 @@ func (s *Service) ensureSettingsSchema(ctx context.Context) error {
 			UNIQUE KEY uniq_trial_fingerprint (fingerprint),
 			KEY idx_trial_client_id (client_id),
 			KEY idx_trial_expire_at (expire_at)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+	`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(schemaCtx, `
+		CREATE TABLE IF NOT EXISTS license_runtime_clients (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			client_id VARCHAR(128) NOT NULL,
+			fingerprint VARCHAR(128) NOT NULL DEFAULT '',
+			app_version VARCHAR(32) NOT NULL DEFAULT '',
+			access_mode VARCHAR(24) NOT NULL DEFAULT '',
+			license_id BIGINT UNSIGNED NULL,
+			license_plan VARCHAR(64) NOT NULL DEFAULT '',
+			authorized TINYINT(1) NOT NULL DEFAULT 0,
+			unrestricted TINYINT(1) NOT NULL DEFAULT 0,
+			first_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+			UNIQUE KEY uniq_runtime_client (client_id),
+			KEY idx_runtime_fingerprint (fingerprint),
+			KEY idx_runtime_last_seen (last_seen_at),
+			CONSTRAINT fk_runtime_client_license
+				FOREIGN KEY (license_id) REFERENCES licenses(id)
+				ON DELETE SET NULL
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 	`); err != nil {
 		return err
@@ -590,6 +649,59 @@ func (s *Service) buildUnrestrictedStatus(now time.Time) Status {
 	}
 }
 
+// RecordRuntimeClient 记录客户端最近一次访问，用于后台展示实际连接过的机器。
+func (s *Service) RecordRuntimeClient(ctx context.Context, clientID, fingerprint, appVersion string, status Status) error {
+	if s == nil || !s.cfg.Enabled {
+		return nil
+	}
+	if err := s.ensureRuntimeReady(ctx); err != nil {
+		return err
+	}
+	clientID = strings.TrimSpace(clientID)
+	fingerprint = normalizeMachineFingerprint(fingerprint)
+	if clientID == "" || fingerprint == "" {
+		return nil
+	}
+	accessMode := strings.TrimSpace(status.AccessMode)
+	if accessMode == "" {
+		accessMode = "unknown"
+	}
+	licensePlan := strings.TrimSpace(status.LicensePlan)
+	if licensePlan == "" {
+		licensePlan = strings.TrimSpace(status.Plan)
+	}
+	var licenseID any
+	if status.LicenseID > 0 {
+		licenseID = status.LicenseID
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO license_runtime_clients (
+			client_id,
+			fingerprint,
+			app_version,
+			access_mode,
+			license_id,
+			license_plan,
+			authorized,
+			unrestricted,
+			first_seen_at,
+			last_seen_at,
+			updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), NOW())
+		ON DUPLICATE KEY UPDATE
+			fingerprint = VALUES(fingerprint),
+			app_version = VALUES(app_version),
+			access_mode = VALUES(access_mode),
+			license_id = VALUES(license_id),
+			license_plan = VALUES(license_plan),
+			authorized = VALUES(authorized),
+			unrestricted = VALUES(unrestricted),
+			last_seen_at = NOW(),
+			updated_at = NOW()
+	`, clientID, fingerprint, strings.TrimSpace(appVersion), accessMode, licenseID, licensePlan, status.Authorized, status.Unrestricted)
+	return err
+}
+
 // Status 查询当前客户端的授权状态。
 func (s *Service) Status(ctx context.Context, clientID, fingerprint string) (Status, error) {
 	now := time.Now()
@@ -618,7 +730,9 @@ func (s *Service) Status(ctx context.Context, clientID, fingerprint string) (Sta
 	}
 	base.Available = true
 	if unrestricted, err := s.IsUnrestricted(ctx); err == nil && unrestricted {
-		return s.buildUnrestrictedStatus(now), nil
+		status := s.buildUnrestrictedStatus(now)
+		_ = s.RecordRuntimeClient(ctx, clientID, fingerprint, "", status)
+		return status, nil
 	} else if err != nil {
 		base.State = "query_failed"
 		base.Message = "授权查询失败"
@@ -669,6 +783,7 @@ func (s *Service) Status(ctx context.Context, clientID, fingerprint string) (Sta
 	if status.Authorized {
 		_ = s.touchActivation(ctx, row.ID, trimmedClientID, trimmedFingerprint, 0, "")
 	}
+	_ = s.RecordRuntimeClient(ctx, trimmedClientID, trimmedFingerprint, "", status)
 	return status, nil
 }
 
@@ -873,6 +988,93 @@ func (s *Service) GetDesktopNoticeMarkdown(ctx context.Context) (string, error) 
 		return "", err
 	}
 	return s.loadDesktopNoticeSetting(ctx)
+}
+
+// ListAdminRuntimeClients 返回后台记录到的运行客户端列表。
+func (s *Service) ListAdminRuntimeClients(ctx context.Context, page, pageSize int) (AdminRuntimeClientListResult, error) {
+	if err := s.ensureAdminReady(); err != nil {
+		return AdminRuntimeClientListResult{}, err
+	}
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	if pageSize > 500 {
+		pageSize = 500
+	}
+
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM license_runtime_clients`).Scan(&total); err != nil {
+		return AdminRuntimeClientListResult{}, err
+	}
+
+	offset := (page - 1) * pageSize
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+			client_id,
+			fingerprint,
+			app_version,
+			access_mode,
+			license_id,
+			license_plan,
+			authorized,
+			unrestricted,
+			first_seen_at,
+			last_seen_at
+		FROM license_runtime_clients
+		ORDER BY last_seen_at DESC, client_id DESC
+		LIMIT ? OFFSET ?
+	`, pageSize, offset)
+	if err != nil {
+		return AdminRuntimeClientListResult{}, err
+	}
+	defer rows.Close()
+
+	items := make([]AdminRuntimeClient, 0, pageSize)
+	for rows.Next() {
+		var row runtimeClientRow
+		if err := rows.Scan(
+			&row.ClientID,
+			&row.Fingerprint,
+			&row.AppVersion,
+			&row.AccessMode,
+			&row.LicenseID,
+			&row.LicensePlan,
+			&row.Authorized,
+			&row.Unrestricted,
+			&row.FirstSeenAt,
+			&row.LastSeenAt,
+		); err != nil {
+			return AdminRuntimeClientListResult{}, err
+		}
+		item := AdminRuntimeClient{
+			ClientID:     strings.TrimSpace(row.ClientID),
+			Fingerprint:  strings.TrimSpace(row.Fingerprint),
+			AppVersion:   strings.TrimSpace(row.AppVersion),
+			AccessMode:   strings.TrimSpace(row.AccessMode),
+			LicensePlan:  strings.TrimSpace(row.LicensePlan),
+			Authorized:   row.Authorized,
+			Unrestricted: row.Unrestricted,
+			FirstSeenAt:  row.FirstSeenAt.UnixMilli(),
+			LastSeenAt:   row.LastSeenAt.UnixMilli(),
+		}
+		if row.LicenseID.Valid {
+			item.LicenseID = row.LicenseID.Int64
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return AdminRuntimeClientListResult{}, err
+	}
+
+	return AdminRuntimeClientListResult{
+		Total:    total,
+		Page:     page,
+		PageSize: pageSize,
+		Items:    items,
+	}, nil
 }
 
 // ListAdminLicenses 返回授权管理后台分页列表。

@@ -2613,6 +2613,7 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCou
         const roomData = room?.data || {}
         const roomId = String(roomData?.id_str || '')
         if (!roomId) return null
+        const benefitHints = extractRoomBenefitHints(roomData?.others?.web_enter_benefit_point_data)
         return {
           webRid: room?.web_rid || roomId,
           roomId,
@@ -2620,7 +2621,8 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCou
           authorNickname: roomData?.owner?.nickname || '',
           authorSecUid: roomData?.owner?.sec_uid || '',
           onlineTotal: roomData?.user_count || 0,
-          hasLotteryHint: Boolean(roomData?.others?.web_enter_benefit_point_data?.has_ongoing_lottery)
+          hasLotteryHint: Boolean(roomData?.others?.web_enter_benefit_point_data?.has_ongoing_lottery),
+          ...benefitHints
         }
       })
       .filter(Boolean)
@@ -2657,6 +2659,64 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCou
     return { success: false, error: error.message }
   }
 })
+
+function normalizeRoomBenefitData(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {}
+  }
+  return value
+}
+
+function flattenRoomBenefitValue(value, depth = 0) {
+  if (depth > 2 || value === null || value === undefined) return []
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return [String(value)]
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 6).flatMap((item) => flattenRoomBenefitValue(item, depth + 1))
+  }
+  if (typeof value !== 'object') return []
+  const out = []
+  Object.entries(value)
+    .slice(0, 12)
+    .forEach(([key, item]) => {
+      out.push(String(key || ''))
+      out.push(...flattenRoomBenefitValue(item, depth + 1))
+    })
+  return out
+}
+
+function extractRoomBenefitHints(rawBenefitData) {
+  const roomBenefitData = normalizeRoomBenefitData(rawBenefitData)
+  const compactText = flattenRoomBenefitValue(roomBenefitData)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const lowerText = compactText.toLowerCase()
+  const lowerKeys = Object.keys(roomBenefitData).map((key) => String(key || '').toLowerCase())
+
+  const hasExplicitFlag = [
+    roomBenefitData.has_ongoing_luckybox,
+    roomBenefitData.has_luckybox,
+    roomBenefitData.has_redpacket,
+    roomBenefitData.has_red_packet,
+    roomBenefitData.has_ongoing_redpacket,
+    roomBenefitData.has_ongoing_red_packet,
+    roomBenefitData.redpacket,
+    roomBenefitData.red_packet,
+    roomBenefitData.luckybox
+  ].some((value) => value === true || Number(value) === 1)
+
+  const hasHintByKey = lowerKeys.some((key) => /red.?packet|luckybox|packet|snatch/.test(key))
+  const hasHintByText = /(红包|人气红包|口令红包|福袋红包)/.test(compactText) || /red.?packet|luckybox|snatch/.test(lowerText)
+  const hasRoomRedPacketHint = hasExplicitFlag || hasHintByKey || hasHintByText
+
+  return {
+    roomBenefitData,
+    hasRoomRedPacketHint,
+    roomRedPacketHintText: compactText ? compactText.slice(0, 160) : ''
+  }
+}
 
 // 搜索直播间-【分类】
 const FIXED_CATEGORY_DEFAULT = Object.freeze({
@@ -2803,6 +2863,8 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
         const room = item?.room || item?.data || item
         const roomId = String(room?.id_str || '')
         if (!roomId) return null
+        const benefitData = room?.others?.web_enter_benefit_point_data || item?.others?.web_enter_benefit_point_data
+        const benefitHints = extractRoomBenefitHints(benefitData)
         return {
           webRid: item?.web_rid || item?.webRid || room?.web_rid || roomId,
           roomId,
@@ -2813,7 +2875,8 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
           hasLotteryHint: Boolean(
             room?.others?.web_enter_benefit_point_data?.has_ongoing_lottery ||
             item?.others?.web_enter_benefit_point_data?.has_ongoing_lottery
-          )
+          ),
+          ...benefitHints
         }
       })
       .filter(Boolean)

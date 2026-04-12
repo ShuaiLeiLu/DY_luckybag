@@ -1,9 +1,9 @@
 {
   "desktop": {
-    "poolServerUrl": "http://fudai.shuai.help:9090",
+    "poolServerUrl": "https://fudai.shuai.help",
     "updateFeedUrl": "",
     "hotUpdateEnabled": true,
-    "hotUpdateManifestUrl": "http://fudai.shuai.help:9090/desktop/hot-manifest.json",
+    "hotUpdateManifestUrl": "https://fudai.shuai.help/desktop/hot-manifest.json",
     "hotUpdateReloadOnApply": false,
     "stayDuration": 18,
     "enableRedPacket": true,
@@ -45,7 +45,7 @@
     }
   },
   "miniapp": {
-    "baseUrl": "http://fudai.shuai.help:9090/admin",
+    "baseUrl": "https://fudai.shuai.help/admin",
     "rewardedVideoAdUnitId": "adunit-3258e3a8e5773f65",
     "signinRewardDays": 1,
     "adUnlockDays": 1
@@ -67,7 +67,7 @@
     "license": {
       "enabled": true,
       "unrestricted": false,
-      "host": "fudai.shuai.help",
+      "host": "43.155.204.215",
       "adminToken": "0UevuhsEJZY3TMTLvittxud7iwgE4EFuCxfNrsO8",
       "adUnlockDays": 1,
       "miniAppEnabled": true,
@@ -88,7 +88,7 @@
     },
     "redis": {
       "enabled": true,
-      "addr": "fudai.shuai.help:6379",
+      "addr": "43.155.204.215:6379",
       "password": "",
       "db": 0,
       "prefix": "lottery_pool",

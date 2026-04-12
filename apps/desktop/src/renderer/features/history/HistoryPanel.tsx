@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { LotteryHistoryRecord } from '@shared/models'
 
 export type HistoryPanelProps = {
@@ -5,35 +6,61 @@ export type HistoryPanelProps = {
 }
 
 export function HistoryPanel(props: HistoryPanelProps) {
+  const [filter, setFilter] = useState<'all' | 'won'>('all')
+
+  const filteredRecords = props.records.filter((record) => {
+    if (filter === 'won') {
+      const isWon = Number(record.rewardAmount || 0) > 0 || String(record.resultStatus || '').toLowerCase() === 'won' || record.recordType === 'win'
+      return isWon
+    }
+    return true
+  })
+
   return (
-    <aside className="glass flex h-full flex-col overflow-hidden rounded-[26px] p-4">
+    <aside className="flex h-full flex-col bg-slate-900 border border-slate-800 p-4 rounded-xl overflow-hidden shadow-sm">
       <div className="mb-4 flex items-center justify-between">
-        <div>
-          <h2 className="text-lg font-semibold text-white">历史记录</h2>
-          <p className="text-sm text-slate-400">查看账号近期参与和结果，便于复盘。</p>
+        <div className="flex items-center gap-4">
+          <div>
+            <h2 className="text-base font-semibold text-slate-100">历史记录</h2>
+            <p className="text-xs text-slate-400 mt-1">查看账号近期参与详情及开奖结果。</p>
+          </div>
+          <div className="flex items-center rounded-lg bg-slate-800/80 p-1 border border-slate-700/50">
+            <button
+              onClick={() => setFilter('all')}
+              className={`px-3 py-1 text-xs rounded-md transition-colors ${filter === 'all' ? 'bg-slate-700 text-slate-100 font-medium shadow-sm' : 'text-slate-400 hover:text-slate-300'}`}
+            >
+              已抢福袋
+            </button>
+            <button
+              onClick={() => setFilter('won')}
+              className={`px-3 py-1 text-xs rounded-md transition-colors ${filter === 'won' ? 'bg-emerald-500/20 text-emerald-400 font-medium shadow-sm border border-emerald-500/20' : 'text-slate-400 hover:text-slate-300'}`}
+            >
+              已中福袋
+            </button>
+          </div>
         </div>
-        <div className="rounded-full border border-slate-700 bg-slate-900/50 px-3 py-1 text-xs text-slate-300">
-          共 {props.records.length} 条
+        <div className="rounded-md border border-slate-700/50 bg-slate-800 px-3 py-1.5 text-xs text-slate-400">
+          共 {filteredRecords.length} 条
         </div>
       </div>
 
-      <div className="scrollbar-thin flex-1 space-y-2 overflow-auto pr-1">
-        {props.records.length === 0 ? (
-          <div className="flex h-56 items-center justify-center rounded-2xl border border-dashed border-slate-700/80 bg-slate-900/40 text-sm text-slate-400">
-            暂无历史记录
+      <div className="scrollbar-thin flex-1 space-y-2 overflow-auto pr-2">
+        {filteredRecords.length === 0 ? (
+          <div className="flex h-56 items-center justify-center rounded-xl border border-slate-800 bg-slate-800/30 text-sm text-slate-500">
+            {filter === 'won' ? '暂无中奖记录' : '暂无历史记录'}
           </div>
         ) : null}
 
-        {props.records.map((record) => {
+        {filteredRecords.map((record) => {
           const result = formatResultText(record)
           const amount = Number(record.rewardAmount || 0)
           return (
             <article
               key={`${record.id}_${record.accountId}_${record.createdAt}`}
-              className="rounded-2xl border border-slate-700/70 bg-slate-900/35 px-4 py-3"
+              className="rounded-lg border border-slate-800 bg-slate-800/40 px-4 py-3 transition hover:bg-slate-800/60"
             >
               <div className="mb-2 flex items-center justify-between">
-                <div className="truncate pr-3 text-sm font-semibold text-slate-100">
+                <div className="truncate pr-3 text-sm font-semibold text-slate-200">
                   {record.lotteryName || '未命名福袋'}
                 </div>
                 <div className="shrink-0 text-xs text-slate-500">{formatTime(record.createdAt || record.joinedAt)}</div>
@@ -43,7 +70,7 @@ export function HistoryPanel(props: HistoryPanelProps) {
                 <Field label="账号" value={record.accountNickname || record.accountId || '-'} />
                 <Field label="直播间" value={record.authorNickname || record.roomId || '-'} />
                 <Field label="结果" value={result} />
-                <Field label="收益" value={amount > 0 ? `+${amount}` : '0'} tone={amount > 0 ? 'text-amber-300' : 'text-slate-300'} />
+                <Field label="收益" value={amount > 0 ? `+${amount}` : '0'} tone={amount > 0 ? 'text-emerald-400 font-bold' : 'text-slate-400'} />
               </div>
             </article>
           )
@@ -55,9 +82,9 @@ export function HistoryPanel(props: HistoryPanelProps) {
 
 function Field(props: { label: string; value: string; tone?: string }) {
   return (
-    <div className="rounded-xl border border-slate-800/80 bg-slate-950/50 px-2.5 py-2">
-      <div className="mb-1 text-[11px] uppercase tracking-[0.14em] text-slate-500">{props.label}</div>
-      <div className={`truncate text-sm ${props.tone || 'text-slate-200'}`}>{props.value}</div>
+    <div className="rounded-md border border-slate-800/80 bg-slate-900/50 px-3 py-2">
+      <div className="mb-1 text-[11px] text-slate-500 font-medium">{props.label}</div>
+      <div className={`truncate text-xs ${props.tone || 'text-slate-300'}`}>{props.value}</div>
     </div>
   )
 }

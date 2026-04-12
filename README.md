@@ -21,7 +21,7 @@ dy_fudai/
 - [apps/desktop/README.md](/Users/lushuailei/PycharmProjects/dy_fudai/apps/desktop/README.md)
   桌面端目录，包含 Electron 主进程、React 渲染层、共享模型和桌面构建配置。
 - [apps/pool-server/README.md](/Users/lushuailei/PycharmProjects/dy_fudai/apps/pool-server/README.md)
-  Go 服务端目录，包含派单、授权、试用、管理后台和 Docker 部署文件。
+  Go 服务端目录，包含派单、授权、试用，以及独立的管理后台服务。
 - [apps/license-miniapp/README.md](/Users/lushuailei/PycharmProjects/dy_fudai/apps/license-miniapp/README.md)
   微信小程序目录，负责扫码绑定和广告授权链路。
 
@@ -40,8 +40,14 @@ npm run desktop:hot:manifest -- --base-url https://your-cdn.example.com/dy-fudai
 # 桌面端测试
 npm run desktop:test
 
-# Go 服务端启动
+# Go 服务端（pool + admin）一起启动
 npm run server:run
+
+# 仅启动业务服务（poolserver）
+npm run server:run:pool
+
+# 仅启动授权管理后台（独立服务）
+npm run server:run:admin
 
 # Go 授权模块测试
 npm run server:test:license

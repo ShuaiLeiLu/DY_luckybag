@@ -19,26 +19,28 @@ export type TimelinePanelProps = {
  */
 export function TimelinePanel(props: TimelinePanelProps) {
   return (
-    <aside className="glass flex flex-col rounded-[26px] p-4 2xl:min-h-0">
-      <div className="mb-3">
-        <h2 className="text-lg font-semibold text-white">运行日志</h2>
-        <p className="text-sm text-slate-400">紧凑显示当前操作记录。</p>
+    <aside className="flex h-full flex-col p-4 bg-slate-900">
+      <div className="mb-3 flex items-center justify-between">
+        <div>
+          <h2 className="text-base font-semibold text-slate-100">系统日志</h2>
+          <p className="text-xs text-slate-400 mt-1">实时显示运行任务的系统操作日志。</p>
+        </div>
       </div>
       <div
         ref={props.logListRef}
         onScroll={props.onLogListScroll}
-        className="scrollbar-thin flex-1 space-y-1 overflow-auto pr-2"
+        className="scrollbar-thin flex-1 space-y-0.5 overflow-auto pr-2"
       >
         {props.logs.length === 0 && (
-          <div className="text-sm text-slate-500 italic">暂无日志输出...</div>
+          <div className="text-sm text-slate-500 italic flex h-full items-center justify-center">暂无日志输出...</div>
         )}
         {props.logs.map((entry) => (
-          <div key={entry.id} className="flex items-start gap-2 hover:bg-slate-800/40 px-1 py-0.5 rounded transition">
+          <div key={entry.id} className="flex items-start gap-2 hover:bg-slate-800/60 px-2 py-1 rounded transition">
             <div className="w-[68px] shrink-0 font-mono text-[11px] text-slate-500 pt-[2px]">{entry.time}</div>
-            <div className={`shrink-0 font-semibold text-[11px] mt-[1px] w-[34px] ${toneByType(entry.type)}`}>
+            <div className={`shrink-0 font-semibold text-[10px] mt-[2px] w-[34px] ${toneByType(entry.type)}`}>
               {textByType(entry.type)}
             </div>
-            <div className="text-[13px] leading-5 text-slate-300 break-all">{entry.message}</div>
+            <div className="text-[12px] leading-5 text-slate-300 break-all">{entry.message}</div>
           </div>
         ))}
       </div>

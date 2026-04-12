@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"crypto/subtle"
-	"database/sql"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"io"
@@ -53,8 +51,6 @@ type fileConfig struct {
 		Enabled              bool   `json:"enabled"`
 		Unrestricted         bool   `json:"unrestricted"`
 		AdminToken           string `json:"adminToken"`
-		AdminUsername        string `json:"adminUsername"`
-		AdminPassword        string `json:"adminPassword"`
 		AdUnlockDays         int    `json:"adUnlockDays"`
 		MiniAppEnabled       bool   `json:"miniAppEnabled"`
 		MiniAppAppID         string `json:"miniAppAppId"`
@@ -87,9 +83,6 @@ type fileConfig struct {
 		WriteTimeoutMS int64  `json:"writeTimeoutMS"`
 	} `json:"redis"`
 }
-
-//go:embed web/license-admin.html
-var adminLicenseHTML []byte
 
 // getenvInt 方法：处理整数。
 func getenvInt(name string, fallback int) int {
@@ -274,6 +267,10 @@ func ensureLicenseAuthorized(w http.ResponseWriter, r *http.Request, licenseSvc 
 		return true
 	}
 	if unrestricted, err := licenseSvc.IsUnrestricted(r.Context()); err == nil && unrestricted {
+		clientID, fingerprint := extractLicenseIdentity(r)
+		if clientID != "" && fingerprint != "" {
+			_, _ = licenseSvc.Status(r.Context(), clientID, fingerprint)
+		}
 		return true
 	} else if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
@@ -633,15 +630,12 @@ func main() {
 		MiniAppEnvVersion:    "release",
 	}
 	adminToken := ""
-	adminUsername := ""
-	adminPassword := ""
+	adminPortalURL := "http://127.0.0.1:9091/admin"
 	licenseAdUnlockDays := 1
 	if hasFileCfg {
 		lc.Enabled = fileCfg.License.Enabled
 		lc.DefaultUnrestricted = fileCfg.License.Unrestricted
 		adminToken = strings.TrimSpace(fileCfg.License.AdminToken)
-		adminUsername = strings.TrimSpace(fileCfg.License.AdminUsername)
-		adminPassword = strings.TrimSpace(fileCfg.License.AdminPassword)
 		if fileCfg.License.AdUnlockDays > 0 {
 			licenseAdUnlockDays = fileCfg.License.AdUnlockDays
 		}
@@ -709,13 +703,7 @@ func main() {
 	lc.MaxIdleConns = getenvInt("POOL_LICENSE_MYSQL_MAX_IDLE_CONNS", lc.MaxIdleConns)
 	lc.ConnMaxLifetimeMin = getenvInt("POOL_LICENSE_MYSQL_CONN_MAX_LIFETIME_MIN", lc.ConnMaxLifetimeMin)
 	adminToken = strings.TrimSpace(getenvStr("POOL_LICENSE_ADMIN_TOKEN", getenvStr("LICENSE_ADMIN_TOKEN", adminToken)))
-	adminUsername = strings.TrimSpace(getenvStr("POOL_LICENSE_ADMIN_USERNAME", getenvStr("LICENSE_ADMIN_USERNAME", adminUsername)))
-	adminPassword = strings.TrimSpace(getenvStr("POOL_LICENSE_ADMIN_PASSWORD", getenvStr("LICENSE_ADMIN_PASSWORD", adminPassword)))
-	if adminPassword == "" {
-		// Backward compatibility: if explicit login password is not configured,
-		// reuse admin token as the login password.
-		adminPassword = adminToken
-	}
+	adminPortalURL = strings.TrimSpace(getenvStr("POOL_ADMIN_PORTAL_URL", adminPortalURL))
 	licenseAdUnlockDays = getenvInt("POOL_LICENSE_AD_UNLOCK_DAYS", licenseAdUnlockDays)
 	if licenseAdUnlockDays <= 0 {
 		licenseAdUnlockDays = 1
@@ -792,14 +780,11 @@ func main() {
 		log.Printf("[pool-server-go] license=disabled")
 	}
 	if strings.TrimSpace(adminToken) != "" {
-		if adminUsername != "" {
-			log.Printf("[pool-server-go] license-admin=enabled login=username+password")
-		} else {
-			log.Printf("[pool-server-go] license-admin=enabled login=password-only")
-		}
+		log.Printf("[pool-server-go] license-admin-token=enabled")
 	} else {
 		log.Printf("[pool-server-go] license-admin=disabled (set POOL_LICENSE_ADMIN_TOKEN)")
 	}
+	log.Printf("[pool-server-go] admin portal=%s", adminPortalURL)
 	defer func() {
 		if licenseSvc != nil {
 			_ = licenseSvc.Close()
@@ -1012,97 +997,6 @@ func main() {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "license": status})
-	})
-
-	mux.HandleFunc("/admin/api/login", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		var payload struct {
-			Username string `json:"username"`
-			Password string `json:"password"`
-		}
-		if err := parseBody(r, sc.MaxBodyBytes, &payload); err != nil {
-			writeBodyErr(w, err)
-			return
-		}
-		if strings.TrimSpace(adminToken) == "" {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "admin_not_configured"})
-			return
-		}
-		if strings.TrimSpace(adminPassword) == "" {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "admin_password_not_configured"})
-			return
-		}
-		if adminUsername != "" && subtle.ConstantTimeCompare([]byte(strings.TrimSpace(payload.Username)), []byte(strings.TrimSpace(adminUsername))) != 1 {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid_credentials"})
-			return
-		}
-		if subtle.ConstantTimeCompare([]byte(payload.Password), []byte(adminPassword)) != 1 {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid_credentials"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":       true,
-			"token":    strings.TrimSpace(adminToken),
-			"username": strings.TrimSpace(adminUsername),
-		})
-	})
-
-	mux.HandleFunc("/admin/api/license-settings", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if !ensureAdminAuthorized(w, r, adminToken) {
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-		switch r.Method {
-		case http.MethodGet:
-			result, err := licenseSvc.AdminGetGlobalSettings(r.Context())
-			if err != nil {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_settings_failed"})
-				return
-			}
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": result})
-		case http.MethodPost:
-			var req struct {
-				Unrestricted   *bool   `json:"unrestricted"`
-				NoticeMarkdown *string `json:"noticeMarkdown"`
-			}
-			if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
-				writeBodyErr(w, err)
-				return
-			}
-			nextUnrestricted := false
-			if req.Unrestricted != nil {
-				nextUnrestricted = *req.Unrestricted
-			} else {
-				current, err := licenseSvc.AdminGetGlobalSettings(r.Context())
-				if err != nil {
-					writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_settings_update_failed"})
-					return
-				}
-				nextUnrestricted = current.Unrestricted
-			}
-			result, err := licenseSvc.AdminSetGlobalSettings(r.Context(), nextUnrestricted, req.NoticeMarkdown)
-			if err != nil {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_settings_update_failed"})
-				return
-			}
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": result})
-		default:
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-		}
 	})
 
 	mux.HandleFunc("/desktop/notice", func(w http.ResponseWriter, r *http.Request) {
@@ -1532,265 +1426,28 @@ func main() {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(adminLicenseHTML)
+		target := strings.TrimSpace(adminPortalURL)
+		if target == "" {
+			writeJSON(w, http.StatusGone, map[string]any{
+				"ok":      false,
+				"error":   "admin_moved",
+				"message": "管理后台已迁移至独立服务，请联系管理员获取入口。",
+			})
+			return
+		}
+		http.Redirect(w, r, target, http.StatusTemporaryRedirect)
 	})
-
-	mux.HandleFunc("/admin/api/licenses", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/admin/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions {
 			writeJSON(w, http.StatusNoContent, map[string]any{})
 			return
 		}
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureAdminAuthorized(w, r, adminToken) {
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-		query := licensepkg.AdminListQuery{
-			Keyword:  strings.TrimSpace(r.URL.Query().Get("keyword")),
-			Status:   strings.TrimSpace(r.URL.Query().Get("status")),
-			Page:     parsePositiveIntQuery(r.URL.Query().Get("page"), 1),
-			PageSize: parsePositiveIntQuery(r.URL.Query().Get("pageSize"), 30),
-		}
-		result, err := licenseSvc.ListAdminLicenses(r.Context(), query)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": result})
-	})
-
-	mux.HandleFunc("/admin/api/licenses/create", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureAdminAuthorized(w, r, adminToken) {
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-		var req struct {
-			LicenseKey   string         `json:"licenseKey"`
-			CustomerName string         `json:"customerName"`
-			PlanName     string         `json:"planName"`
-			Status       string         `json:"status"`
-			ExpireAtMS   int64          `json:"expireAt"`
-			MaxClients   int            `json:"maxClients"`
-			MaxAccounts  int            `json:"maxAccounts"`
-			Features     map[string]any `json:"features"`
-			Days         int            `json:"days"`
-			Quantity     int            `json:"quantity"`
-		}
-		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
-			writeBodyErr(w, err)
-			return
-		}
-		if strings.TrimSpace(req.LicenseKey) == "" {
-			effectiveDays := req.Days
-			if effectiveDays <= 0 {
-				effectiveDays = 30
-			}
-			if effectiveDays > 3650 {
-				effectiveDays = 3650
-			}
-			items, err := licenseSvc.AdminCreateLicensesBatch(r.Context(), licensepkg.AdminCreateBatchRequest{
-				Days:     req.Days,
-				Quantity: req.Quantity,
-			})
-			if err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
-				return
-			}
-			keys := make([]string, 0, len(items))
-			for _, item := range items {
-				key := strings.TrimSpace(item.LicenseKey)
-				if key == "" {
-					continue
-				}
-				keys = append(keys, key)
-			}
-			writeJSON(w, http.StatusOK, map[string]any{
-				"ok": true,
-				"result": map[string]any{
-					"count": len(items),
-					"days":  effectiveDays,
-					"keys":  keys,
-					"items": items,
-				},
-			})
-			return
-		}
-		item, err := licenseSvc.AdminCreateLicense(r.Context(), licensepkg.AdminCreateRequest{
-			LicenseKey:   req.LicenseKey,
-			CustomerName: req.CustomerName,
-			PlanName:     req.PlanName,
-			Status:       req.Status,
-			ExpireAtMS:   req.ExpireAtMS,
-			MaxClients:   req.MaxClients,
-			MaxAccounts:  req.MaxAccounts,
-			Features:     req.Features,
+		writeJSON(w, http.StatusGone, map[string]any{
+			"ok":      false,
+			"error":   "admin_moved",
+			"message": "管理后台接口已迁移到独立服务。",
+			"portal":  strings.TrimSpace(adminPortalURL),
 		})
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item})
-	})
-
-	mux.HandleFunc("/admin/api/licenses/status", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureAdminAuthorized(w, r, adminToken) {
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-		var req struct {
-			ID     int64  `json:"id"`
-			Status string `json:"status"`
-		}
-		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
-			writeBodyErr(w, err)
-			return
-		}
-		item, err := licenseSvc.AdminSetLicenseStatus(r.Context(), req.ID, req.Status)
-		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, sql.ErrNoRows) {
-				writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "license_not_found"})
-				return
-			}
-			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item})
-	})
-
-	mux.HandleFunc("/admin/api/licenses/extend", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureAdminAuthorized(w, r, adminToken) {
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-		var req struct {
-			ID   int64 `json:"id"`
-			Days int   `json:"days"`
-		}
-		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
-			writeBodyErr(w, err)
-			return
-		}
-		item, err := licenseSvc.AdminExtendLicense(r.Context(), req.ID, req.Days)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "license_not_found"})
-				return
-			}
-			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item})
-	})
-
-	mux.HandleFunc("/admin/api/licenses/unbind", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureAdminAuthorized(w, r, adminToken) {
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-		var req struct {
-			ID int64 `json:"id"`
-		}
-		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
-			writeBodyErr(w, err)
-			return
-		}
-		item, err := licenseSvc.AdminUnbindLicense(r.Context(), req.ID)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "license_not_found"})
-				return
-			}
-			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "item": item})
-	})
-
-	mux.HandleFunc("/admin/api/licenses/delete", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureAdminAuthorized(w, r, adminToken) {
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-		var req struct {
-			ID int64 `json:"id"`
-		}
-		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
-			writeBodyErr(w, err)
-			return
-		}
-		if err := licenseSvc.AdminDeleteLicense(r.Context(), req.ID); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "license_not_found"})
-				return
-			}
-			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
 	mux.HandleFunc("/filter/profile", func(w http.ResponseWriter, r *http.Request) {

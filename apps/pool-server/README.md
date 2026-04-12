@@ -1,6 +1,6 @@
 # Pool Server
 
-Go 服务端目录，负责候选池、派单、授权、试用和管理后台。
+Go 服务端目录，负责候选池、派单、授权、试用；管理后台已拆分为独立服务。
 
 ## 启动
 
@@ -10,6 +10,29 @@ go run ./cmd/poolserver
 ```
 
 默认监听 `0.0.0.0:9090`。
+建议开发时在仓库根目录使用 `npm run server:run` 一次性同时拉起 poolserver 与 admin。
+
+## 管理后台（独立服务）
+
+```bash
+cd apps/pool-server
+go run ./cmd/licenseadmin
+```
+
+默认监听 `127.0.0.1:9091`，访问 `http://127.0.0.1:9091/admin`。
+`poolserver` 的 `/admin` 入口会重定向到该地址。
+
+常用环境变量：
+
+- `POOL_ADMIN_HOST` / `POOL_ADMIN_PORT`
+- `POOL_LICENSE_ADMIN_USERNAME`
+- `POOL_LICENSE_ADMIN_PASSWORD`
+- `POOL_ADMIN_SESSION_SECRET`
+- `POOL_ADMIN_SESSION_TTL_HOURS`
+
+兼容说明：
+
+- `POOL_LICENSE_ADMIN_PASSWORD` 未配置时，会回退使用 `POOL_LICENSE_ADMIN_TOKEN` 作为登录密码。
 
 ## 配置文件
 
@@ -27,6 +50,8 @@ go run ./cmd/poolserver
 
 ```bash
 npm run server:run
+npm run server:run:pool
+npm run server:run:admin
 npm run server:test:license
 npm run server:docker:build
 npm run server:docker:up
@@ -52,6 +77,7 @@ POOL_DESKTOP_STATIC_DIR=/app/static/desktop
 ```text
 apps/pool-server/
 ├── cmd/
+│   ├── licenseadmin/      # 独立授权管理后台
 │   ├── poolserver/        # 服务入口
 │   └── learning-replay/   # 学习回放入口
 ├── internal/

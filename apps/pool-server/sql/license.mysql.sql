@@ -90,6 +90,27 @@ CREATE TABLE IF NOT EXISTS miniapp_signin_records (
   KEY idx_miniapp_signin_openid_day (wechat_open_id, sign_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS license_runtime_clients (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  client_id VARCHAR(128) NOT NULL,
+  fingerprint VARCHAR(128) NOT NULL DEFAULT '',
+  app_version VARCHAR(32) NOT NULL DEFAULT '',
+  access_mode VARCHAR(24) NOT NULL DEFAULT '',
+  license_id BIGINT UNSIGNED NULL,
+  license_plan VARCHAR(64) NOT NULL DEFAULT '',
+  authorized TINYINT(1) NOT NULL DEFAULT 0,
+  unrestricted TINYINT(1) NOT NULL DEFAULT 0,
+  first_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_runtime_client (client_id),
+  KEY idx_runtime_fingerprint (fingerprint),
+  KEY idx_runtime_last_seen (last_seen_at),
+  CONSTRAINT fk_runtime_client_license
+    FOREIGN KEY (license_id) REFERENCES licenses(id)
+    ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS license_settings (
   setting_key VARCHAR(64) NOT NULL PRIMARY KEY,
   setting_value VARCHAR(255) NOT NULL,

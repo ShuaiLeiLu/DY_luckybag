@@ -16,10 +16,10 @@ export type AccountCardProps = {
 export function AccountCard(props: AccountCardProps) {
   return (
     <div
-      className={`group relative flex w-full flex-col gap-3 rounded-[20px] border p-3.5 transition-all cursor-pointer ${
+      className={`group relative flex w-full flex-col gap-3 rounded-lg border p-3.5 transition-all cursor-pointer ${
         props.selected
-          ? 'border-cyan-300/40 bg-cyan-500/10 shadow-[0_0_0_1px_rgba(34,211,238,0.16)]'
-          : 'border-slate-700/50 bg-slate-900/30 hover:border-slate-500 hover:bg-slate-900/60'
+          ? 'border-blue-500/50 bg-blue-500/5'
+          : 'border-slate-800 bg-slate-800/40 hover:border-slate-700 hover:bg-slate-800/80'
       }`}
       onClick={props.onSelect}
     >
@@ -51,7 +51,9 @@ export function AccountCard(props: AccountCardProps) {
         </div>
         <div className="flex flex-[1.2] flex-col border-l border-slate-800/60 pl-4 overflow-hidden">
            <span className="text-[10px] text-slate-500 mb-0.5">当前任务</span>
-           <span className="truncate text-[12px] font-medium text-slate-300 mt-px">{props.account.currentTaskStage || '待命'}</span>
+           <span className="truncate text-[12px] font-medium text-slate-300 mt-px">
+             {props.account.currentTaskLotteryName || props.account.currentTaskLabel || props.account.currentTaskStage || '待命'}
+           </span>
         </div>
       </div>
 

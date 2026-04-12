@@ -175,7 +175,9 @@ func (s *Service) StartTrial(ctx context.Context, req TrialRequest) (Status, err
 		WHERE id = ?
 	`, clientID, strings.TrimSpace(req.AppVersion), row.ID)
 
-	return s.buildTrialStatus(row, now), nil
+	status := s.buildTrialStatus(row, now)
+	_ = s.RecordRuntimeClient(ctx, clientID, fingerprint, strings.TrimSpace(req.AppVersion), status)
+	return status, nil
 }
 
 func (s *Service) buildTrialStatus(row trialRow, now time.Time) Status {
