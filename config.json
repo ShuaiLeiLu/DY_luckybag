@@ -67,7 +67,7 @@
     "license": {
       "enabled": true,
       "unrestricted": false,
-      "host": "192.168.3.47",
+      "host": "fudai.shuai.help",
       "adminToken": "0UevuhsEJZY3TMTLvittxud7iwgE4EFuCxfNrsO8",
       "adUnlockDays": 1,
       "miniAppEnabled": true,
@@ -88,7 +88,7 @@
     },
     "redis": {
       "enabled": true,
-      "addr": "192.168.3.47:6379",
+      "addr": "fudai.shuai.help:6379",
       "password": "",
       "db": 0,
       "prefix": "lottery_pool",

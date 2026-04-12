@@ -71,6 +71,11 @@ function Build-LatestYml(
   [System.IO.File]::WriteAllText($outPath, $content, $utf8NoBom)
 }
 
+function Write-Utf8NoBom([string]$path, [string]$content) {
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($path, $content, $utf8NoBom)
+}
+
 function Resolve-HotBaseUrl([string]$root, [string]$version, [string]$argValue) {
   if (-not [string]::IsNullOrWhiteSpace($argValue)) {
     return $argValue.Trim()
@@ -130,6 +135,110 @@ function Copy-ReleaseBackendFiles([string]$root, [string]$stagingDir) {
     }
     Copy-Item -LiteralPath $from -Destination $stagingDir -Recurse -Force
   }
+}
+
+function Get-GitCommit([string]$root) {
+  Push-Location $root
+  try {
+    $commit = (& git rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+      return "unknown"
+    }
+    return [string]$commit
+  } finally {
+    Pop-Location
+  }
+}
+
+function Prepare-BackendReleaseBundle(
+  [string]$stageDir,
+  [string]$releaseVersion,
+  [string]$releaseTag
+) {
+  $composePath = Join-Path $stageDir "docker-compose.yml"
+  if (Test-Path -LiteralPath $composePath) {
+    $compose = Get-Content -LiteralPath $composePath -Raw
+    $compose = $compose.Replace('${POOL_IMAGE:-dy-pool-server:latest}', '${POOL_IMAGE:-dy-pool-server:' + $releaseVersion + '}')
+    $compose = $compose.Replace('../../config.json:/app/config.json:ro', './config.json:/app/config.json:ro')
+    Write-Utf8NoBom -path $composePath -content $compose
+  }
+
+  $deployShPath = Join-Path $stageDir "deploy-release.sh"
+  $deployShTemplate = @'
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="__RELEASE_VERSION__"
+IMAGE_NAME="\${IMAGE_NAME:-dy-pool-server}"
+IMAGE_TAG="\${IMAGE_TAG:-__RELEASE_VERSION__}"
+POOL_PORT="\${POOL_PORT:-9090}"
+
+echo "==> Building backend image \${IMAGE_NAME}:\${IMAGE_TAG}"
+docker build -t "\${IMAGE_NAME}:\${IMAGE_TAG}" .
+
+echo "==> Restarting pool-server container"
+POOL_IMAGE="\${IMAGE_NAME}:\${IMAGE_TAG}" POOL_PORT="\${POOL_PORT}" docker compose up -d --force-recreate --remove-orphans
+
+if command -v curl >/dev/null 2>&1; then
+  echo "==> Health check"
+  curl -fsS "http://127.0.0.1:\${POOL_PORT}/health" && echo
+fi
+
+echo "Done. tag=__RELEASE_TAG__ image=\${IMAGE_NAME}:\${IMAGE_TAG}"
+'@
+  $deploySh = $deployShTemplate.Replace("__RELEASE_VERSION__", $releaseVersion).Replace("__RELEASE_TAG__", $releaseTag)
+  Write-Utf8NoBom -path $deployShPath -content $deploySh
+
+  $deployPsPath = Join-Path $stageDir "deploy-release.ps1"
+  $deployPsTemplate = @'
+param(
+  [string]$ImageName = "dy-pool-server",
+  [string]$ImageTag = "__RELEASE_VERSION__",
+  [int]$PoolPort = 9090
+)
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+Write-Host "==> Building backend image $ImageName`:$ImageTag"
+& docker build -t "$ImageName`:$ImageTag" .
+if ($LASTEXITCODE -ne 0) {
+  throw "docker build failed: $LASTEXITCODE"
+}
+
+Write-Host "==> Restarting pool-server container"
+$env:POOL_IMAGE = "$ImageName`:$ImageTag"
+$env:POOL_PORT = [string]$PoolPort
+& docker compose up -d --force-recreate --remove-orphans
+if ($LASTEXITCODE -ne 0) {
+  throw "docker compose up failed: $LASTEXITCODE"
+}
+
+try {
+  $resp = Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 -Uri "http://127.0.0.1:$PoolPort/health"
+  Write-Host "Health: $($resp.StatusCode)"
+} catch {
+  Write-Warning "Health check failed: $($_.Exception.Message)"
+}
+'@
+  $deployPs = $deployPsTemplate.Replace("__RELEASE_VERSION__", $releaseVersion)
+  Write-Utf8NoBom -path $deployPsPath -content $deployPs
+
+  $deployDocPath = Join-Path $stageDir "DEPLOY.md"
+  $deployDocTemplate = @'
+# Backend deploy (__RELEASE_TAG__)
+
+Default compose image in this release is pinned to `__RELEASE_VERSION__`.
+Use one of the helpers below so backend code and `/admin` page are always rebuilt from this package:
+
+Linux/macOS:
+  bash ./deploy-release.sh
+
+Windows PowerShell:
+  powershell -ExecutionPolicy Bypass -File ./deploy-release.ps1
+'@
+  $deployDoc = $deployDocTemplate.Replace("__RELEASE_VERSION__", $releaseVersion).Replace("__RELEASE_TAG__", $releaseTag)
+  Write-Utf8NoBom -path $deployDocPath -content $deployDoc
 }
 
 function Get-GithubToken([string]$argValue) {
@@ -312,6 +421,26 @@ Invoke-Step "Prepare release artifacts" {
   Compress-Archive -Path (Join-Path $desktopDist "*") -DestinationPath $hotZipPath -CompressionLevel Optimal -Force
 
   Copy-ReleaseBackendFiles -root $root -stagingDir $backendStageDir
+  Prepare-BackendReleaseBundle -stageDir $backendStageDir -releaseVersion $releaseVersion -releaseTag $releaseTag
+
+  # Keep only current hot-update assets in backend package to avoid stale-version confusion.
+  $stageDesktopRoot = Join-Path $backendStageDir "static/desktop"
+  if (Test-Path -LiteralPath $stageDesktopRoot) {
+    Get-ChildItem -LiteralPath $stageDesktopRoot -Directory | ForEach-Object {
+      if ($_.Name -ne $releaseVersion) {
+        Remove-Item -LiteralPath $_.FullName -Recurse -Force
+      }
+    }
+  }
+
+  $buildInfoPath = Join-Path $backendStageDir "BUILD_INFO.txt"
+  $buildInfo = @(
+    "version=$releaseVersion"
+    "tag=$releaseTag"
+    "built_at_utc=$((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ'))"
+    "git_commit=$((Get-GitCommit -root $root).Trim())"
+  ) -join "`n"
+  Set-Content -LiteralPath $buildInfoPath -Value ($buildInfo + "`n") -Encoding UTF8
   Set-Content -LiteralPath (Join-Path $backendStageDir "VERSION") -Value "$releaseTag`n" -NoNewline -Encoding UTF8
   Compress-Archive -Path (Join-Path $backendStageDir "*") -DestinationPath $backendZipPath -CompressionLevel Optimal -Force
 

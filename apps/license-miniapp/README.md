@@ -11,7 +11,7 @@
 ```json
 {
   "miniapp": {
-    "baseUrl": "http://192.168.3.47:9090",
+    "baseUrl": "http://fudai.shuai.help:9090",
     "rewardedVideoAdUnitId": "",
     "signinRewardDays": 1,
     "adUnlockDays": 1
