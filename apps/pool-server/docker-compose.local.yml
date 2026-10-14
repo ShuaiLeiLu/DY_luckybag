@@ -34,3 +34,80 @@ services:
       timeout: 5s
       retries: 20
 
+  license-init:
+    image: mysql:8.4
+    container_name: dy-license-init-local
+    restart: "no"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dy_local_root_123}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-dy_fudai}
+    volumes:
+      - ./sql/license.mysql.sql:/schema.sql:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        sed "s/__LICENSE_DB__/$${MYSQL_DATABASE}/g" /schema.sql |
+        mysql --protocol=tcp -hmysql -uroot -p"$${MYSQL_ROOT_PASSWORD}"
+
+  pool-server:
+    image: ${POOL_IMAGE:-dy-pool-server:latest}
+    container_name: dy-pool-server-local
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      license-init:
+        condition: service_completed_successfully
+    ports:
+      - "${POOL_PORT:-9090}:9090"
+    environment:
+      POOL_CONFIG_FILE: /app/config.json
+      POOL_REDIS_ENABLED: "true"
+      REDIS_ADDR: redis:6379
+      REDIS_DB: "0"
+      POOL_LICENSE_ENABLED: "true"
+      POOL_LICENSE_MINIAPP_ENABLED: "false"
+      POOL_LICENSE_MYSQL_HOST: mysql
+      POOL_LICENSE_MYSQL_PORT: "3306"
+      POOL_LICENSE_MYSQL_USER: root
+      POOL_LICENSE_MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dy_local_root_123}
+      POOL_LICENSE_MYSQL_DATABASE: ${MYSQL_DATABASE:-dy_fudai}
+      POOL_ADMIN_PORTAL_URL: http://127.0.0.1:9091/admin
+      POOL_LICENSE_ADMIN_TOKEN: ${POOL_LICENSE_ADMIN_TOKEN:-local-admin-token}
+    volumes:
+      - ../../config.example.json:/app/config.json:ro
+
+  license-admin:
+    image: ${POOL_IMAGE:-dy-pool-server:latest}
+    container_name: dy-license-admin-local
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      license-init:
+        condition: service_completed_successfully
+    entrypoint: ["/app/licenseadmin"]
+    ports:
+      - "${ADMIN_PORT:-9091}:9091"
+    environment:
+      POOL_CONFIG_FILE: /app/config.json
+      POOL_ADMIN_HOST: 0.0.0.0
+      POOL_ADMIN_PORT: "9091"
+      POOL_LICENSE_ENABLED: "true"
+      POOL_LICENSE_MINIAPP_ENABLED: "false"
+      POOL_LICENSE_MYSQL_HOST: mysql
+      POOL_LICENSE_MYSQL_PORT: "3306"
+      POOL_LICENSE_MYSQL_USER: root
+      POOL_LICENSE_MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dy_local_root_123}
+      POOL_LICENSE_MYSQL_DATABASE: ${MYSQL_DATABASE:-dy_fudai}
+      POOL_LICENSE_ADMIN_TOKEN: ${POOL_LICENSE_ADMIN_TOKEN:-local-admin-token}
+      POOL_ADMIN_SESSION_SECRET: ${POOL_ADMIN_SESSION_SECRET:-local-admin-session-secret}
+      POOL_LICENSE_ADMIN_USERNAME: ${POOL_LICENSE_ADMIN_USERNAME:-admin}
+      POOL_LICENSE_ADMIN_PASSWORD: ${POOL_LICENSE_ADMIN_PASSWORD:-admin123456}
+    volumes:
+      - ../../config.example.json:/app/config.json:ro

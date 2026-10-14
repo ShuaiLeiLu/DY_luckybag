@@ -105,18 +105,6 @@ export function hasRestrictedJoinRequirement(lottery) {
 }
 
 /**
- * 判断福袋是否满足“超人模式”的可参与条件（必须同时包含 type=3 和 type=6）。
- * @param {object} item 福袋对象
- * @returns {boolean}
- */
-export function isSupermanJoinableLottery(item) {
-  if (!item || !Array.isArray(item.conditions) || item.conditions.length === 0) return false
-  const hasType3 = item.conditions.some(c => Number(c?.type) === 3)
-  const hasType6 = item.conditions.some(c => Number(c?.type) === 6)
-  return hasType3 && hasType6
-}
-
-/**
  * 判断福袋是否为实物奖品。
  * @param {object} lottery 福袋对象
  * @returns {boolean}

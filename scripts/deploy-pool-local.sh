@@ -10,6 +10,7 @@ IMAGE_NAME="${IMAGE_NAME:-dy-pool-server}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 POOL_PORT="${POOL_PORT:-9090}"
 USE_REDIS="${USE_REDIS:-0}"
+USE_LOCAL_STACK="${USE_LOCAL_STACK:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 NO_CLEAN="${NO_CLEAN:-0}"
 GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
@@ -25,6 +26,7 @@ print_help() {
 
 选项:
   --redis              使用内置 Redis compose（docker-compose.redis.yml）
+  --local              启动本地完整栈（MySQL + Redis + pool-server + license-admin）
   --skip-build         跳过镜像构建，直接启动容器
   --no-clean           启动前不清理旧容器
   --image <name>       镜像名，默认 dy-pool-server
@@ -36,12 +38,13 @@ print_help() {
   -h, --help           显示帮助
 
 环境变量:
-  IMAGE_NAME, IMAGE_TAG, POOL_PORT, USE_REDIS, SKIP_BUILD, NO_CLEAN
+  IMAGE_NAME, IMAGE_TAG, POOL_PORT, USE_REDIS, USE_LOCAL_STACK, SKIP_BUILD, NO_CLEAN
   GOPROXY, GOSUMDB, GOPRIVATE
 
 示例:
   bash ./scripts/deploy-pool-local.sh
   bash ./scripts/deploy-pool-local.sh --redis
+  bash ./scripts/deploy-pool-local.sh --local
   bash ./scripts/deploy-pool-local.sh --goproxy https://goproxy.cn,direct
   bash ./scripts/deploy-pool-local.sh --image dy-pool-server --tag v1.0.1 --port 9091
 EOF
@@ -51,6 +54,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --redis)
       USE_REDIS=1
+      shift
+      ;;
+    --local)
+      USE_LOCAL_STACK=1
       shift
       ;;
     --skip-build)
@@ -102,7 +109,7 @@ if [[ ! -d "${POOL_DIR}" ]]; then
   exit 1
 fi
 
-if [[ ! -f "${PROJECT_CONFIG}" ]]; then
+if [[ "${USE_LOCAL_STACK}" != "1" && ! -f "${PROJECT_CONFIG}" ]]; then
   echo "缺少配置文件: ${PROJECT_CONFIG}"
   exit 1
 fi
@@ -117,7 +124,9 @@ else
 fi
 
 COMPOSE_FILE="docker-compose.yml"
-if [[ "${USE_REDIS}" == "1" ]]; then
+if [[ "${USE_LOCAL_STACK}" == "1" ]]; then
+  COMPOSE_FILE="docker-compose.local.yml"
+elif [[ "${USE_REDIS}" == "1" ]]; then
   COMPOSE_FILE="docker-compose.redis.yml"
 fi
 
@@ -125,7 +134,13 @@ IMAGE_REF="${IMAGE_NAME}:${IMAGE_TAG}"
 
 echo ">>> 部署目录: ${POOL_DIR}"
 echo ">>> 镜像: ${IMAGE_REF}"
-echo ">>> 模式: $([[ "${USE_REDIS}" == "1" ]] && echo "redis(内置容器)" || echo "redis(外部/配置文件)")"
+if [[ "${USE_LOCAL_STACK}" == "1" ]]; then
+  echo ">>> 模式: local(本地 MySQL + Redis + pool-server + license-admin)"
+elif [[ "${USE_REDIS}" == "1" ]]; then
+  echo ">>> 模式: redis(内置 Redis 容器)"
+else
+  echo ">>> 模式: redis(外部/配置文件)"
+fi
 echo ">>> 端口: ${POOL_PORT}"
 echo ">>> GOPROXY: ${GOPROXY}"
 
@@ -144,14 +159,14 @@ else
 fi
 
 if [[ "${NO_CLEAN}" != "1" ]]; then
-  docker rm -f dy-pool-server >/dev/null 2>&1 || true
-  if [[ "${USE_REDIS}" != "1" ]]; then
+  docker rm -f dy-pool-server dy-pool-server-local dy-license-admin-local >/dev/null 2>&1 || true
+  if [[ "${USE_LOCAL_STACK}" != "1" && "${USE_REDIS}" != "1" ]]; then
     docker rm -f dy-pool-redis >/dev/null 2>&1 || true
   fi
 fi
 
 cd "${POOL_DIR}"
-POOL_IMAGE="${IMAGE_REF}" POOL_PORT="${POOL_PORT}" "${COMPOSE_BIN[@]}" -f "${COMPOSE_FILE}" up -d --remove-orphans
+POOL_IMAGE="${IMAGE_REF}" POOL_PORT="${POOL_PORT}" "${COMPOSE_BIN[@]}" -f "${COMPOSE_FILE}" up -d --force-recreate --remove-orphans
 
 echo ">>> 等待服务启动..."
 sleep 2
@@ -163,4 +178,11 @@ else
   echo "✅ 部署完成（未检测到 curl，已跳过健康检查）"
 fi
 
-echo "查看日志: docker logs -f dy-pool-server"
+if [[ "${USE_LOCAL_STACK}" == "1" ]]; then
+  echo "本地服务: http://127.0.0.1:${POOL_PORT}"
+  echo "本地管理后台: http://127.0.0.1:${ADMIN_PORT:-9091}/admin"
+  echo "本地管理员: ${POOL_LICENSE_ADMIN_USERNAME:-admin} / ${POOL_LICENSE_ADMIN_PASSWORD:-admin123456}"
+  echo "查看日志: docker logs -f dy-pool-server-local"
+else
+  echo "查看日志: docker logs -f dy-pool-server"
+fi

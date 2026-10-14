@@ -6,6 +6,9 @@
   "hotUpdateReloadOnApply": false,
   "stayDuration": 18,
   "enableRedPacket": true,
+  "onlyRedPacketMode": {
+    "enabled": false
+  },
   "randomInteraction": true,
   "hitRate": {
     "enabled": true,
@@ -41,5 +44,11 @@
     "countPerPage": 15,
     "pagesPerCategory": 12,
     "allCount": 24
+  },
+  "requestBackend": "web",
+  "androidBridge": {
+    "enabled": false,
+    "serverUrl": "http://127.0.0.1:8765",
+    "token": ""
   }
 }

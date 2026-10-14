@@ -3,11 +3,15 @@ const path = require('path')
 const fs = require('fs')
 const os = require('os')
 const crypto = require('crypto')
-const { douyinLiveRemote } = require('./douyinLiveRemote')
 const { createLogger } = require('./logger')
 const { createHotUpdateService } = require('./hot-update-service')
 const { createStateStore, DEFAULT_SETTINGS } = require('./state-store')
 const { createUpdateService } = require('./update-service')
+const { AndroidBridgeClient } = require('./android-bridge-client')
+const { AndroidProtocolClient } = require('./android-protocol-client')
+const { AndroidDouyinBackend } = require('./android-douyin-backend')
+const { DouyinBackendManager } = require('./douyin-backend-manager')
+const { FIXED_CATEGORY_DEFAULT } = require('./douyin-response-parser')
 const { requestJson } = require('./request-json')
 const {
   revealAccountWindow,
@@ -699,6 +703,41 @@ async function safeGetAccountCookieString(accountId, options = {}) {
   }
 }
 
+let androidBridgeClient = null
+let androidProtocolClient = null
+let androidDouyinBackend = null
+let backendManager = null
+
+function ensureDouyinBackendManager() {
+  if (!backendManager) {
+    const store = ensureStateStore()
+    const currentSettings = store.getSettings()
+
+    androidBridgeClient = new AndroidBridgeClient({
+      serverUrl: currentSettings?.androidBridge?.serverUrl,
+      token: currentSettings?.androidBridge?.token,
+      logger
+    })
+
+    androidProtocolClient = new AndroidProtocolClient({
+      logger
+    })
+
+    androidDouyinBackend = new AndroidDouyinBackend({
+      protocolClient: androidProtocolClient,
+      safeGetAccountCookieString,
+      traceScan,
+      logger
+    })
+
+    backendManager = new DouyinBackendManager({
+      androidBackend: androidDouyinBackend,
+      logger
+    })
+  }
+  return backendManager
+}
+
 /**
  * normalizeUserInfo 方法：归一化用户信息。
  */
@@ -1091,99 +1130,20 @@ ipcMain.handle('scan-debug-log', async (_event, payload = {}) => {
 
 // 参与福袋
 ipcMain.handle('attend-lottery', async (event, { roomId, lotteryId, webRid = null, accountId }) => {
-  try {
-    const cookieString = await safeGetAccountCookieString(accountId)
-
-    const commonHeaders = {
-      cookie: cookieString,
-      referer: `https://live.douyin.com/${webRid || roomId}`
-    }
-
-    /**
-     * attemptAttend 方法：调用参与接口并归一化成功状态与错误信息。
-     */
-    const attemptAttend = async (payload) => {
-      const json = await douyinLiveRemote('/webcast/lottery/melon/attend/', payload, commonHeaders, 'POST')
-      const status = json?.data?.status
-      const statusCode = json?.status_code
-      const errorMsg = json?.extra?.error_msg ||
-        json?.extra?.description ||
-        json?.data?.prompt ||
-        json?.data?.toast ||
-        json?.status_msg ||
-        json?.message ||
-        ''
-      const success = status === 0 || (status === undefined && statusCode === 0)
-      return { json, status, statusCode, errorMsg, success }
-    }
-
-    // 先使用标准字段 room_id，失败后回退 roomId
-    let result = null
-    try {
-      result = await attemptAttend({
-        room_id: roomId,
-        lottery_id: lotteryId
-      })
-    } catch (e) {
-      logger.debug(`[${accountId}] 使用 room_id 参与失败，准备回退 roomId 参数`, e)
-    }
-
-    if (!result || !result.success) {
-      result = await attemptAttend({
-        roomId,
-        lottery_id: lotteryId
-      })
-    }
-
-    return {
-      success: result.success,
-      data: result.json?.data,
-      extra: result.json?.extra,
-      status: result.status,
-      statusCode: result.statusCode,
-      error: result.errorMsg
-    }
-  } catch (error) {
-    return { success: false, error: error.message, code: error?.code || 'UNKNOWN' }
-  }
+  const manager = ensureDouyinBackendManager()
+  return manager.attendLottery({ roomId, lotteryId, webRid, accountId })
 })
 
 // 直播间点赞
 ipcMain.handle('room-like', async (event, { roomId, accountId, count = 1 }) => {
-  try {
-    const cookieString = await safeGetAccountCookieString(accountId)
-
-    const json = await douyinLiveRemote('/webcast/room/digg/', {
-      room_id: roomId,
-      count: count,
-    }, {
-      cookie: cookieString,
-      referer: `https://live.douyin.com/${roomId}`
-    }, 'POST')
-
-    return { success: json?.data?.status === 0, data: json?.data }
-  } catch (error) {
-    return { success: false, error: error.message }
-  }
+  const manager = ensureDouyinBackendManager()
+  return manager.roomLike({ roomId, accountId, count })
 })
 
 // 发送弹幕
 ipcMain.handle('room-chat', async (event, { roomId, content, accountId }) => {
-  try {
-    const cookieString = await safeGetAccountCookieString(accountId)
-
-    const json = await douyinLiveRemote('/webcast/room/chat/', {
-      room_id: roomId,
-      content: content,
-    }, {
-      cookie: cookieString,
-      referer: `https://live.douyin.com/${roomId}`
-    }, 'POST')
-
-    return { success: json?.data?.status === 0, data: json?.data }
-  } catch (error) {
-    return { success: false, error: error.message }
-  }
+  const manager = ensureDouyinBackendManager()
+  return manager.roomChat({ roomId, content, accountId })
 })
 
 app.on('window-all-closed', () => {
@@ -1630,9 +1590,49 @@ ipcMain.handle('desktop:save-settings', async (_event, payload = {}) => {
         })
       }
     }
+    if (androidBridgeClient && settings?.androidBridge) {
+      androidBridgeClient.updateConfig({
+        serverUrl: settings.androidBridge.serverUrl,
+        token: settings.androidBridge.token
+      })
+    }
     return { success: true, settings }
   } catch (error) {
     return { success: false, error: error.message, settings: ensureStateStore().getSettings() }
+  }
+})
+
+ipcMain.handle('check-android-bridge-status', async (_event, customConfig = {}) => {
+  try {
+    ensureDouyinBackendManager()
+    let client = androidBridgeClient
+    if (customConfig?.serverUrl || customConfig?.token !== undefined) {
+      client = new AndroidBridgeClient({
+        serverUrl: customConfig.serverUrl || androidBridgeClient.serverUrl,
+        token: customConfig.token !== undefined ? customConfig.token : androidBridgeClient.token,
+        timeoutMs: 5000,
+        logger
+      })
+    }
+    const caps = await client.getCapabilities()
+    return {
+      connected: true,
+      available: Boolean(caps?.available),
+      ticketGuardReady: Boolean(caps?.ticketGuardReady),
+      authenticated: Boolean(caps?.authenticated),
+      accountId: caps?.accountId || '',
+      capabilities: Array.isArray(caps?.capabilities) ? caps.capabilities : [],
+      lastCheckedAt: Date.now()
+    }
+  } catch (error) {
+    return {
+      connected: false,
+      available: false,
+      ticketGuardReady: false,
+      authenticated: false,
+      error: error?.message || '无法连接到 Android 伴生服务',
+      lastCheckedAt: Date.now()
+    }
   }
 })
 
@@ -1992,102 +1992,23 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCou
       maxTime: Number(maxTime) > 0 ? Number(maxTime) : null
     })
 
-    const cookieString = await safeGetAccountCookieString(accountId)
-    
-    // 完全按照原项目的参数
-    const params = {
-      live_id: 1,
-      enter_from: 'page_refresh',
-      cookie_enabled: true,
-      request_tag_from: 'web',
-      need_map: '1',
-      liveid: '1',
-      is_draw: '1',
-      inner_from_drawer: '0',
-      custom_count: String(Math.max(8, Number(customCount) || 24)),
-      action: 'load_more',
-      action_type: 'loadmore',
-      enter_source: 'web_homepage_hot_web_live_card',
-      source_key: 'web_homepage_hot_web_live_card'
-    }
-    if (Number(maxTime) > 0) {
-      params.max_time = String(Number(maxTime))
-    }
-
-    const json = await douyinLiveRemote('/webcast/feed/', params, {
-      cookie: cookieString
+    const manager = ensureDouyinBackendManager()
+    const result = await manager.searchLiveByAll({
+      accountId,
+      customCount,
+      maxTime
     })
-    
-    // 详细日志
-    logger.debug(`[search-live-by-all] 响应状态:`, json ? 'OK' : 'NULL')
-    if (json) {
-      logger.debug(`[search-live-by-all] 响应结构:`, {
-        hasData: !!json.data,
-        dataType: Array.isArray(json.data) ? 'array' : typeof json.data,
-        dataLength: Array.isArray(json.data) ? json.data.length : 'N/A',
-        statusCode: json.status_code,
-        extra: json.extra
-      })
-    }
-    
-    if (!json) {
-      return { success: false, error: '响应为空' }
-    }
-    
-    // 检查错误码
-    if (json.status_code !== undefined && json.status_code !== 0) {
-      const errorMsg = json.extra?.error_msg || json.extra?.description || '未知错误'
-      logger.error(`[search-live-by-all] API错误: ${json.status_code} - ${errorMsg}`)
-      return { success: false, error: `API错误(${json.status_code}): ${errorMsg}` }
-    }
-    
-    if (!json.data || !Array.isArray(json.data)) {
-      logger.error(`[search-live-by-all] 数据格式错误:`, JSON.stringify(json).substring(0, 500))
-      return { success: false, error: '响应数据格式错误', detail: json }
-    }
-    
-    // 放宽预筛选：不强依赖 has_ongoing_lottery 标记，避免漏扫真实可参与福袋。
-    const mappedRooms = json.data
-      .map(room => {
-        const roomData = room?.data || {}
-        const roomId = String(roomData?.id_str || '')
-        if (!roomId) return null
-        const benefitHints = extractRoomBenefitHints(roomData?.others?.web_enter_benefit_point_data)
-        return {
-          webRid: room?.web_rid || roomId,
-          roomId,
-          roomTitle: roomData?.title || '',
-          authorNickname: roomData?.owner?.nickname || '',
-          authorSecUid: roomData?.owner?.sec_uid || '',
-          onlineTotal: roomData?.user_count || 0,
-          hasLotteryHint: Boolean(roomData?.others?.web_enter_benefit_point_data?.has_ongoing_lottery),
-          ...benefitHints
-        }
-      })
-      .filter(Boolean)
-    const roomInfoList = mappedRooms
 
-    const hasMore = Boolean(json?.extra?.has_more)
-    const nextMaxTime = Number(json?.extra?.max_time || 0)
-    const hintedCount = roomInfoList.filter(v => v?.hasLotteryHint === true).length
-
-    logger.debug(`[search-live-by-all] 找到 ${roomInfoList.length} 个有福袋的直播间`)
     traceScan('response search-live-by-all', {
       accountId: accountId || '',
-      success: true,
-      rawCount: Array.isArray(json?.data) ? json.data.length : 0,
-      lotteryRooms: roomInfoList.length,
-      lotteryHintCount: hintedCount,
-      hasMore,
-      nextMaxTime: nextMaxTime > 0 ? nextMaxTime : null
+      success: Boolean(result?.success),
+      rawCount: result?.rawCount || 0,
+      lotteryRooms: result?.roomInfoList ? result.roomInfoList.length : 0,
+      hasMore: Boolean(result?.hasMore),
+      nextMaxTime: result?.nextMaxTime || null
     })
-    return {
-      success: true,
-      roomInfoList,
-      hasMore,
-      nextMaxTime: nextMaxTime > 0 ? nextMaxTime : null,
-      rawCount: Array.isArray(json?.data) ? json.data.length : 0
-    }
+
+    return result
   } catch (error) {
     traceScan('response search-live-by-all', {
       accountId: accountId || '',
@@ -2099,256 +2020,39 @@ ipcMain.handle('search-live-by-all', async (event, { accountId = null, customCou
   }
 })
 
-function normalizeRoomBenefitData(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return {}
-  }
-  return value
-}
-
-function flattenRoomBenefitValue(value, depth = 0) {
-  if (depth > 2 || value === null || value === undefined) return []
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-    return [String(value)]
-  }
-  if (Array.isArray(value)) {
-    return value.slice(0, 6).flatMap((item) => flattenRoomBenefitValue(item, depth + 1))
-  }
-  if (typeof value !== 'object') return []
-  const out = []
-  Object.entries(value)
-    .slice(0, 12)
-    .forEach(([key, item]) => {
-      out.push(String(key || ''))
-      out.push(...flattenRoomBenefitValue(item, depth + 1))
-    })
-  return out
-}
-
-function extractRoomBenefitHints(rawBenefitData) {
-  const roomBenefitData = normalizeRoomBenefitData(rawBenefitData)
-  const compactText = flattenRoomBenefitValue(roomBenefitData)
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-  const lowerText = compactText.toLowerCase()
-  const lowerKeys = Object.keys(roomBenefitData).map((key) => String(key || '').toLowerCase())
-
-  const hasExplicitFlag = [
-    roomBenefitData.has_ongoing_luckybox,
-    roomBenefitData.has_luckybox,
-    roomBenefitData.has_redpacket,
-    roomBenefitData.has_red_packet,
-    roomBenefitData.has_ongoing_redpacket,
-    roomBenefitData.has_ongoing_red_packet,
-    roomBenefitData.redpacket,
-    roomBenefitData.red_packet,
-    roomBenefitData.luckybox
-  ].some((value) => value === true || Number(value) === 1)
-
-  const hasHintByKey = lowerKeys.some((key) => /red.?packet|luckybox|packet|snatch/.test(key))
-  const hasHintByText = /(红包|人气红包|口令红包|福袋红包)/.test(compactText) || /red.?packet|luckybox|snatch/.test(lowerText)
-  const hasRoomRedPacketHint = hasExplicitFlag || hasHintByKey || hasHintByText
-
-  return {
-    roomBenefitData,
-    hasRoomRedPacketHint,
-    roomRedPacketHintText: compactText ? compactText.slice(0, 160) : ''
-  }
-}
-
 // 搜索直播间-【分类】
-const FIXED_CATEGORY_DEFAULT = Object.freeze({
-  categoryId: '4_103',
-  partition: '103',
-  partitionType: 4
-})
-
-const FIXED_CATEGORY_CATALOG = Object.freeze({
-  '4_101': Object.freeze({ categoryId: '4_101', partition: '101', partitionType: 4 }),
-  '4_102': Object.freeze({ categoryId: '4_102', partition: '102', partitionType: 4 }),
-  '4_103': Object.freeze({ categoryId: '4_103', partition: '103', partitionType: 4 }),
-  '4_104': Object.freeze({ categoryId: '4_104', partition: '104', partitionType: 4 }),
-  '4_105': Object.freeze({ categoryId: '4_105', partition: '105', partitionType: 4 }),
-  '4_106': Object.freeze({ categoryId: '4_106', partition: '106', partitionType: 4 }),
-  '4_107': Object.freeze({ categoryId: '4_107', partition: '107', partitionType: 4 }),
-  '4_108': Object.freeze({ categoryId: '4_108', partition: '108', partitionType: 4 })
-})
-
-const LEGACY_CATEGORY_ALIAS_MAP = Object.freeze({
-  // 旧默认ID兼容：映射到新固定分类
-  '1_720': '4_103',
-  '3_10000': '4_101',
-  '3_10001': '4_106',
-  // 旧数字枚举兼容
-  '0': '4_103',
-  '1': '4_103',
-  '2': '4_101',
-  '3': '4_101',
-  '4': '4_106',
-  '5': '4_101'
-})
-
-function resolveCategoryPartitionParams(rawCategoryId = '') {
-  const text = String(rawCategoryId || '').trim()
-  if (!text) {
-    return { ...FIXED_CATEGORY_DEFAULT }
-  }
-
-  const normalized = LEGACY_CATEGORY_ALIAS_MAP[text] || text
-
-  if (Object.prototype.hasOwnProperty.call(FIXED_CATEGORY_CATALOG, normalized)) {
-    return { ...FIXED_CATEGORY_CATALOG[normalized] }
-  }
-
-  const parts = normalized.split('_').map(item => String(item || '').trim()).filter(Boolean)
-  if (parts.length >= 2 && /^[0-9]+$/.test(parts[0]) && /^[0-9]+$/.test(parts[1])) {
-    return {
-      categoryId: normalized,
-      partition: parts.slice(1).join('_'),
-      partitionType: Number(parts[0]) || 1
-    }
-  }
-
-  if (/^[0-9]+$/.test(normalized)) {
-    const topCategory = `4_${normalized}`
-    if (Object.prototype.hasOwnProperty.call(FIXED_CATEGORY_CATALOG, topCategory)) {
-      return { ...FIXED_CATEGORY_CATALOG[topCategory] }
-    }
-    return {
-      categoryId: normalized,
-      partition: normalized,
-      partitionType: 4
-    }
-  }
-
-  return { ...FIXED_CATEGORY_DEFAULT }
-}
-
 ipcMain.handle('search-live-by-category', async (event, { accountId = null, categoryId = FIXED_CATEGORY_DEFAULT.categoryId, offset = 0, count = 15 } = {}) => {
   try {
-    const resolvedCategory = resolveCategoryPartitionParams(categoryId)
-    const safeOffset = Math.max(0, Number(offset) || 0)
-    const safeCount = Math.max(1, Number(count) || 15)
-
     traceScan('request search-live-by-category', {
       accountId: accountId || '',
-      categoryId: String(resolvedCategory.categoryId || FIXED_CATEGORY_DEFAULT.categoryId),
-      offset: safeOffset,
-      count: safeCount
+      categoryId: String(categoryId || FIXED_CATEGORY_DEFAULT.categoryId),
+      offset: Math.max(0, Number(offset) || 0),
+      count: Math.max(1, Number(count) || 15)
     })
 
-    const cookieString = await safeGetAccountCookieString(accountId)
-    
-    // 固定最新类目接口参数（一次发现后写死）
-    const json = await douyinLiveRemote('/webcast/web/partition/detail/room/', {
-      count: safeCount,
-      offset: safeOffset,
-      aid: 6383,
-      partition: resolvedCategory.partition,
-      partition_type: resolvedCategory.partitionType,
-      req_from: 2
-    }, {
-      cookie: cookieString,
-      referer: 'https://live.douyin.com/'
+    const manager = ensureDouyinBackendManager()
+    const result = await manager.searchLiveByCategory({
+      accountId,
+      categoryId,
+      offset,
+      count
     })
-    
-    // 详细日志
-    logger.debug(`[search-live-by-category] 分类:${resolvedCategory.categoryId}, partition_type:${resolvedCategory.partitionType}, partition:${resolvedCategory.partition}, offset:${safeOffset}`)
-    if (json) {
-      logger.debug(`[search-live-by-category] 响应结构:`, {
-        hasData: !!json.data,
-        hasDataData: !!json.data?.data,
-        dataType: Array.isArray(json.data?.data) ? 'array' : typeof json.data?.data,
-        dataLength: Array.isArray(json.data?.data) ? json.data.data.length : 'N/A',
-        statusCode: json.status_code,
-        extra: json.extra
-      })
-    }
-    
-    if (!json) {
-      return { success: false, error: '响应为空' }
-    }
-    
-    // 检查错误码
-    if (json.status_code !== undefined && json.status_code !== 0) {
-      const errorMsg = json.extra?.error_msg || json.extra?.description || '未知错误'
-      logger.error(`[search-live-by-category] API错误: ${json.status_code} - ${errorMsg}`)
-      return { success: false, error: `API错误(${json.status_code}): ${errorMsg}` }
-    }
-    
-    const rawList = Array.isArray(json.data?.data)
-      ? json.data.data
-      : Array.isArray(json.data?.room_list)
-        ? json.data.room_list
-        : Array.isArray(json.data?.list)
-          ? json.data.list
-          : []
 
-    if (rawList.length === 0) {
-      const nextOffset = safeOffset + safeCount
-      return {
-        success: true,
-        roomInfoList: [],
-        rawCount: 0,
-        hasMore: false,
-        nextOffset
-      }
-    }
-    
-    // 分类接口字段做兼容解析；不强依赖 has_ongoing_lottery，避免漏扫。
-    const roomInfoList = rawList
-      .map(item => {
-        const room = item?.room || item?.data || item
-        const roomId = String(room?.id_str || '')
-        if (!roomId) return null
-        const benefitData = room?.others?.web_enter_benefit_point_data || item?.others?.web_enter_benefit_point_data
-        const benefitHints = extractRoomBenefitHints(benefitData)
-        return {
-          webRid: item?.web_rid || item?.webRid || room?.web_rid || roomId,
-          roomId,
-          roomTitle: room.title || '',
-          authorNickname: room?.owner?.nickname || '',
-          authorSecUid: room?.owner?.sec_uid || '',
-          onlineTotal: room?.user_count || 0,
-          hasLotteryHint: Boolean(
-            room?.others?.web_enter_benefit_point_data?.has_ongoing_lottery ||
-            item?.others?.web_enter_benefit_point_data?.has_ongoing_lottery
-          ),
-          ...benefitHints
-        }
-      })
-      .filter(Boolean)
-    
-    const nextOffset = safeOffset + safeCount
-    const hasMore = Boolean(
-      json?.data?.has_more ??
-      json?.extra?.has_more ??
-      (rawList.length >= safeCount)
-    )
-
-    logger.debug(`[search-live-by-category] 原始${rawList.length}个, 筛出${roomInfoList.length}个有福袋直播间`)
     traceScan('response search-live-by-category', {
       accountId: accountId || '',
-      categoryId: String(resolvedCategory.categoryId || FIXED_CATEGORY_DEFAULT.categoryId),
-      success: true,
-      rawCount: rawList.length,
-      lotteryRooms: roomInfoList.length,
-      lotteryHintCount: roomInfoList.filter(v => v?.hasLotteryHint === true).length,
-      hasMore,
-      nextOffset
+      categoryId: String(categoryId || FIXED_CATEGORY_DEFAULT.categoryId),
+      success: Boolean(result?.success),
+      rawCount: result?.rawCount || 0,
+      lotteryRooms: result?.roomInfoList ? result.roomInfoList.length : 0,
+      hasMore: Boolean(result?.hasMore),
+      nextOffset: result?.nextOffset || 0
     })
-    return {
-      success: true,
-      roomInfoList,
-      rawCount: rawList.length,
-      hasMore,
-      nextOffset
-    }
+
+    return result
   } catch (error) {
     traceScan('response search-live-by-category', {
       accountId: accountId || '',
-      categoryId: String(resolveCategoryPartitionParams(categoryId).categoryId || FIXED_CATEGORY_DEFAULT.categoryId),
+      categoryId: String(categoryId || FIXED_CATEGORY_DEFAULT.categoryId),
       success: false,
       error: error?.message || 'unknown'
     })
@@ -2358,102 +2062,13 @@ ipcMain.handle('search-live-by-category', async (event, { accountId = null, cate
 })
 
 ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, accountId }) => {
-  try {
-    traceScan('request get-lottery-detail', {
-      accountId: accountId || '',
-      roomId: String(roomId || ''),
-      webRid: String(webRid || '')
-    })
+  const manager = ensureDouyinBackendManager()
+  return manager.getLotteryDetail({ roomId, webRid, accountId, isRedPacket: false })
+})
 
-    const safeRoomId = String(roomId || '').trim()
-    if (!safeRoomId) {
-      return { success: false, error: 'room_id为空' }
-    }
-
-    const detailCookiePool = await buildDetailCookiePool(accountId, 'live.douyin.com', 8)
-    const selectedCookie = detailCookiePool.length > 0
-      ? detailCookiePool[Math.floor(Math.random() * detailCookiePool.length)]
-      : null
-    // 对齐“超人福袋”详情逻辑：随机 cookie + 去除换行。
-    const cookieString = normalizeCookieHeaderString(
-      String(selectedCookie?.cookie || await safeGetAccountCookieString(accountId, { host: 'live.douyin.com' }))
-        .replace(/\r?\n/g, '')
-    )
-
-    const requestParams = {
-      live_id: 1,
-      enter_from: 'link_share',
-      cookie_enabled: true,
-      room_id: safeRoomId,
-      query_from: 1
-    }
-    const requestHeaders = {
-      cookie: cookieString
-    }
-
-    traceScan('response get-lottery-detail-plan', {
-      accountId: accountId || '',
-      roomId: safeRoomId,
-      cookiePoolSize: detailCookiePool.length,
-      selectedCookieSource: String(selectedCookie?.source || (cookieString ? 'primary' : 'none')),
-      paramMode: 'superman-compatible'
-    })
-
-    const json = await douyinLiveRemote('/webcast/lottery/melon/lottery_info/', requestParams, requestHeaders)
-    const lottery_info = json?.data?.lottery_info
-    if (!lottery_info || typeof lottery_info !== 'object') {
-      return { success: false, error: '福袋信息数据格式错误' }
-    }
-
-    const conditions = Array.isArray(lottery_info.conditions) ? lottery_info.conditions : []
-    const lotteryDetail = {
-      // 对齐“超人福袋”详情字段映射
-      lottery_id: lottery_info.lottery_id_str,
-      anchorId: lottery_info.anchor_id,
-      joinTotal: lottery_info.candidate_num || 0,
-      winningTotal: lottery_info.lucky_count || 0,
-      lotteryTotal: lottery_info.prize_count || 0,
-      lotteryName: lottery_info.prize_info?.name || '未知奖品',
-      prize_name: lottery_info.prize_info?.name || '未知奖品',
-      prizeType: lottery_info.prize_type || lottery_info.prize_info?.type || lottery_info.prize_info?.prize_type || 0,
-      prizeInfo: lottery_info.prize_info || {},
-      total_amount: lottery_info.total_amount || lottery_info.prize_info?.total_amount || 0,
-      start_time: lottery_info.start_time || 0,
-      end_time: lottery_info.draw_time || 0,
-      conditions
-    }
-    const source = 'api'
-
-    traceScan('response get-lottery-detail', {
-      accountId: accountId || '',
-      roomId: String(roomId || ''),
-      success: true,
-      source,
-      lotteryId: String(lotteryDetail.lottery_id || ''),
-      joinTotal: Number(lotteryDetail.joinTotal || 0),
-      luckyCount: Number(lotteryDetail.winningTotal || 0),
-      conditions: conditions.map(c => Number(c?.type)).filter(n => Number.isFinite(n))
-    })
-    return { success: true, lotteryDetail }
-  } catch (error) {
-    traceScan('response get-lottery-detail', {
-      accountId: accountId || '',
-      roomId: String(roomId || ''),
-      success: false,
-      error: error?.message || 'unknown',
-      code: error?.code || ''
-    })
-    logger.debug('获取福袋详情失败:', error)
-    const message = error?.code === 'NON_JSON_RESPONSE'
-      ? `接口返回非JSON内容(${error.statusCode || 'unknown'})`
-      : error.message
-    return {
-      success: false,
-      error: message,
-      code: error?.code || 'UNKNOWN',
-      statusCode: Number(error?.statusCode || 0)
-    }
-  }
+ipcMain.handle('get-redpacket-detail', async (event, { roomId, webRid = null, accountId }) => {
+  const manager = ensureDouyinBackendManager()
+  return manager.getRedpacketDetail({ roomId, webRid, accountId })
 })
 
 
@@ -2461,53 +2076,28 @@ ipcMain.handle('get-lottery-detail', async (event, { roomId, webRid = null, acco
 // 固定分类ID（新版）：4_101~4_108（聊天/音乐/游戏/二次元/舞蹈/文化/生活/运动）
 ipcMain.handle('collect-lotteries-by-category', async (event, { categoryId = FIXED_CATEGORY_DEFAULT.categoryId, offset = 0, accountId = null }) => {
   try {
-    return new Promise(async (resolve) => {
-      // 获取cookie并提取参数
-      let cookieString = ''
-      const resolvedCategory = resolveCategoryPartitionParams(categoryId)
-      const safeOffset = Math.max(0, Number(offset) || 0)
-      
-      if (accountId) {
-        cookieString = await safeGetAccountCookieString(accountId)
-        logger.debug(`[分类扫描] 使用账号 ${accountId} 的Cookie`)
-      }
-      
-      try {
-        const json = await douyinLiveRemote('/webcast/web/partition/detail/room/', {
-          count: 15,
-          offset: safeOffset,
-          aid: 6383,
-          partition: resolvedCategory.partition,
-          partition_type: resolvedCategory.partitionType,
-          req_from: 2
-        }, {
-          cookie: cookieString,
-          referer: 'https://live.douyin.com/'
-        })
-
-        const lotteries = []
-        if (json?.data?.data && Array.isArray(json.data.data)) {
-          const roomsWithLottery = json.data.data.filter(item => item?.room?.others?.web_enter_benefit_point_data?.has_ongoing_lottery)
-          for (const item of roomsWithLottery) {
-            const room = item.room
-            if (room?.id_str) {
-              lotteries.push({
-                roomId: room.id_str,
-                webRid: item.web_rid,
-                roomTitle: room.title || '未知标题',
-                authorNickname: room.owner?.nickname || '未知主播',
-                authorSecUid: room.owner?.sec_uid || '',
-                onlineUserCount: parseInt(room.user_count) || 0
-              })
-            }
-          }
-        }
-
-        resolve({ success: true, lotteries, total: lotteries.length })
-      } catch (error) {
-        resolve({ success: false, error: error.message })
-      }
+    const manager = ensureDouyinBackendManager()
+    const result = await manager.searchLiveByCategory({
+      categoryId,
+      offset,
+      count: 15,
+      accountId
     })
+
+    if (!result || !result.success) {
+      return { success: false, error: result?.error || '分类扫描失败' }
+    }
+
+    const lotteries = (result.roomInfoList || []).map((room) => ({
+      roomId: room.roomId,
+      webRid: room.webRid,
+      roomTitle: room.roomTitle || '未知标题',
+      authorNickname: room.authorNickname || '未知主播',
+      authorSecUid: room.authorSecUid || '',
+      onlineUserCount: Number(room.onlineTotal) || 0
+    }))
+
+    return { success: true, lotteries, total: lotteries.length }
   } catch (error) {
     return { success: false, error: error.message }
   }

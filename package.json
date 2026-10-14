@@ -25,9 +25,14 @@
     "server:dump": "node ./scripts/pool-dump.mjs",
     "desktop:electron:dev": "concurrently \"npm run desktop:dev\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
     "desktop:electron:build:win": "npm run desktop:build && electron-builder --win nsis --x64 --publish never",
-    "release:publish": "powershell -ExecutionPolicy Bypass -File ./scripts/release-publish.ps1"
+    "release:publish": "powershell -ExecutionPolicy Bypass -File ./scripts/release-publish.ps1",
+    "server:docker:watch": "node ./scripts/docker-hot-watch.mjs",
+    "server:docker:up:local": "bash ./scripts/deploy-pool-local.sh --local",
+    "server:docker:watch:local": "node ./scripts/docker-hot-watch.mjs --local"
   },
   "dependencies": {
+    "@ant-design/icons": "^6.3.4",
+    "antd": "^6.6.6",
     "electron-updater": "^6.6.2",
     "framer-motion": "^12.38.0",
     "lucide-react": "^1.7.0",

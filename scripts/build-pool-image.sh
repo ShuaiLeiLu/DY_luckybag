@@ -127,7 +127,11 @@ resolve_desktop_version() {
 }
 
 resolve_hot_base_url() {
-  node -e 'const fs=require("fs");const cfg=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const ver=String(process.argv[2]||"").trim();const base=String(cfg?.desktop?.poolServerUrl||"").trim().replace(/\/+$/,"");if(!base||!ver){process.exit(1)}process.stdout.write(`${base}/desktop/${ver}/`)' "${ROOT_DIR}/config.json" "${DESKTOP_VERSION}"
+  local config_path="${ROOT_DIR}/config.json"
+  if [[ ! -f "${config_path}" ]]; then
+    config_path="${ROOT_DIR}/config.example.json"
+  fi
+  node -e 'const fs=require("fs");const cfg=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const ver=String(process.argv[2]||"").trim();const base=String(cfg?.desktop?.poolServerUrl||"").trim().replace(/\/+$/,"");if(!base||!ver){process.exit(1)}process.stdout.write(`${base}/desktop/${ver}/`)' "${config_path}" "${DESKTOP_VERSION}"
 }
 
 prepare_desktop_hot_assets() {

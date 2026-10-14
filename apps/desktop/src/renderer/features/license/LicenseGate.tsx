@@ -1,4 +1,15 @@
 import type { ReactNode } from 'react'
+import { Alert, Button, Card, Divider, Input, Space, Spin, Tag, Typography } from 'antd'
+import {
+  SafetyCertificateOutlined,
+  QrcodeOutlined,
+  KeyOutlined,
+  ArrowLeftOutlined,
+  ReloadOutlined,
+  SoundOutlined,
+  ClockCircleOutlined,
+  CheckCircleOutlined
+} from '@ant-design/icons'
 import type { LicenseSnapshot } from '@shared/models'
 import { formatRelative } from '../../lib/runtime'
 import type { LicenseBindSession } from './types'
@@ -20,143 +31,198 @@ export type LicenseGateProps = {
   busy: boolean
 }
 
-/**
- * 授权门禁页仅负责渲染门禁 UI。
- * 具体授权动作与状态变更均由上层注入，避免组件内耦合业务逻辑。
- */
-export function LicenseGate(props: LicenseGateProps) {
-  const bindToken = String(props.bindSession?.bindToken || '').trim()
-  const bindStatus = toBindStatusText(props.bindSession)
-  const bindRemaining = getBindRemainingText(props.bindSession)
-  const showMiniAppCode = Boolean(props.miniAppCodeUrl)
-  const showMiniAppScanCode = Boolean(props.miniAppScanCodeUrl)
-  const miniAppPlaceholder = getMiniAppPlaceholder(props.bindSession, props.bindBusy)
+export function LicenseGate({
+  license,
+  licenseKey,
+  announcementMarkdown,
+  bindBusy,
+  bindSession,
+  miniAppCodeUrl,
+  miniAppScanCodeUrl,
+  onLicenseKeyChange,
+  onStartTrial,
+  onActivate,
+  onCreateBindSession,
+  onRefreshBindStatus,
+  onBackToMain,
+  busy
+}: LicenseGateProps) {
+  const bindToken = String(bindSession?.bindToken || '').trim()
+  const bindStatus = toBindStatusText(bindSession)
+  const bindRemaining = getBindRemainingText(bindSession)
+  const showMiniAppCode = Boolean(miniAppCodeUrl)
+  const showMiniAppScanCode = Boolean(miniAppScanCodeUrl)
+  const miniAppPlaceholder = getMiniAppPlaceholder(bindSession, bindBusy)
 
   return (
     <div className="flex min-h-full items-center justify-center p-4">
-      <section className="glass flex w-full max-w-2xl flex-col items-center rounded-[32px] p-6 shadow-2xl sm:p-8">
-        <div className="mb-6 inline-flex items-center gap-3 rounded-full border border-cyan-400/20 bg-cyan-500/10 px-4 py-1.5 text-xs font-bold uppercase tracking-[0.25em] text-cyan-200">
-          授权验证
+      <Card
+        className="w-full max-w-2xl border-slate-800 bg-slate-900/90 shadow-2xl backdrop-blur-xl"
+        styles={{
+          body: { padding: '32px' }
+        }}
+      >
+        <div className="flex flex-col items-center text-center">
+          <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-500/10 text-blue-400 border border-blue-500/20 text-2xl">
+            <SafetyCertificateOutlined />
+          </div>
+          <Typography.Title level={3} className="!text-slate-100 !mb-1">
+            设备授权与激活
+          </Typography.Title>
+          <Typography.Paragraph type="secondary" className="!mb-6 text-xs">
+            {license.message || '请开始免费试用，或通过正式授权码/小程序扫码激活服务'}
+          </Typography.Paragraph>
         </div>
 
-        <h1 className="text-center text-3xl font-extrabold tracking-tight text-white sm:text-4xl">
-          抖音福袋工作台
-        </h1>
-        <p className="mt-3 text-center text-sm leading-6 text-slate-300">
-          {props.license.message || '请开始试用或使用正式授权码激活服务'}
-        </p>
-
-        <div className="mt-8 flex w-full flex-col gap-4">
-          <div className="flex flex-col items-center justify-between gap-4 rounded-[24px] border border-slate-700/60 bg-slate-900/40 p-4 sm:flex-row">
-            <div className="flex-1">
-              <div className="text-sm font-semibold text-white">新设备首次登录</div>
-              <div className="mt-1 text-xs text-slate-400">我们将为您提供3天完整试用授权，结束后需要正式授权。</div>
+        <div className="space-y-4">
+          {/* 1. 试用通道 */}
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-4 rounded-xl border border-slate-800/90 bg-slate-950/60 p-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold text-slate-200">新设备首次体验</span>
+                <Tag color="cyan" bordered={false} className="text-[10px]">
+                  3天免费
+                </Tag>
+              </div>
+              <div className="mt-1 text-xs text-slate-400">
+                每台设备可免费领取3天全功能体验，体验期满可扫码续签或输入激活码。
+              </div>
             </div>
-            <button
-              className="w-full shrink-0 rounded-2xl bg-emerald-500 px-6 py-3 text-sm font-bold text-slate-950 transition hover:bg-emerald-400 sm:w-auto disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={props.busy}
-              onClick={props.onStartTrial}
+            <Button
+              type="primary"
+              loading={busy}
+              onClick={onStartTrial}
+              className="bg-emerald-600 hover:bg-emerald-500 font-medium shrink-0 h-9"
             >
-              {props.busy ? '处理中...' : '开始 3 天试用'}
-            </button>
+              开始 3 天试用
+            </Button>
           </div>
 
-          <div className="flex flex-col gap-3 rounded-[24px] border border-slate-700/60 bg-slate-900/40 p-4 sm:flex-row sm:items-center">
-            <input
-              value={props.licenseKey}
-              onChange={(event) => props.onLicenseKeyChange(event.target.value)}
-              className="flex-1 rounded-2xl border border-slate-700/80 bg-slate-950/70 px-4 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-400/70"
-              placeholder="输入正式授权码"
-            />
-            <button
-              className="w-full shrink-0 rounded-2xl border border-cyan-400/30 bg-cyan-500/10 px-6 py-3 text-sm font-bold text-cyan-100 transition hover:bg-cyan-500/20 sm:w-auto disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={props.busy}
-              onClick={props.onActivate}
-            >
-              {props.busy ? '处理中...' : '直接激活'}
-            </button>
+          {/* 2. 授权码激活通道 */}
+          <div className="rounded-xl border border-slate-800/90 bg-slate-950/60 p-4">
+            <div className="mb-2 text-xs font-semibold text-slate-300">正式授权码激活</div>
+            <div className="flex gap-2">
+              <Input
+                placeholder="请输入 32 位正式设备授权码"
+                prefix={<KeyOutlined className="text-slate-500" />}
+                value={licenseKey}
+                onChange={(e) => onLicenseKeyChange(e.target.value)}
+                className="bg-slate-900 border-slate-700 text-slate-100"
+              />
+              <Button
+                type="primary"
+                loading={busy}
+                onClick={onActivate}
+                disabled={!licenseKey.trim()}
+                className="bg-blue-600 hover:bg-blue-500 shrink-0 font-medium"
+              >
+                直接激活
+              </Button>
+            </div>
           </div>
+
+          {/* 3. 小程序扫码签到/续期 */}
+          <div className="rounded-xl border border-slate-800/90 bg-slate-950/60 p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <QrcodeOutlined className="text-cyan-400" />
+                <span className="text-xs font-semibold text-slate-200">微信小程序快捷绑定 / 签到</span>
+              </div>
+              <Button
+                type="link"
+                size="small"
+                loading={bindBusy}
+                icon={<ReloadOutlined />}
+                onClick={onCreateBindSession}
+                className="text-xs text-cyan-400 hover:text-cyan-300 p-0"
+              >
+                刷新签到码
+              </Button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {/* 小程序码 */}
+              <div className="flex flex-col items-center justify-center rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+                <span className="mb-2 text-[11px] font-medium text-slate-400">微信扫一扫直达</span>
+                {showMiniAppCode ? (
+                  <div className="rounded-lg bg-white p-2">
+                    <img
+                      src={miniAppCodeUrl}
+                      alt="小程序码"
+                      className="h-28 w-28 object-contain"
+                    />
+                  </div>
+                ) : (
+                  <div className="flex h-28 w-28 items-center justify-center rounded-lg border border-dashed border-slate-700 text-center text-[11px] text-slate-500 p-2">
+                    {miniAppPlaceholder}
+                  </div>
+                )}
+              </div>
+
+              {/* 小程序内扫一扫 */}
+              <div className="flex flex-col items-center justify-center rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+                <span className="mb-2 text-[11px] font-medium text-slate-400">小程序内扫一扫</span>
+                {showMiniAppScanCode ? (
+                  <div className="rounded-lg bg-white p-2">
+                    <img
+                      src={miniAppScanCodeUrl}
+                      alt="小程序扫码码"
+                      className="h-28 w-28 object-contain"
+                    />
+                  </div>
+                ) : (
+                  <div className="flex h-28 w-28 items-center justify-center rounded-lg border border-dashed border-slate-700 text-center text-[11px] text-slate-500 p-2">
+                    {miniAppPlaceholder}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-3 flex items-center justify-between text-xs text-slate-400 px-1">
+              <div className="flex items-center gap-3">
+                <span>
+                  绑定状态: <strong className="text-slate-200">{bindStatus}</strong>
+                </span>
+                <span>
+                  剩余时长: <strong className="text-slate-200">{bindRemaining}</strong>
+                </span>
+              </div>
+              <Button
+                size="small"
+                type="text"
+                disabled={bindBusy || !bindToken}
+                onClick={onRefreshBindStatus}
+                className="text-xs text-slate-300 hover:text-white"
+              >
+                刷新状态
+              </Button>
+            </div>
+          </div>
+
+          {/* 公告信息 */}
+          {announcementMarkdown ? (
+            <div className="rounded-xl border border-cyan-500/20 bg-cyan-950/20 p-4">
+              <div className="flex items-center gap-2 mb-2 text-xs font-semibold text-cyan-300">
+                <SoundOutlined />
+                <span>系统公告</span>
+              </div>
+              <div className="max-h-28 overflow-auto scrollbar-thin text-xs text-slate-300">
+                <MarkdownNotice markdown={announcementMarkdown} />
+              </div>
+            </div>
+          ) : null}
         </div>
 
-        <div className="mt-8 w-full">
-          <div className="flex items-center justify-between mb-4">
-            <div className="text-sm font-bold uppercase tracking-[0.16em] text-slate-300">移动端快捷签到</div>
-            <button
-              className="text-xs font-semibold text-cyan-300 underline underline-offset-2 hover:text-cyan-200 disabled:opacity-50"
-              disabled={props.bindBusy}
-              onClick={props.onCreateBindSession}
-            >
-              {props.bindBusy ? '生成中...' : '刷新签到码'}
-            </button>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="flex flex-col items-center justify-center rounded-2xl border border-slate-700/60 bg-slate-900/30 p-4">
-              <div className="mb-3 text-[11px] font-bold uppercase tracking-[0.14em] text-cyan-100/90 hover:text-white">微信扫一扫直达</div>
-              {showMiniAppCode ? (
-                <div className="flex h-36 w-36 items-center justify-center rounded-2xl bg-white p-2">
-                  <img
-                    src={props.miniAppCodeUrl}
-                    alt="mini-app-launch-code"
-                    className="h-full w-full rounded-xl object-contain [image-rendering:pixelated]"
-                  />
-                </div>
-              ) : (
-                <div className="flex h-36 w-36 items-center justify-center rounded-xl border border-dashed border-slate-700 text-center text-xs text-slate-500 p-2">
-                  {miniAppPlaceholder}
-                </div>
-              )}
-            </div>
-            <div className="flex flex-col items-center justify-center rounded-2xl border border-slate-700/60 bg-slate-900/30 p-4">
-              <div className="mb-3 text-[11px] font-bold uppercase tracking-[0.14em] text-emerald-100/90 hover:text-white">小程序内扫一扫</div>
-              {showMiniAppScanCode ? (
-                <div className="flex h-36 w-36 items-center justify-center rounded-2xl bg-white p-2">
-                  <img
-                    src={props.miniAppScanCodeUrl}
-                    alt="mini-app-scan-code"
-                    className="h-full w-full rounded-xl object-contain [image-rendering:pixelated]"
-                  />
-                </div>
-              ) : (
-                <div className="flex h-36 w-36 items-center justify-center rounded-xl border border-dashed border-slate-700 text-center text-xs text-slate-500 p-2">
-                  {miniAppPlaceholder}
-                </div>
-              )}
-            </div>
-          </div>
-          
-          <div className="mt-4 flex items-center justify-between text-xs text-slate-400 px-2">
-            <div className="flex items-center gap-2">
-              <span>状态：<strong className="text-slate-200">{bindStatus}</strong></span>
-              <span>/ 剩余时长：<strong className="text-slate-200">{bindRemaining}</strong></span>
-            </div>
-            <button
-              className="font-medium hover:text-white disabled:opacity-50"
-              disabled={props.bindBusy || !bindToken}
-              onClick={props.onRefreshBindStatus}
-            >
-              刷新状态
-            </button>
-          </div>
+        <div className="mt-6 flex justify-center">
+          <Button
+            icon={<ArrowLeftOutlined />}
+            onClick={onBackToMain}
+            className="text-xs text-slate-300 border-slate-700 bg-slate-800/60 hover:bg-slate-700"
+          >
+            返回主工作台
+          </Button>
         </div>
-
-        {props.announcementMarkdown && (
-          <div className="mt-8 w-full rounded-[24px] border border-cyan-500/10 bg-cyan-950/10 p-5 shadow-inner">
-            <div className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-cyan-200/70">
-              系统公告
-            </div>
-            <div className="max-h-[160px] overflow-auto scrollbar-thin">
-              <MarkdownNotice markdown={props.announcementMarkdown} />
-            </div>
-          </div>
-        )}
-
-        <button
-          className="mt-10 rounded-full border border-slate-700/60 px-6 py-2 text-sm font-medium text-slate-400 transition hover:bg-slate-800/60 hover:text-white"
-          onClick={props.onBackToMain}
-        >
-          返回主工作台
-        </button>
-      </section>
+      </Card>
     </div>
   )
 }
@@ -164,21 +230,21 @@ export function LicenseGate(props: LicenseGateProps) {
 export function MarkdownNotice(props: { markdown: string }) {
   const blocks = parseMarkdownBlocks(props.markdown)
   return (
-    <div className="space-y-3 text-sm leading-7 text-slate-200">
+    <div className="space-y-2 text-xs leading-5 text-slate-300">
       {blocks.map((block, index) => {
-        if (block.type === 'h1') return <h1 key={index} className="text-xl font-semibold text-white">{renderInline(block.text)}</h1>
-        if (block.type === 'h2') return <h2 key={index} className="text-lg font-semibold text-white">{renderInline(block.text)}</h2>
-        if (block.type === 'h3') return <h3 key={index} className="text-base font-semibold text-white">{renderInline(block.text)}</h3>
+        if (block.type === 'h1') return <h1 key={index} className="text-base font-semibold text-white">{renderInline(block.text)}</h1>
+        if (block.type === 'h2') return <h2 key={index} className="text-sm font-semibold text-white">{renderInline(block.text)}</h2>
+        if (block.type === 'h3') return <h3 key={index} className="text-xs font-semibold text-white">{renderInline(block.text)}</h3>
         if (block.type === 'ul') {
           return (
-            <ul key={index} className="list-disc space-y-1 pl-5 text-slate-200">
+            <ul key={index} className="list-disc space-y-1 pl-4 text-slate-300">
               {block.items.map((item, itemIndex) => (
                 <li key={`${index}_${itemIndex}`}>{renderInline(item)}</li>
               ))}
             </ul>
           )
         }
-        return <p key={index} className="whitespace-pre-wrap text-slate-200">{renderInline(block.text)}</p>
+        return <p key={index} className="whitespace-pre-wrap text-slate-300">{renderInline(block.text)}</p>
       })}
     </div>
   )
@@ -267,7 +333,7 @@ function renderInline(text: string): ReactNode[] {
           href={match[3]}
           target="_blank"
           rel="noreferrer"
-          className="text-cyan-200 underline decoration-cyan-400/60 underline-offset-2 hover:text-cyan-100"
+          className="text-cyan-400 underline decoration-cyan-400/60 underline-offset-2 hover:text-cyan-300"
         >
           {match[2]}
         </a>
@@ -275,9 +341,9 @@ function renderInline(text: string): ReactNode[] {
     } else if (match[4]) {
       result.push(<strong key={`b_${key += 1}`} className="font-semibold text-white">{match[4]}</strong>)
     } else if (match[5]) {
-      result.push(<code key={`c_${key += 1}`} className="rounded bg-slate-900 px-1.5 py-0.5 text-[12px] text-cyan-100">{match[5]}</code>)
+      result.push(<code key={`c_${key += 1}`} className="rounded bg-slate-950 px-1.5 py-0.5 text-[11px] text-cyan-200">{match[5]}</code>)
     } else if (match[6]) {
-      result.push(<em key={`i_${key += 1}`} className="italic text-slate-100">{match[6]}</em>)
+      result.push(<em key={`i_${key += 1}`} className="italic text-slate-200">{match[6]}</em>)
     } else {
       result.push(match[0])
     }
@@ -303,7 +369,7 @@ function getMiniAppPlaceholder(session: LicenseBindSession | null, busy: boolean
   if (status === 'granted') return '今日签到已完成。'
   if (status === 'scanned') return '已扫码绑定，请在小程序端完成签到。'
   if (status === 'authorized') return '当前仅授权生效，尚未生成绑定会话。'
-  return busy ? '正在生成小程序码...' : '点击“生成小程序码”开始绑定。'
+  return busy ? '正在生成小程序码...' : '点击“刷新签到码”开始绑定。'
 }
 
 function getBindRemainingText(session: LicenseBindSession | null): string {

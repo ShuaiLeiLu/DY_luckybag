@@ -1,4 +1,6 @@
-import type { RefObject } from 'react'
+import { useState, type RefObject } from 'react'
+import { Card, Empty, Radio, Tag, Typography } from 'antd'
+import { FileTextOutlined } from '@ant-design/icons'
 
 export type TimelineLogEntry = {
   id: number
@@ -13,51 +15,94 @@ export type TimelinePanelProps = {
   onLogListScroll: () => void
 }
 
-/**
- * 时间线面板专注日志过滤与展示。
- * 滚动跟随策略由上层控制，组件只承接受控属性与事件。
- */
-export function TimelinePanel(props: TimelinePanelProps) {
+export function TimelinePanel({
+  logs,
+  logListRef,
+  onLogListScroll
+}: TimelinePanelProps) {
+  const [filterType, setFilterType] = useState<string>('all')
+
+  const filteredLogs = logs.filter((log) => {
+    if (filterType === 'all') return true
+    return log.type === filterType
+  })
+
   return (
-    <aside className="flex h-full flex-col p-4 bg-slate-900">
-      <div className="mb-3 flex items-center justify-between">
-        <div>
-          <h2 className="text-base font-semibold text-slate-100">系统日志</h2>
-          <p className="text-xs text-slate-400 mt-1">实时显示运行任务的系统操作日志。</p>
+    <Card
+      className="flex h-full flex-col border-slate-800 bg-slate-900/60 shadow-sm"
+      styles={{
+        header: { borderBottom: '1px solid rgba(148, 163, 184, 0.08)', padding: '10px 16px' },
+        body: { padding: '8px 12px', overflow: 'hidden', flex: 1, display: 'flex', flexDirection: 'column' }
+      }}
+      title={
+        <div className="flex items-center gap-2">
+          <FileTextOutlined className="text-blue-400" />
+          <span className="text-sm font-semibold text-slate-100">实时系统日志</span>
+          <span className="font-mono text-xs text-slate-400">({filteredLogs.length})</span>
         </div>
-      </div>
+      }
+      extra={
+        <Radio.Group
+          size="small"
+          value={filterType}
+          onChange={(e) => setFilterType(e.target.value)}
+          buttonStyle="solid"
+          className="text-xs"
+        >
+          <Radio.Button value="all">全部</Radio.Button>
+          <Radio.Button value="success">成功</Radio.Button>
+          <Radio.Button value="warning">警告</Radio.Button>
+          <Radio.Button value="error">错误</Radio.Button>
+        </Radio.Group>
+      }
+    >
       <div
-        ref={props.logListRef}
-        onScroll={props.onLogListScroll}
-        className="scrollbar-thin flex-1 space-y-0.5 overflow-auto pr-2"
+        ref={logListRef}
+        onScroll={onLogListScroll}
+        className="scrollbar-thin flex-1 overflow-auto space-y-1 pr-1 font-mono text-xs"
       >
-        {props.logs.length === 0 && (
-          <div className="text-sm text-slate-500 italic flex h-full items-center justify-center">暂无日志输出...</div>
-        )}
-        {props.logs.map((entry) => (
-          <div key={entry.id} className="flex items-start gap-2 hover:bg-slate-800/60 px-2 py-1 rounded transition">
-            <div className="w-[68px] shrink-0 font-mono text-[11px] text-slate-500 pt-[2px]">{entry.time}</div>
-            <div className={`shrink-0 font-semibold text-[10px] mt-[2px] w-[34px] ${toneByType(entry.type)}`}>
-              {textByType(entry.type)}
-            </div>
-            <div className="text-[12px] leading-5 text-slate-300 break-all">{entry.message}</div>
+        {filteredLogs.length === 0 ? (
+          <div className="flex h-40 items-center justify-center">
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span className="text-xs text-slate-500">暂无日志</span>} />
           </div>
-        ))}
+        ) : (
+          filteredLogs.map((entry) => (
+            <div
+              key={entry.id}
+              className="flex items-start gap-2 rounded px-2 py-1 transition-colors hover:bg-slate-800/60"
+            >
+              <span className="shrink-0 text-[11px] text-slate-500 pt-[1px] select-none">
+                {entry.time}
+              </span>
+              <span className="shrink-0">
+                {entry.type === 'success' && (
+                  <Tag color="success" bordered={false} className="m-0 text-[10px] px-1 py-0 leading-normal">
+                    成功
+                  </Tag>
+                )}
+                {entry.type === 'warning' && (
+                  <Tag color="warning" bordered={false} className="m-0 text-[10px] px-1 py-0 leading-normal">
+                    警告
+                  </Tag>
+                )}
+                {entry.type === 'error' && (
+                  <Tag color="error" bordered={false} className="m-0 text-[10px] px-1 py-0 leading-normal">
+                    失败
+                  </Tag>
+                )}
+                {entry.type === 'info' && (
+                  <Tag color="blue" bordered={false} className="m-0 text-[10px] px-1 py-0 leading-normal">
+                    信息
+                  </Tag>
+                )}
+              </span>
+              <span className="break-all text-[12px] text-slate-300 leading-tight">
+                {entry.message}
+              </span>
+            </div>
+          ))
+        )}
       </div>
-    </aside>
+    </Card>
   )
-}
-
-function toneByType(type: TimelineLogEntry['type']) {
-  if (type === 'success') return 'text-emerald-400'
-  if (type === 'warning') return 'text-amber-400'
-  if (type === 'error') return 'text-rose-400'
-  return 'text-cyan-400'
-}
-
-function textByType(type: TimelineLogEntry['type']) {
-  if (type === 'warning') return '[WARN]'
-  if (type === 'error') return '[FAIL]'
-  if (type === 'success') return '[OK]'
-  return '[INFO]'
 }

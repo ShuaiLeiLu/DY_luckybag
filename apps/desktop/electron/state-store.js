@@ -104,12 +104,14 @@ function mergeSettings(base, patch = {}) {
     hitRate: { ...base.hitRate, ...asPlainObject(sanitizedNext.hitRate) },
     secondInspect: { ...base.secondInspect, ...asPlainObject(sanitizedNext.secondInspect) },
     filterFanClub: { ...base.filterFanClub, ...asPlainObject(sanitizedNext.filterFanClub) },
+    onlyRedPacketMode: { ...base.onlyRedPacketMode, ...asPlainObject(sanitizedNext.onlyRedPacketMode) },
     onlyPhysicalPrize: { ...base.onlyPhysicalPrize, ...asPlainObject(sanitizedNext.onlyPhysicalPrize) },
     preferBigRedPacket: { ...base.preferBigRedPacket, ...asPlainObject(sanitizedNext.preferBigRedPacket) },
     filterOnline: { ...base.filterOnline, ...asPlainObject(sanitizedNext.filterOnline) },
     participationCount: { ...base.participationCount, ...asPlainObject(sanitizedNext.participationCount) },
     singleAccountDuration: { ...base.singleAccountDuration, ...asPlainObject(sanitizedNext.singleAccountDuration) },
-    scanConfig: { ...base.scanConfig, ...asPlainObject(sanitizedNext.scanConfig) }
+    scanConfig: { ...base.scanConfig, ...asPlainObject(sanitizedNext.scanConfig) },
+    androidBridge: { ...base.androidBridge, ...asPlainObject(sanitizedNext.androidBridge) }
   }
 }
 

@@ -55,6 +55,12 @@ npm run server:run:admin
 npm run server:test:license
 npm run server:docker:build
 npm run server:docker:up
+
+# 本地完整 Docker 环境（MySQL + Redis + pool-server + license-admin）
+npm run server:docker:up:local
+
+# 本地 Docker 热启动
+npm run server:docker:watch:local
 npm run server:db:init
 ```
 
@@ -88,4 +94,15 @@ apps/pool-server/
 ├── docker-compose.yml
 ├── docker-compose.redis.yml
 └── README.md
+```
+
+## Docker 热启动
+
+`npm run server:docker:watch:local` 会先部署一次，然后监听 Go 服务端、Desktop 源码、Docker 构建文件和配置文件。检测到代码变化后，会自动执行完整的镜像构建和容器重启，因此 Docker 中运行的代码始终是最新版本。
+
+支持把部署参数透传给 `scripts/deploy-pool-local.sh`：
+
+```bash
+npm run server:docker:watch:local
+npm run server:docker:watch:local -- --port 9092
 ```

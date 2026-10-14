@@ -21,6 +21,7 @@ const INVOKE_CHANNELS = new Set([
   'search-live-by-all',
   'search-live-by-category',
   'get-lottery-detail',
+  'get-redpacket-detail',
   'collect-lotteries-by-category',
   'attend-lottery',
   'room-like',
@@ -39,7 +40,8 @@ const INVOKE_CHANNELS = new Set([
   'desktop:append-event',
   'desktop:append-account-log',
   'desktop:append-history-record',
-  'desktop:purge-account-data'
+  'desktop:purge-account-data',
+  'check-android-bridge-status'
 ])
 
 const EVENT_CHANNELS = new Set([
@@ -136,6 +138,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     purgeAccountData(accountId) {
       return invoke('desktop:purge-account-data', { accountId })
+    },
+    checkAndroidBridgeStatus(overrideConfig) {
+      return invoke('check-android-bridge-status', overrideConfig)
     },
     onUpdateState(handler) {
       return on('desktop:update-state', handler)

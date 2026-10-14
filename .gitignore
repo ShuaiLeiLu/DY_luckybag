@@ -19,6 +19,7 @@ tokens.json
 *.token
 *.session
 config.json
+config.local.json
 apps/desktop/config.json
 apps/license-miniapp/config.js
 

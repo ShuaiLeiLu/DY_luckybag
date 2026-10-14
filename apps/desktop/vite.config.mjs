@@ -29,18 +29,17 @@ export default defineConfig({
     strictPort: true
   },
   test: {
-    include: ['src/**/*.test.ts']
+    include: ['src/**/*.test.ts', 'electron/**/*.test.js']
   },
   build: {
     outDir: path.join(__dirname, 'dist'),
     sourcemap: true,
     target: 'es2022',
+    chunkSizeWarningLimit: 1500,
     rollupOptions: {
       output: {
         manualChunks(id) {
           if (!id.includes('node_modules')) return
-          if (id.includes('/react/')) return 'react'
-          if (id.includes('/react-dom/')) return 'react-dom'
           return 'vendor'
         }
       }

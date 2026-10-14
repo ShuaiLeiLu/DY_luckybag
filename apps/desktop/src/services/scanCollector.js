@@ -103,6 +103,7 @@ function normalizeCategoryList(manager, scanProfile = null) {
 export async function searchLiveByAll(manager, accountId, times = 10, scanProfile = null, runtimeOptions = {}) {
   const accountData = manager?.accounts?.get(accountId)
   if (!accountData || !manager?.ipc) return
+  const onlyRedPacketMode = accountData?.config?.onlyRedPacketMode?.enabled === true
   const totalTimes = Math.max(1, Math.floor(toNumber(times, DEFAULT_FULL_SCAN_TIMES)))
   const roundUploadCandidates = []
   const deadlineMs = Number(runtimeOptions?.deadlineMs || 0)
@@ -144,14 +145,16 @@ export async function searchLiveByAll(manager, accountId, times = 10, scanProfil
       })
 
       const roomInfoList = result.roomInfoList
-        .filter((item) => item?.hasLotteryHint === true)
+        .filter((item) => onlyRedPacketMode ? item?.hasRoomRedPacketHint === true : item?.hasLotteryHint === true)
         .map((item) => ({
           webRid: item?.webRid,
           roomId: item?.roomId,
           roomTitle: item?.roomTitle,
           authorNickname: item?.authorNickname,
           authorSecUid: item?.authorSecUid,
-          onlineTotal: item?.onlineTotal
+          onlineTotal: item?.onlineTotal,
+          hasRoomRedPacketHint: item?.hasRoomRedPacketHint === true,
+          roomRedPacketHintText: item?.roomRedPacketHintText || ''
         }))
 
       emitScanMetric(manager, accountId, 'all-detail-start', i + 1, {
@@ -441,6 +444,7 @@ export async function searchLiveRoomCategory(
 ) {
   const accountData = manager?.accounts?.get(accountId)
   if (!accountData || !manager?.ipc) return []
+  const onlyRedPacketMode = accountData?.config?.onlyRedPacketMode?.enabled === true
   const totalPages = Math.max(1, Math.floor(toNumber(page, 10)))
   const lotteryInfoList = []
 
@@ -474,14 +478,16 @@ export async function searchLiveRoomCategory(
       }
 
       const roomInfoList = result.roomInfoList
-        .filter((item) => item?.hasLotteryHint === true)
+        .filter((item) => onlyRedPacketMode ? item?.hasRoomRedPacketHint === true : item?.hasLotteryHint === true)
         .map((item) => ({
           webRid: item?.webRid,
           roomId: item?.roomId,
           roomTitle: item?.roomTitle,
           authorNickname: item?.authorNickname,
           authorSecUid: item?.authorSecUid,
-          onlineTotal: item?.onlineTotal
+          onlineTotal: item?.onlineTotal,
+          hasRoomRedPacketHint: item?.hasRoomRedPacketHint === true,
+          roomRedPacketHintText: item?.roomRedPacketHintText || ''
         }))
 
       emitScanMetric(manager, accountId, `category-detail-start:${category_name || category_id}`, i + 1, {
@@ -538,8 +544,9 @@ export async function getLotteryInfo(manager, roomInfoList, accountId, scanProfi
 
   const accountData = manager?.accounts?.get(accountId)
   const config = accountData?.config || {}
+  const detailChannel = config?.onlyRedPacketMode?.enabled === true ? 'get-redpacket-detail' : 'get-lottery-detail'
   const promises = roomInfoList.map(async (roomInfo) => {
-    const result = await manager.ipc.invoke('get-lottery-detail', {
+    const result = await manager.ipc.invoke(detailChannel, {
       roomId: roomInfo?.roomId,
       webRid: roomInfo?.webRid,
       accountId

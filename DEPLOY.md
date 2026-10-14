@@ -21,6 +21,12 @@ node deploy-setup.js
 ```bash
 docker-compose up -d --build
 ```
+
+本地开发时，如果希望修改代码后自动更新 Docker，可在仓库根目录运行：
+```bash
+npm run server:docker:up:local
+```
+本地完整 Docker 栈包含 MySQL、Redis、pool-server 和 license-admin。需要代码修改后自动更新时运行 `npm run server:docker:watch:local`；脚本会先部署一次，之后监听 Go 服务端、Desktop 源码、Docker 文件和配置，检测到修改后自动重建镜像并重启容器。
 3. **域名反向代理**：配置 Nginx（或宝塔面板），将您的域名（例如 `http://fudai.shuai.help:9090`）反向代理到服务器的 `9090` 端口。
 
 ---

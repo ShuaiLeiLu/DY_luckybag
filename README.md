@@ -57,6 +57,12 @@ npm run server:docker:build
 
 # 本地部署服务端
 npm run server:docker:up
+
+# 本地完整 Docker 环境（MySQL + Redis + pool-server + license-admin）
+npm run server:docker:up:local
+
+# 本地 Docker 热启动：修改代码后自动重建镜像并重启容器
+npm run server:docker:watch:local
 ```
 
 ## 说明
@@ -64,3 +70,29 @@ npm run server:docker:up
 - 根目录只保留仓库级入口、通用脚本和文档。
 - 桌面端构建产物输出到 `apps/desktop/dist` 和 `apps/desktop/dist-electron`。
 - 全项目统一配置文件为根目录 `config.json`。
+
+## Docker 热启动开发
+
+运行 `npm run server:docker:watch:local` 后，脚本会：
+
+1. 先执行一次本地 Docker 构建和部署；
+2. 监听 `apps/pool-server`、桌面端源码、构建脚本和配置文件；
+3. 每次修改完成后自动重新构建镜像，并重新创建 `dy-pool-server` 容器；
+4. 忽略 `node_modules`、构建产物、缓存和 Docker 运行数据，避免自动构建造成循环触发。
+
+可将部署参数透传给原有部署脚本，例如：
+
+```bash
+npm run server:docker:watch:local
+npm run server:docker:watch:local -- --port 9091
+```
+
+按 `Ctrl+C` 停止监听。
+
+本地 Docker 服务地址：
+
+- pool-server：`http://127.0.0.1:9090`
+- license-admin：`http://127.0.0.1:9091/admin`
+- MySQL：`127.0.0.1:13306`
+- Redis：`127.0.0.1:16379`
+- 默认管理后台账号：`admin / admin123456`

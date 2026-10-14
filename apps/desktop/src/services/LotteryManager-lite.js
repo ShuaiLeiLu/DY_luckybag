@@ -158,7 +158,7 @@ class LotteryManager {
     this.scanDispatchCursor = 0 // 多账号扫描轮转游标
     this.waitScanDispatchLockUntil = 0 // 等待开奖扫描节流锁
     this.activeScanAccountId = '' // 当前客户端内唯一允许处于扫描态的账号
-    this.clientFirstRoundScanDone = false // 本客户端首轮全站快速扫描是否已完成
+    this.clientFirstRoundScanDone = false // 首轮全站快速扫描是否已完成
     this.localScanRoomLeaseById = new Map() // `${accountId}:${roomId}` -> expireMs，账号级短期去重，避免账号间互相干扰
     this.allScanSeenRooms = new Map() // roomId -> expireMs，全站扫描跨轮次去重，减少重复拉详情
     this.skipLotteryUntilByAccount = new Map() // accountId -> Map(`${roomId}:${lotteryId}`, expireMs)
@@ -3368,6 +3368,7 @@ class LotteryManager {
       this.setCollectLoading(accountId, true)
       const accountData = this.accounts.get(accountId)
       if (!accountData) return
+      const onlyRedPacketMode = this.isRedPacketOnlyModeEnabled(accountData.config || {})
       const scanAssignment = this.scanAssignmentCache
       const scanPlan = forcedScanPlan || this.getNormalScanPlan(accountId, scanAssignment)
       if (!scanPlan && scanOnly) {
@@ -3401,15 +3402,14 @@ class LotteryManager {
       let scanProfile = scanOnly && deepScan
         ? this.getDeepScanProfile(baseScanProfile, { deadlineMs })
         : { ...baseScanProfile }
-      const useSupermanFirstRound = !scanOnly && quickCycle && accountData.firstRoundScanDone !== true
-      if (useSupermanFirstRound) {
+      const useFirstRoundProfile = !scanOnly && quickCycle && accountData.firstRoundScanDone !== true
+      if (useFirstRoundProfile) {
         const FIRST_ROUND_BUDGET_MS = 30000
         const firstRoundDeadlineMs = deadlineMs > 0
           ? Math.min(deadlineMs, Date.now() + FIRST_ROUND_BUDGET_MS)
           : (Date.now() + FIRST_ROUND_BUDGET_MS)
         scanProfile = {
           ...scanProfile,
-          supermanFirstRound: true,
           forceLotteryHintOnly: true,
           firstRoundUseCursorPaging: false,
           allTimes: 10,
@@ -3471,7 +3471,7 @@ class LotteryManager {
         return
       }
 
-      if (!useSupermanFirstRound && scanProfile.cooldownRemainMs > 0) {
+      if (!useFirstRoundProfile && scanProfile.cooldownRemainMs > 0) {
         const waitMs = Math.min(scanProfile.cooldownRemainMs + 600, 60000)
         if (!scanOnly) {
           accountData.callbacks.onLog(`🛡️ 风控冷却中，${Math.ceil(waitMs / 1000)}秒后继续扫描...`, 'warning')
@@ -3487,18 +3487,18 @@ class LotteryManager {
       this.emitLotteryListUpdate(accountData)
 
       // 2. 仅执行全站扫描链路（对齐超人全站模式）
-      const runAllScanThisRound = allScanEnabled || useSupermanFirstRound
+      const runAllScanThisRound = allScanEnabled || useFirstRoundProfile
       let allScanResult = null
       if (runAllScanThisRound) {
         allScanResult = await this.searchLiveByAll(accountId, scanProfile.allTimes, scanProfile, {
-          claimAfterScan,
-          uploadAfterScan,
+          claimAfterScan: onlyRedPacketMode ? false : claimAfterScan,
+          uploadAfterScan: onlyRedPacketMode ? false : uploadAfterScan,
           deadlineMs
         })
       }
       if (this.isPaused(accountId) || !(await this.isBrowserAlive(accountId))) return
       const afterAllProfile = this.getAdaptiveScanProfile(accountId)
-      if (runAllScanThisRound && !useSupermanFirstRound && afterAllProfile.level >= 2 && afterAllProfile.cooldownRemainMs > 0) {
+      if (runAllScanThisRound && !useFirstRoundProfile && afterAllProfile.level >= 2 && afterAllProfile.cooldownRemainMs > 0) {
         const waitMs = Math.min(afterAllProfile.cooldownRemainMs + 800, 60000)
         if (!scanOnly) {
           accountData.callbacks.onLog(`🛡️ 全站扫描后命中风控冷却，${Math.ceil(waitMs / 1000)}秒后继续`, 'warning')
@@ -3508,7 +3508,7 @@ class LotteryManager {
       }
 
       // 当前客户端默认只保留一个扫描位，分类分片仅在服务端明确分配时生效。
-      if (!useSupermanFirstRound && !scanOnly) {
+      if (!useFirstRoundProfile && !scanOnly) {
         accountData.callbacks.onLog('当前客户端仅使用单扫描位执行全站扫描')
       }
 
@@ -3518,7 +3518,7 @@ class LotteryManager {
       this.sortLotteriesByProbability(accountId)
       this.emitLotteryListUpdate(accountData)
 
-      if (useSupermanFirstRound && accountData.firstRoundScanDone !== true) {
+      if (useFirstRoundProfile && accountData.firstRoundScanDone !== true) {
         const queueDrained = await this.waitPoolUploadIdle(accountId, 4200)
         if (queueDrained) {
           accountData.callbacks.onLog('首轮扫描结果已同步到共享池')
@@ -3531,6 +3531,26 @@ class LotteryManager {
       }
 
       if (scanOnly) {
+        if (onlyRedPacketMode) {
+          const redPacketCandidate = this.selectLocalRedPacketCandidate(accountId, accountData.config || {})
+          if (redPacketCandidate?.item && this.accounts.has(accountId) && !this.isPaused(accountId)) {
+            await this.executeRedPacketOnlyParticipation(accountId, accountData, redPacketCandidate.item, accountData.config || {}, {
+              title: '红包模式目标',
+              modeText: '进入直播间后只执行红包领取'
+            })
+            return
+          }
+          accountData.callbacks.onLog('本轮未发现可抢红包直播间，继续下一轮扫描')
+          this.singleRoundScanDoneByAccount.delete(accountId)
+          if (!managedByCycle) {
+            this.scheduleSelectionOrScanRetry(accountId, quickCycle ? 900 : 1800, {
+              quickCycle: true,
+              trigger: 'no-redpacket-target'
+            })
+          }
+          return
+        }
+
         if (collectWaitCandidates) {
           const deferred = Array.isArray(allScanResult?.deferredUploadCandidates) ? allScanResult.deferredUploadCandidates : []
           const merged = this.mergeDeferredWaitUpload(accountId, deferred)
@@ -3913,6 +3933,46 @@ class LotteryManager {
    */
   async searchLiveByAll(accountId, times = 10, scanProfile = null, runtimeOptions = {}) {
     return collectLiveByAll(this, accountId, times, scanProfile, runtimeOptions)
+  }
+
+  isRedPacketOnlyModeEnabled(config = {}) {
+    return config?.onlyRedPacketMode?.enabled === true
+  }
+
+  isRedPacketCandidate(lotteryInfo, config = {}) {
+    if (!lotteryInfo) return false
+    const threshold = Number(config?.preferBigRedPacket?.threshold || 40)
+    const redInfo = getLotteryAveragePerWinner(lotteryInfo, threshold)
+    return redInfo?.isRedPacket === true || lotteryInfo?.hasRoomRedPacketHint === true
+  }
+
+  selectLocalRedPacketCandidate(accountId, config = {}) {
+    const list = this.getAccountLotteryList(accountId)
+    if (!Array.isArray(list) || list.length === 0) return null
+    const nowSec = Date.now() / 1000
+    const threshold = Number(config?.preferBigRedPacket?.threshold || 40)
+    let fallbackCandidate = null
+
+    for (const item of list) {
+      if (!item || this.shouldSkipLottery(accountId, item)) continue
+      if (this.isRoomOccupiedByOtherAccount(item, accountId)) continue
+      const remainingSec = Math.max(0, Number(item.end_time || 0) - nowSec)
+      if (remainingSec <= 8) continue
+      const redInfo = getLotteryAveragePerWinner(item, threshold)
+      const isRedPacketCandidate = redInfo?.isRedPacket === true || item?.hasRoomRedPacketHint === true
+      if (!isRedPacketCandidate) continue
+      const candidate = {
+        key: this.getLotteryUniqueKey(item),
+        item,
+        remainingSec,
+        adjustedScore: Number(item._serverScore || 0),
+        isBig: redInfo?.isBig === true
+      }
+      if (candidate.isBig) return candidate
+      if (!fallbackCandidate) fallbackCandidate = candidate
+    }
+
+    return fallbackCandidate
   }
 
   /**
@@ -4691,6 +4751,53 @@ class LotteryManager {
     this.markLotteryTemporarySkip(accountId, failedHistoryLotteryInfo, 180)
     this.removeLotteryFromPool(accountId, failedHistoryLotteryInfo)
     this.scheduleSelectionOrScanRetry(accountId, 3000, { quickCycle: true, trigger: 'ui-join-failed' })
+  }
+
+  async executeRedPacketOnlyParticipation(accountId, accountData, lotteryInfo, config = {}, options = {}) {
+    if (!accountData || !lotteryInfo) return
+    if (!this.checkAccountRunGuards(accountId, accountData, config)) return
+
+    this.setTaskStage(accountId, 'joining')
+    this.logLotteryDecision(accountData, lotteryInfo, config, {
+      now: Date.now() / 1000,
+      title: options?.title || '红包模式目标',
+      modeText: options?.modeText || '进入直播间后只执行红包领取，不参与福袋'
+    })
+
+    const prepared = await this.prepareLotteryRoom(accountId, accountData, lotteryInfo, config, {
+      reuseCurrentRoom: false,
+      skipReadyCheck: true
+    })
+    if (!prepared) {
+      this.setTaskStage(accountId, '')
+      if (this.accounts.has(accountId) && !this.isPaused(accountId)) {
+        accountData.callbacks.onLog('红包直播间未就绪，2秒后重新扫描...', 'warning')
+        this.scheduleSelectionOrScanRetry(accountId, 2000, { quickCycle: true, trigger: 'redpacket-room-not-ready' })
+      }
+      return
+    }
+
+    accountData.callbacks.onLog('已进入直播间，开始执行红包模式')
+    await this.sleep(1200)
+    const redPacketResult = await this.autoJoinRedPacketLoop(accountId, accountData, 5).catch(() => ({
+      clickedCount: 0,
+      skippedRestrictedCount: 0
+    }))
+
+    const clickedCount = Number(redPacketResult?.clickedCount || 0)
+    if (clickedCount > 0) {
+      accountData.callbacks.onLog(`红包模式执行完成，本轮共尝试领取 ${clickedCount} 次`, 'success')
+    } else {
+      accountData.callbacks.onLog('红包模式本轮未发现可领取红包，继续扫描下一个直播间')
+    }
+
+    this.markLotteryTemporarySkip(accountId, lotteryInfo, clickedCount > 0 ? 45 : 25)
+    this.removeLotteryFromPool(accountId, lotteryInfo)
+    this.setTaskStage(accountId, '')
+    this.scheduleSelectionOrScanRetry(accountId, clickedCount > 0 ? 1500 : 800, {
+      quickCycle: true,
+      trigger: 'redpacket-only-next'
+    })
   }
 
   /**

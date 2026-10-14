@@ -8,6 +8,7 @@ export function buildLegacyConfig(settings: DesktopSettings) {
   return {
     stayDuration: settings.stayDuration,
     enableRedPacket: settings.enableRedPacket,
+    onlyRedPacketMode: settings.onlyRedPacketMode,
     hitRate: settings.hitRate,
     secondInspect: settings.secondInspect,
     filterFanClub: settings.filterFanClub,

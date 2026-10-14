@@ -16,13 +16,9 @@ import {
 } from '../services/poolClient'
 import {
   deriveRuntimeState,
-  formatRelative,
-  mergeAccountModel,
-  sortAccounts
+  formatRelative
 } from './lib/runtime'
-import { AccountCard } from './features/accounts/AccountCard'
 import { buildLegacyConfig } from './features/accounts/legacyConfig'
-import { DOUYIN_LOGIN_PROMPT_SCRIPT } from './features/accounts/loginPrompt'
 import { LicenseGate } from './features/license/LicenseGate'
 import { formatHotUpdateStatusText, formatUpdateStatusText } from './features/license/presentation'
 import { useLicenseBinding } from './features/license/useLicenseBinding'
@@ -32,15 +28,18 @@ import { SettingsDrawer } from './features/settings/SettingsDrawer'
 import { TaskDetailPanel } from './features/dashboard/TaskDetailPanel'
 import { TimelinePanel } from './features/dashboard/TimelinePanel'
 import { LotteryListPanel } from './features/dashboard/LotteryListPanel'
+import { AccountListPanel } from './features/accounts/AccountListPanel'
 import { HistoryPanel } from './features/history/HistoryPanel'
 import { type UiLogEntry, useTimelineLogs } from './features/dashboard/useTimelineLogs'
 import { useAccountLifecycle } from './features/accounts/useAccountLifecycle'
+import { AppLayout } from './components/layout/AppLayout'
+import { AppSider, type MainView } from './components/layout/AppSider'
+import { AppHeader } from './components/layout/AppHeader'
 import type {
   AccountSession,
   BootstrapSnapshot,
   DesktopSettings,
   DispatchSummary,
-  LicenseSnapshot,
   LotteryHistoryRecord,
   UpdateSnapshot
 } from '@shared/models'
@@ -55,9 +54,6 @@ type ServiceResult<T = AnyRecord> = {
   error?: unknown
 }
 
-type MainView = 'dashboard' | 'accounts' | 'history' | 'logs'
-
-
 const defaultSettings: DesktopSettings = { ...DEFAULT_DESKTOP_SETTINGS }
 
 const emptyDispatchSummary: DispatchSummary = {
@@ -68,8 +64,6 @@ const emptyDispatchSummary: DispatchSummary = {
   availableCandidates: 0,
   updatedAt: 0
 }
-
-
 
 function mapHotUpdateToInstallerStatus(status: string): UpdateSnapshot['status'] {
   const key = String(status || '').trim().toLowerCase()
@@ -118,15 +112,6 @@ function buildRuntimeLogDedupKey(message: string) {
   return message
 }
 
-function buildAnnouncementPreview(markdown: string) {
-  return String(markdown || '')
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '$1')
-    .replace(/[*_`#>-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-
 export default function App() {
   const manager = useMemo(() => new LotteryManager(), [])
   const runtimeAccountsRef = useRef<Map<string, AnyRecord>>(new Map())
@@ -144,6 +129,7 @@ export default function App() {
   const [forceShowMainWhenLocked, setForceShowMainWhenLocked] = useState(false)
   const [manualShowLicenseGate, setManualShowLicenseGate] = useState(false)
   const lastRuntimeLogRef = useRef<Map<string, { key: string; at: number }>>(new Map())
+
   const {
     logs,
     logListRef,
@@ -221,12 +207,14 @@ export default function App() {
   })
 
   const selectedAccount = accounts.find((item) => item.id === selectedAccountId) || accounts[0] || null
+
   const syncRuntimeRef = (account: AccountSession) => {
     runtimeAccountsRef.current.set(account.id, {
       ...(runtimeAccountsRef.current.get(account.id) || {}),
       ...account
     })
   }
+
   const persistHistoryRecord = useEffectEvent(async (record: Partial<LotteryHistoryRecord> & AnyRecord) => {
     const rewardAmount = Number(record.rewardAmount || 0)
     const recordType: LotteryHistoryRecord['recordType'] = record.recordType === 'win' || String(record.resultStatus || '').trim().toLowerCase() === 'won' || rewardAmount > 0
@@ -493,12 +481,14 @@ export default function App() {
       checkedAt: Number(hotUpdateState.checkedAt || 0)
     }
     : updateState
+
   const accountsMap = useMemo(() => {
     return accounts.reduce((acc, account) => {
       acc[account.id] = account.nickname || account.id
       return acc
     }, {} as Record<string, string>)
   }, [accounts])
+
   const sortedHistoryRecords = useMemo(() => {
     return [...historyRecords].sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
   }, [historyRecords])
@@ -523,124 +513,51 @@ export default function App() {
   })
 
   const showGate = (gateLocked && !forceShowMainWhenLocked) || manualShowLicenseGate
-  const mainViewTabs: Array<{ id: MainView; label: string; icon?: string }> = [
-    { id: 'dashboard', label: '工作总览' },
-    { id: 'accounts', label: '账号管理' },
-    { id: 'history', label: '历史记录' },
-    { id: 'logs', label: '系统日志' }
-  ]
-
-  const accountListPanel = (
-    <div className="flex flex-col rounded-xl border border-slate-800 bg-slate-900 p-4 shadow-sm 2xl:min-h-[250px] 2xl:flex-1">
-      <div className="mb-4 flex items-center justify-between">
-        <div>
-          <h2 className="text-base font-semibold text-slate-100">账号列表</h2>
-          <p className="text-xs text-slate-400 mt-1">统一管理已接入账号，并支持启动、暂停和重新登录。</p>
-        </div>
-        <div className="text-xs text-slate-400 bg-slate-800 px-2.5 py-1 rounded-md">{accounts.length} 个账号</div>
-      </div>
-      <div className="scrollbar-thin grid gap-4 overflow-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
-        {accounts.map((account) => (
-          <AccountCard
-            key={account.id}
-            account={account}
-            selected={selectedAccount?.id === account.id}
-            onSelect={() => setSelectedAccountId(account.id)}
-            onToggle={() => {
-              if (account.actionActive) {
-                void stopAccount(account.id)
-              } else {
-                void startAccountScanning(account.id)
-              }
-            }}
-            onRelogin={() => void startAccountWithLogin(account.id, true)}
-            onDelete={() => void removeAccount(account.id)}
-          />
-        ))}
-        {accounts.length === 0 ? (
-          <div className="col-span-full flex h-40 items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-800/30 text-center text-sm text-slate-500">
-            暂无账号。请点击左下角“添加账号”后扫码登录。
-          </div>
-        ) : null}
-      </div>
-    </div>
-  )
-  const lotteryListPanel = (
-    <div className="h-full w-full flex-1">
-      <LotteryListPanel lotteriesByAccount={lotteriesByAccount} accountsMap={accountsMap} />
-    </div>
-  )
 
   return (
-    <div className="flex h-full w-full bg-slate-950 overflow-hidden text-slate-300">
-      {/* 侧边导航栏 */}
-      <aside className="flex w-[220px] flex-col border-r border-slate-800 bg-slate-900 shrink-0">
-        <div className="flex items-center px-6 py-5 border-b border-slate-800/50">
-          <div className="h-3 w-3 rounded-full bg-emerald-500 mr-3 shadow-[0_0_8px_rgba(16,185,129,0.4)]"></div>
-          <h1 className="text-lg font-bold tracking-wide text-slate-100">抖音福袋</h1>
-          <span className="ml-2 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400">v{bootstrap?.appVersion || displayUpdateState.currentVersion}</span>
-        </div>
-        
-        <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
-          <div className="mb-2 px-3 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-            主要功能
-          </div>
-          {mainViewTabs.map((tab) => (
-            <button
-              key={tab.id}
-              className={`flex w-full items-center rounded-lg px-3 py-2.5 text-sm transition-colors ${
-                activeView === tab.id
-                  ? 'bg-blue-500/10 text-blue-400 font-medium'
-                  : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
-              }`}
-              onClick={() => {
-                setActiveView(tab.id)
-                setManualShowLicenseGate(false)
-              }}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </nav>
-
-        <div className="border-t border-slate-800/50 p-4 space-y-2">
-          <button 
-            className="flex w-full items-center justify-center rounded-lg bg-emerald-500/10 border border-emerald-500/20 px-4 py-2 text-sm font-medium text-emerald-400 transition hover:bg-emerald-500/20"
-            onClick={addAccount}
-          >
-            添加账号
-          </button>
-          <div className="flex gap-2">
-            <button
-              className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-300 transition hover:bg-slate-700"
-              onClick={() => setSettingsOpen(true)}
-            >
-              设置
-            </button>
-            <button
-              className="flex-1 right-0 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-300 transition hover:bg-slate-700"
-              onClick={() => {
-                setManualShowLicenseGate(true)
-                setForceShowMainWhenLocked(false)
-              }}
-            >
-              授权
-            </button>
-          </div>
-          <div className="text-center pt-2">
-            {!license.authorized && license.accessMode !== 'trial' ? (
-               <span className="text-[10px] text-red-400">未授权</span>
-            ) : (
-               <span className="text-[10px] text-slate-500">已授权</span>
-            )}
-          </div>
-        </div>
-      </aside>
-
-      {/* 主内容区 */}
-      <main className="flex flex-1 flex-col overflow-hidden bg-[#0B1120]">
+    <>
+      <AppLayout
+        sider={
+          <AppSider
+            activeView={activeView}
+            onViewChange={(view) => {
+              setActiveView(view)
+              setManualShowLicenseGate(false)
+            }}
+            appVersion={bootstrap?.appVersion || displayUpdateState.currentVersion || '3.0.0'}
+            license={license}
+            onAddAccount={addAccount}
+            onOpenSettings={() => setSettingsOpen(true)}
+            onOpenLicenseGate={() => {
+              setManualShowLicenseGate(true)
+              setForceShowMainWhenLocked(false)
+            }}
+          />
+        }
+        header={
+          <AppHeader
+            totalDiamonds={totalDiamonds}
+            totalWins={totalWins}
+            totalParticipation={totalParticipation}
+            runningCount={runningCount}
+            accountCount={accounts.length}
+            dispatchSummary={dispatchSummary}
+            license={license}
+            announcementMarkdown={announcementMarkdown}
+            updateState={displayUpdateState}
+            useHotUpdateBadge={useHotUpdateBadge}
+            onInstallUpdate={() => {
+              if (useHotUpdateBadge) {
+                void window.electronAPI.desktop.checkHotUpdate()
+              } else {
+                void window.electronAPI.desktop.installUpdate()
+              }
+            }}
+          />
+        }
+      >
         {showGate ? (
-          <div className="h-full w-full overflow-auto p-6">
+          <div className="h-full w-full overflow-auto p-4 sm:p-6">
             <LicenseGate
               license={license}
               licenseKey={licenseKey}
@@ -664,118 +581,39 @@ export default function App() {
             />
           </div>
         ) : (
-          <>
-            {/* 顶部统计栏 */}
-            <header className="flex shrink-0 items-center justify-between border-b border-slate-800/80 bg-slate-900/50 px-6 py-4">
-              <div className="flex items-center gap-6">
-                 <div>
-                    <div className="text-xs text-slate-500 mb-1">今日收益</div>
-                    <div className="text-xl font-bold text-violet-400 flex items-baseline gap-1">
-                      {totalDiamonds} <span className="text-xs font-normal text-slate-500">钻石</span>
-                    </div>
-                 </div>
-                 <div className="h-8 w-px bg-slate-800"></div>
-                 <div>
-                    <div className="text-xs text-slate-500 mb-1">总计中奖</div>
-                    <div className="text-lg font-bold text-emerald-400 flex items-baseline gap-1">
-                      {totalWins} <span className="text-xs font-normal text-slate-500">次</span>
-                    </div>
-                 </div>
-                 <div className="h-8 w-px bg-slate-800"></div>
-                 <div>
-                    <div className="text-xs text-slate-500 mb-1">参与人次</div>
-                    <div className="text-lg font-bold text-amber-400 flex items-baseline gap-1">
-                      {totalParticipation} <span className="text-xs font-normal text-slate-500">次</span>
-                    </div>
-                 </div>
-                 <div className="h-8 w-px bg-slate-800"></div>
-                 <div>
-                    <div className="text-xs text-slate-500 mb-1">在线账号</div>
-                    <div className="text-lg font-bold text-blue-400 flex items-baseline gap-1">
-                      {runningCount} <span className="text-xs font-normal text-slate-500">/ {accounts.length}</span>
-                    </div>
-                 </div>
-                 <div className="h-8 w-px bg-slate-800"></div>
-                 <div>
-                    <div className="text-xs text-slate-500 mb-1">服务端福袋池</div>
-                    <div className="text-lg font-bold text-cyan-400 flex items-baseline gap-1">
-                      {dispatchSummary.validCandidates} <span className="text-xs font-normal text-slate-500">个</span>
-                    </div>
-                 </div>
-                 <div className="h-8 w-px bg-slate-800"></div>
-                 <div>
-                    <div className="text-xs text-slate-500 mb-1">客户端可抢数</div>
-                    <div className="text-lg font-bold text-teal-400 flex items-baseline gap-1">
-                      {dispatchSummary.availableCandidates} <span className="text-xs font-normal text-slate-500">个</span>
-                    </div>
-                 </div>
-              </div>
-              <div className="flex items-center gap-3">
-                 <div className="rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-2 text-right">
-                    <div className="text-[10px] uppercase tracking-[0.14em] text-slate-500">授权状态</div>
-                    <div className="mt-1 text-xs text-slate-200">
-                      {license.authorized
-                        ? (license.accessMode === 'trial'
-                          ? `试用中，剩余 ${formatRelative(license.trialRemainingSec)}`
-                          : '已授权')
-                        : license.message || '未授权'}
-                    </div>
-                 </div>
-                 {announcementMarkdown ? (
-                    <div className="flex h-10 items-center rounded-lg bg-teal-500/10 px-3 text-xs text-teal-400 border border-teal-500/20 max-w-[320px]">
-                      <span className="mr-2 shrink-0">公告</span>
-                      <span className="truncate">{buildAnnouncementPreview(announcementMarkdown)}</span>
-                    </div>
-                 ) : null}
-                 {!useHotUpdateBadge && updateState.status === 'downloaded' && (
-                    <button
-                      className="rounded-lg bg-blue-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-600 transition"
-                      onClick={() => void window.electronAPI.desktop.installUpdate()}
-                    >
-                      系统更新就绪
-                    </button>
-                 )}
-              </div>
-            </header>
-
-            {/* 动态页面内容 */}
-            <div className="flex-1 overflow-auto p-4 sm:p-6">
-              {activeView === 'dashboard' ? (
-                <div className="flex h-full flex-col gap-6 xl:flex-row">
-                  <div className="flex flex-1 flex-col gap-6 xl:w-2/3">
-                    {accountListPanel}
-                    <div className="h-[320px] shrink-0 border border-slate-800 rounded-xl overflow-hidden">
-                      {lotteryListPanel}
-                    </div>
+          <div className="h-full w-full">
+            {activeView === 'dashboard' && (
+              <div className="grid h-full grid-cols-1 gap-4 xl:grid-cols-12 overflow-hidden">
+                {/* 左栏 7 列：账号列表 + 待抢福袋池 */}
+                <div className="flex h-full flex-col gap-4 overflow-hidden xl:col-span-7">
+                  <div className="max-h-[50%] min-h-[220px] flex-1 overflow-hidden">
+                    <AccountListPanel
+                      accounts={accounts}
+                      selectedAccountId={selectedAccountId}
+                      onSelectAccount={setSelectedAccountId}
+                      onToggleAccount={(account) => {
+                        if (account.actionActive) {
+                          void stopAccount(account.id)
+                        } else {
+                          void startAccountScanning(account.id)
+                        }
+                      }}
+                      onReloginAccount={(account) => void startAccountWithLogin(account.id, true)}
+                      onDeleteAccount={(account) => void removeAccount(account.id)}
+                      onAddAccount={addAccount}
+                    />
                   </div>
-                  <div className="flex xl:w-1/3 flex-col gap-6">
-                    <div className="h-1/2 min-h-[300px]">
-                      <TaskDetailPanel
-                        selectedAccount={selectedAccount}
-                        accounts={accounts}
-                        onToggleAccount={(account) => {
-                          if (account.actionActive) {
-                            void stopAccount(account.id)
-                          } else {
-                            void startAccountScanning(account.id)
-                          }
-                        }}
-                        onReloginAccount={(account) => void startAccountWithLogin(account.id, true)}
-                      />
-                    </div>
-                    <div className="h-1/2 min-h-[300px] border border-slate-800 rounded-xl overflow-hidden bg-slate-900">
-                      <TimelinePanel logs={logs} logListRef={logListRef} onLogListScroll={handleLogListScroll} />
-                    </div>
+                  <div className="h-[48%] min-h-[260px] overflow-hidden">
+                    <LotteryListPanel
+                      lotteriesByAccount={lotteriesByAccount}
+                      accountsMap={accountsMap}
+                    />
                   </div>
                 </div>
-              ) : null}
 
-              {activeView === 'accounts' ? (
-                <div className="flex h-full flex-col gap-6 xl:flex-row">
-                  <div className="flex flex-1 flex-col gap-6 xl:w-2/3">
-                    {accountListPanel}
-                  </div>
-                  <div className="xl:w-1/3 h-full">
+                {/* 右栏 5 列：选中账号状态流 + 实时系统日志 */}
+                <div className="flex h-full flex-col gap-4 overflow-hidden xl:col-span-5">
+                  <div className="max-h-[50%] min-h-[260px] flex-1 overflow-hidden">
                     <TaskDetailPanel
                       selectedAccount={selectedAccount}
                       accounts={accounts}
@@ -789,24 +627,71 @@ export default function App() {
                       onReloginAccount={(account) => void startAccountWithLogin(account.id, true)}
                     />
                   </div>
+                  <div className="h-[48%] min-h-[220px] overflow-hidden">
+                    <TimelinePanel
+                      logs={logs}
+                      logListRef={logListRef}
+                      onLogListScroll={handleLogListScroll}
+                    />
+                  </div>
                 </div>
-              ) : null}
+              </div>
+            )}
 
-              {activeView === 'history' ? (
-                <div className="h-full">
-                  <HistoryPanel records={sortedHistoryRecords} />
+            {activeView === 'accounts' && (
+              <div className="grid h-full grid-cols-1 gap-4 xl:grid-cols-12 overflow-hidden">
+                <div className="h-full overflow-hidden xl:col-span-8">
+                  <AccountListPanel
+                    accounts={accounts}
+                    selectedAccountId={selectedAccountId}
+                    onSelectAccount={setSelectedAccountId}
+                    onToggleAccount={(account) => {
+                      if (account.actionActive) {
+                        void stopAccount(account.id)
+                      } else {
+                        void startAccountScanning(account.id)
+                      }
+                    }}
+                    onReloginAccount={(account) => void startAccountWithLogin(account.id, true)}
+                    onDeleteAccount={(account) => void removeAccount(account.id)}
+                    onAddAccount={addAccount}
+                  />
                 </div>
-              ) : null}
+                <div className="h-full overflow-hidden xl:col-span-4">
+                  <TaskDetailPanel
+                    selectedAccount={selectedAccount}
+                    accounts={accounts}
+                    onToggleAccount={(account) => {
+                      if (account.actionActive) {
+                        void stopAccount(account.id)
+                      } else {
+                        void startAccountScanning(account.id)
+                      }
+                    }}
+                    onReloginAccount={(account) => void startAccountWithLogin(account.id, true)}
+                  />
+                </div>
+              </div>
+            )}
 
-              {activeView === 'logs' ? (
-                <div className="h-full border border-slate-800 rounded-xl overflow-hidden bg-slate-900">
-                  <TimelinePanel logs={logs} logListRef={logListRef} onLogListScroll={handleLogListScroll} />
-                </div>
-              ) : null}
-            </div>
-          </>
+            {activeView === 'history' && (
+              <div className="h-full overflow-hidden">
+                <HistoryPanel records={sortedHistoryRecords} />
+              </div>
+            )}
+
+            {activeView === 'logs' && (
+              <div className="h-full overflow-hidden">
+                <TimelinePanel
+                  logs={logs}
+                  logListRef={logListRef}
+                  onLogListScroll={handleLogListScroll}
+                />
+              </div>
+            )}
+          </div>
         )}
-      </main>
+      </AppLayout>
 
       <SettingsDrawer
         open={settingsOpen}
@@ -832,7 +717,6 @@ export default function App() {
           }
         }}
       />
-
-    </div>
+    </>
   )
 }

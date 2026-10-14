@@ -3,7 +3,6 @@ import {
   hasFanClubJoinRequirement,
   hasMemberJoinRequirement,
   hasRestrictedJoinRequirement,
-  isSupermanJoinableLottery,
   isPhysicalPrizeLottery,
   getRedPacketAveragePerWinner
 } from './lotteryRules'
@@ -17,14 +16,6 @@ describe('lotteryRules helpers', () => {
     const memberLottery = { conditions: [{ member_only: true }] }
     expect(hasMemberJoinRequirement(memberLottery)).toBe(true)
     expect(hasRestrictedJoinRequirement(memberLottery)).toBe(true)
-  })
-
-  it('requires both type 3 and type 6 for superman joinable lotteries', () => {
-    const supermanLottery = { conditions: [{ type: 3 }, { type: 6 }] }
-    expect(isSupermanJoinableLottery(supermanLottery)).toBe(true)
-
-    const incompleteLottery = { conditions: [{ type: 3 }] }
-    expect(isSupermanJoinableLottery(incompleteLottery)).toBe(false)
   })
 
   it('recognizes physical prizes by type and name heuristics', () => {

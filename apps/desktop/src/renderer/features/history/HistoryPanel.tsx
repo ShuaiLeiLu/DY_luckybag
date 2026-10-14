@@ -1,92 +1,11 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
+import { Card, Segmented, Table, Tag, Typography } from 'antd'
+import type { ColumnsType } from 'antd/es/table'
+import { HistoryOutlined, TrophyOutlined } from '@ant-design/icons'
 import type { LotteryHistoryRecord } from '@shared/models'
 
 export type HistoryPanelProps = {
   records: LotteryHistoryRecord[]
-}
-
-export function HistoryPanel(props: HistoryPanelProps) {
-  const [filter, setFilter] = useState<'all' | 'won'>('all')
-
-  const filteredRecords = props.records.filter((record) => {
-    if (filter === 'won') {
-      const isWon = Number(record.rewardAmount || 0) > 0 || String(record.resultStatus || '').toLowerCase() === 'won' || record.recordType === 'win'
-      return isWon
-    }
-    return true
-  })
-
-  return (
-    <aside className="flex h-full flex-col bg-slate-900 border border-slate-800 p-4 rounded-xl overflow-hidden shadow-sm">
-      <div className="mb-4 flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <div>
-            <h2 className="text-base font-semibold text-slate-100">历史记录</h2>
-            <p className="text-xs text-slate-400 mt-1">查看账号近期参与详情及开奖结果。</p>
-          </div>
-          <div className="flex items-center rounded-lg bg-slate-800/80 p-1 border border-slate-700/50">
-            <button
-              onClick={() => setFilter('all')}
-              className={`px-3 py-1 text-xs rounded-md transition-colors ${filter === 'all' ? 'bg-slate-700 text-slate-100 font-medium shadow-sm' : 'text-slate-400 hover:text-slate-300'}`}
-            >
-              已抢福袋
-            </button>
-            <button
-              onClick={() => setFilter('won')}
-              className={`px-3 py-1 text-xs rounded-md transition-colors ${filter === 'won' ? 'bg-emerald-500/20 text-emerald-400 font-medium shadow-sm border border-emerald-500/20' : 'text-slate-400 hover:text-slate-300'}`}
-            >
-              已中福袋
-            </button>
-          </div>
-        </div>
-        <div className="rounded-md border border-slate-700/50 bg-slate-800 px-3 py-1.5 text-xs text-slate-400">
-          共 {filteredRecords.length} 条
-        </div>
-      </div>
-
-      <div className="scrollbar-thin flex-1 space-y-2 overflow-auto pr-2">
-        {filteredRecords.length === 0 ? (
-          <div className="flex h-56 items-center justify-center rounded-xl border border-slate-800 bg-slate-800/30 text-sm text-slate-500">
-            {filter === 'won' ? '暂无中奖记录' : '暂无历史记录'}
-          </div>
-        ) : null}
-
-        {filteredRecords.map((record) => {
-          const result = formatResultText(record)
-          const amount = Number(record.rewardAmount || 0)
-          return (
-            <article
-              key={`${record.id}_${record.accountId}_${record.createdAt}`}
-              className="rounded-lg border border-slate-800 bg-slate-800/40 px-4 py-3 transition hover:bg-slate-800/60"
-            >
-              <div className="mb-2 flex items-center justify-between">
-                <div className="truncate pr-3 text-sm font-semibold text-slate-200">
-                  {record.lotteryName || '未命名福袋'}
-                </div>
-                <div className="shrink-0 text-xs text-slate-500">{formatTime(record.createdAt || record.joinedAt)}</div>
-              </div>
-
-              <div className="grid gap-2 text-xs text-slate-300 sm:grid-cols-4">
-                <Field label="账号" value={record.accountNickname || record.accountId || '-'} />
-                <Field label="直播间" value={record.authorNickname || record.roomId || '-'} />
-                <Field label="结果" value={result} />
-                <Field label="收益" value={amount > 0 ? `+${amount}` : '0'} tone={amount > 0 ? 'text-emerald-400 font-bold' : 'text-slate-400'} />
-              </div>
-            </article>
-          )
-        })}
-      </div>
-    </aside>
-  )
-}
-
-function Field(props: { label: string; value: string; tone?: string }) {
-  return (
-    <div className="rounded-md border border-slate-800/80 bg-slate-900/50 px-3 py-2">
-      <div className="mb-1 text-[11px] text-slate-500 font-medium">{props.label}</div>
-      <div className={`truncate text-xs ${props.tone || 'text-slate-300'}`}>{props.value}</div>
-    </div>
-  )
 }
 
 function formatTime(ts: number) {
@@ -97,12 +16,163 @@ function formatTime(ts: number) {
   const d = String(date.getDate()).padStart(2, '0')
   const h = String(date.getHours()).padStart(2, '0')
   const min = String(date.getMinutes()).padStart(2, '0')
-  return `${y}-${m}-${d} ${h}:${min}`
+  const sec = String(date.getSeconds()).padStart(2, '0')
+  return `${y}-${m}-${d} ${h}:${min}:${sec}`
 }
 
-function formatResultText(record: LotteryHistoryRecord) {
+function isWonRecord(record: LotteryHistoryRecord): boolean {
+  const amount = Number(record.rewardAmount || 0)
   const status = String(record.resultStatus || '').toLowerCase()
-  if (Number(record.rewardAmount || 0) > 0 || status === 'won' || status === 'win') return '中奖'
-  if (status) return status
-  return record.recordType === 'win' ? '中奖' : '未中奖'
+  return amount > 0 || status === 'won' || status === 'win' || record.recordType === 'win'
+}
+
+export function HistoryPanel({ records }: HistoryPanelProps) {
+  const [filter, setFilter] = useState<string>('all')
+
+  const totalWonCount = useMemo(() => {
+    return records.filter(isWonRecord).length
+  }, [records])
+
+  const totalRewardDiamonds = useMemo(() => {
+    return records.reduce((sum, r) => sum + Number(r.rewardAmount || 0), 0)
+  }, [records])
+
+  const filteredRecords = useMemo(() => {
+    if (filter === 'won') {
+      return records.filter(isWonRecord)
+    }
+    return records
+  }, [records, filter])
+
+  const columns: ColumnsType<LotteryHistoryRecord> = [
+    {
+      title: '状态',
+      key: 'resultStatus',
+      width: 90,
+      render: (_, record) => {
+        const won = isWonRecord(record)
+        return (
+          <Tag bordered={false} color={won ? 'success' : 'default'} className="text-xs">
+            {won ? '已中奖' : '未中奖'}
+          </Tag>
+        )
+      }
+    },
+    {
+      title: '福袋名称',
+      dataIndex: 'lotteryName',
+      key: 'lotteryName',
+      ellipsis: true,
+      render: (text) => (
+        <span className="font-medium text-xs text-slate-200" title={text || '未命名福袋'}>
+          {text || '未命名福袋'}
+        </span>
+      )
+    },
+    {
+      title: '参与账号',
+      key: 'account',
+      width: 140,
+      render: (_, record) => (
+        <span className="text-xs text-slate-300">
+          {record.accountNickname || record.accountId || '-'}
+        </span>
+      )
+    },
+    {
+      title: '所属直播间',
+      key: 'room',
+      width: 140,
+      render: (_, record) => (
+        <span className="truncate inline-block max-w-[130px] text-xs text-slate-400" title={record.authorNickname || record.roomId || '-'}>
+          {record.authorNickname || record.roomId || '-'}
+        </span>
+      )
+    },
+    {
+      title: '奖励收益',
+      dataIndex: 'rewardAmount',
+      key: 'rewardAmount',
+      width: 100,
+      render: (amount) => {
+        const val = Number(amount || 0)
+        return val > 0 ? (
+          <span className="font-mono text-xs font-bold text-amber-400">+{val} 钻</span>
+        ) : (
+          <span className="font-mono text-xs text-slate-500">0</span>
+        )
+      }
+    },
+    {
+      title: '参与时间',
+      key: 'time',
+      width: 160,
+      render: (_, record) => (
+        <span className="font-mono text-xs text-slate-400">
+          {formatTime(record.createdAt || record.joinedAt)}
+        </span>
+      )
+    }
+  ]
+
+  return (
+    <Card
+      className="flex h-full flex-col border-slate-800 bg-slate-900/60 shadow-sm"
+      styles={{
+        header: { borderBottom: '1px solid rgba(148, 163, 184, 0.08)', padding: '12px 16px' },
+        body: { padding: '0', overflow: 'hidden', flex: 1, display: 'flex', flexDirection: 'column' }
+      }}
+      title={
+        <div className="flex items-center gap-2">
+          <HistoryOutlined className="text-blue-400" />
+          <span className="text-sm font-semibold text-slate-100">历史参与记录</span>
+          <Tag color="default" bordered={false} className="text-xs font-mono">
+            共 {records.length} 场
+          </Tag>
+        </div>
+      }
+      extra={
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3 text-xs">
+            <span className="text-slate-400">
+              中奖率:{' '}
+              <strong className="text-emerald-400 font-mono">
+                {records.length > 0 ? ((totalWonCount / records.length) * 100).toFixed(1) : 0}%
+              </strong>
+            </span>
+            <span className="text-slate-400">
+              累计钻:{' '}
+              <strong className="text-amber-400 font-mono">+{totalRewardDiamonds}</strong>
+            </span>
+          </div>
+          <Segmented
+            size="small"
+            value={filter}
+            onChange={(val) => setFilter(val as string)}
+            options={[
+              { label: '全部记录', value: 'all' },
+              { label: '仅中奖', value: 'won' }
+            ]}
+          />
+        </div>
+      }
+    >
+      <div className="flex-1 overflow-auto">
+        <Table<LotteryHistoryRecord>
+          rowKey={(record) => `${record.id}_${record.accountId}_${record.createdAt}`}
+          columns={columns}
+          dataSource={filteredRecords}
+          size="small"
+          pagination={{
+            defaultPageSize: 15,
+            showSizeChanger: true,
+            pageSizeOptions: ['15', '30', '50'],
+            size: 'small',
+            className: 'px-4'
+          }}
+          scroll={{ y: 'calc(100vh - 280px)' }}
+        />
+      </div>
+    </Card>
+  )
 }

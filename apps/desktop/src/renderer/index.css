@@ -2,23 +2,12 @@
 
 :root {
   color-scheme: dark;
-  --bg-0: #05111f;
-  --bg-1: #0d1b2a;
-  --bg-2: #14263a;
-  --panel: rgba(10, 23, 38, 0.78);
-  --panel-strong: rgba(8, 19, 32, 0.92);
-  --line: rgba(148, 163, 184, 0.18);
-  --line-strong: rgba(148, 163, 184, 0.28);
-  --text-0: #ecf4ff;
-  --text-1: #b8c6db;
-  --text-2: #7f92ad;
-  --accent: #6ee7c8;
-  --accent-strong: #24c9a7;
-  --warn: #f7b955;
-  --danger: #ff7b7b;
-  --success: #67e8a6;
-  --shadow: 0 18px 60px rgba(3, 10, 18, 0.42);
-  font-family: "IBM Plex Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --bg-0: #070d19;
+  --bg-1: #0b1526;
+  --bg-2: #101f38;
+  --panel: rgba(15, 23, 42, 0.85);
+  --line: rgba(148, 163, 184, 0.14);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
 html,
@@ -27,46 +16,76 @@ body,
   width: 100%;
   height: 100%;
   margin: 0;
-  background:
-    radial-gradient(circle at top left, rgba(43, 169, 200, 0.22), transparent 34%),
-    radial-gradient(circle at top right, rgba(36, 201, 167, 0.16), transparent 28%),
-    linear-gradient(160deg, var(--bg-0), var(--bg-1) 48%, #091625 100%);
-  color: var(--text-0);
-}
-
-body {
+  padding: 0;
   overflow: hidden;
+  background-color: var(--bg-0);
+  color: #f1f5f9;
 }
 
 * {
   box-sizing: border-box;
 }
 
-button,
-input,
-select,
-textarea {
-  font: inherit;
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
 }
 
-.glass {
-  background: linear-gradient(180deg, rgba(15, 29, 46, 0.88), rgba(8, 18, 30, 0.72));
-  border: 1px solid var(--line);
-  box-shadow: var(--shadow);
-  backdrop-filter: blur(20px);
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.2);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.35);
 }
 
 .scrollbar-thin {
   scrollbar-width: thin;
-  scrollbar-color: rgba(110, 231, 200, 0.25) transparent;
+  scrollbar-color: rgba(148, 163, 184, 0.25) transparent;
 }
 
-.scrollbar-thin::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+/* Ant Design Global Polish */
+.ant-layout {
+  height: 100%;
+  width: 100%;
 }
 
-.scrollbar-thin::-webkit-scrollbar-thumb {
-  background: rgba(110, 231, 200, 0.22);
-  border-radius: 999px;
+.ant-card {
+  box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(12px);
+}
+
+.ant-card-bordered {
+  border-color: rgba(148, 163, 184, 0.12) !important;
+}
+
+.ant-table-wrapper .ant-table {
+  background: transparent !important;
+}
+
+.ant-table-wrapper .ant-table-tbody > tr > td {
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08) !important;
+}
+
+.ant-table-wrapper .ant-table-thead > tr > th {
+  border-bottom: 1px solid rgba(148, 163, 184, 0.15) !important;
+  font-weight: 600;
+  color: #94a3b8;
+}
+
+.ant-statistic .ant-statistic-title {
+  color: #94a3b8 !important;
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+
+.ant-statistic .ant-statistic-content-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-weight: 700;
 }

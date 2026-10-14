@@ -59,6 +59,7 @@ declare global {
           }
           error?: string
         }>
+        checkAndroidBridgeStatus: (config?: Partial<import('@shared/models').AndroidBridgeConfig>) => Promise<import('@shared/models').AndroidBridgeStatus>
         onUpdateState: (handler: (snapshot: UpdateSnapshot) => void) => () => void
         onHotUpdateState: (handler: (snapshot: {
           status: string

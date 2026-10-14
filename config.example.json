@@ -7,6 +7,9 @@
     "hotUpdateReloadOnApply": false,
     "stayDuration": 18,
     "enableRedPacket": true,
+    "onlyRedPacketMode": {
+      "enabled": false
+    },
     "randomInteraction": true,
     "hitRate": {
       "enabled": true,

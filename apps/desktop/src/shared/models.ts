@@ -74,6 +74,7 @@ export interface AccountSession {
   poolValidCandidates: number
   poolAvailableCandidates: number
   poolSummaryAt: number
+  requestBackend?: RequestBackendType
 }
 
 export interface PoolLease {
@@ -148,6 +149,26 @@ export interface LotteryHistoryRecord {
   rewardAmount: number
   createdAt: number
 }
+
+export type RequestBackendType = 'web' | 'android' | 'auto'
+
+export interface AndroidBridgeConfig {
+  enabled: boolean
+  serverUrl: string
+  token: string
+}
+
+export interface AndroidBridgeStatus {
+  available: boolean
+  connected: boolean
+  ticketGuardReady: boolean
+  authenticated: boolean
+  accountId?: string
+  capabilities?: string[]
+  error?: string
+  lastCheckedAt?: number
+}
+
 export interface DesktopSettings {
   poolServerUrl: string
   updateFeedUrl: string
@@ -156,6 +177,7 @@ export interface DesktopSettings {
   hotUpdateReloadOnApply: boolean
   stayDuration: number
   enableRedPacket: boolean
+  onlyRedPacketMode: { enabled: boolean }
   randomInteraction: boolean
   hitRate: { enabled: boolean; value: number }
   secondInspect: { enabled: boolean; value: number }
@@ -166,6 +188,8 @@ export interface DesktopSettings {
   participationCount: { enabled: boolean; value: number }
   singleAccountDuration: { enabled: boolean; value: number }
   scanConfig: { countPerPage: number; pagesPerCategory: number; allCount: number }
+  requestBackend: RequestBackendType
+  androidBridge: AndroidBridgeConfig
 }
 
 export interface BootstrapSnapshot {
