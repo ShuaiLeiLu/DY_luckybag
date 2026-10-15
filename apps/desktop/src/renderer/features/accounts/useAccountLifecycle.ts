@@ -8,7 +8,6 @@ import type {
   AccountSession,
   DesktopSettings,
   DispatchSummary,
-  LicenseSnapshot,
   LotteryHistoryRecord
 } from '@shared/models'
 
@@ -17,7 +16,6 @@ type AnyRecord = Record<string, any>
 export type UseAccountLifecycleProps = {
   accounts: AccountSession[]
   settings: DesktopSettings
-  license: LicenseSnapshot
   manager: LotteryManager
   activePoolServerUrl: string
   addLog: (message: string, type?: UiLogEntry['type']) => void
@@ -36,7 +34,6 @@ export function useAccountLifecycle(props: UseAccountLifecycleProps) {
   const {
     accounts,
     settings,
-    license,
     manager,
     activePoolServerUrl,
     addLog,
@@ -69,14 +66,14 @@ export function useAccountLifecycle(props: UseAccountLifecycleProps) {
   const patchAccount = useEffectEvent((accountId: string, patch: Partial<AccountSession>) => {
     const runtime = runtimeAccountsRef.current.get(accountId)
     if (runtime) {
-      syncRuntimeRef(mergeAccountModel(runtime, patch, license))
+      syncRuntimeRef(mergeAccountModel(runtime, patch))
     }
     startTransition(() => {
       setAccounts((current) =>
         sortAccounts(
           current.map((item) => {
             if (item.id !== accountId) return item
-            const next = mergeAccountModel(item, patch, license)
+            const next = mergeAccountModel(item, patch)
             syncRuntimeRef(next)
             return next
           })
@@ -86,14 +83,14 @@ export function useAccountLifecycle(props: UseAccountLifecycleProps) {
   })
 
   const upsertAccount = useEffectEvent((base: Partial<AccountSession> & AnyRecord) => {
-    const model = mergeAccountModel(runtimeAccountsRef.current.get(String(base.id || '')) || {}, base, license)
+    const model = mergeAccountModel(runtimeAccountsRef.current.get(String(base.id || '')) || {}, base)
     syncRuntimeRef(model)
     startTransition(() => {
       setAccounts((current) => {
         const index = current.findIndex((item) => item.id === model.id)
         if (index >= 0) {
           const next = [...current]
-          next[index] = mergeAccountModel(next[index], model, license)
+          next[index] = mergeAccountModel(next[index], model)
           syncRuntimeRef(next[index])
           return sortAccounts(next)
         }

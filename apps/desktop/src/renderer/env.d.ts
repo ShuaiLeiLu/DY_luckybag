@@ -3,7 +3,6 @@ import type { BootstrapSnapshot, DesktopSettings, LotteryHistoryRecord, Recovery
 declare global {
   interface Window {
     electronAPI: {
-      machineFingerprint: string
       invoke: (channel: string, payload?: unknown) => Promise<any>
       on: (channel: string, handler: (...args: any[]) => void) => () => void
       desktop: {

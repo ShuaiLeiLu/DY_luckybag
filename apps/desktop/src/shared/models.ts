@@ -1,34 +1,6 @@
-export type AccessMode = 'disabled' | 'unrestricted' | 'licensed' | 'trial' | 'locked'
-
-export interface LicenseSnapshot {
-  enabled: boolean
-  available: boolean
-  authorized: boolean
-  unrestricted: boolean
-  state: string
-  message: string
-  accessMode: AccessMode
-  trialState: string
-  trialExpireAt: number
-  trialRemainingSec: number
-  requiresActivation: boolean
-  licensePlan: string
-  features: Record<string, unknown>
-  featureFlags: Record<string, boolean>
-  checkedAt: number
-}
-
-export interface TrialSnapshot {
-  state: string
-  expireAt: number
-  remainingSec: number
-}
-
 export type AccountRole = 'scanner' | 'worker'
 
 export type RuntimeState =
-  | 'locked'
-  | 'trial_active'
   | 'ready'
   | 'scanning'
   | 'claiming'
@@ -194,7 +166,6 @@ export interface DesktopSettings {
 
 export interface BootstrapSnapshot {
   appVersion: string
-  machineFingerprint: string
   settings: DesktopSettings
   update: UpdateSnapshot
   events: RecoveryEvent[]

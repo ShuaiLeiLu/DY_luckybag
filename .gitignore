@@ -21,7 +21,6 @@ tokens.json
 config.json
 config.local.json
 apps/desktop/config.json
-apps/license-miniapp/config.js
 
 # Logs
 *.log
@@ -75,8 +74,6 @@ Desktop.ini
 !apps/desktop/tokens.example.json
 
 # Local backend container data
-apps/pool-server/mysql-data/
-apps/pool-server/mysql-data-local/
 apps/pool-server/redis-data/
 
 # Local Go SDK and caches

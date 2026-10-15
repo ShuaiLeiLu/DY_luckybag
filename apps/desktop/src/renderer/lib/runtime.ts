@@ -1,4 +1,4 @@
-import type { AccountSession, LicenseSnapshot } from '@shared/models'
+import type { AccountSession } from '@shared/models'
 
 type AnyRecord = Record<string, any>
 
@@ -48,22 +48,17 @@ export function createAccountModel(base: Partial<AccountSession> & AnyRecord = {
 
 export function mergeAccountModel(
   current: Partial<AccountSession> & AnyRecord = {},
-  patch: Partial<AccountSession> & AnyRecord = {},
-  license?: LicenseSnapshot
+  patch: Partial<AccountSession> & AnyRecord = {}
 ): AccountSession {
   const model = createAccountModel({
     ...current,
     ...patch
   })
-  if (license) {
-    model.runtimeState = deriveRuntimeState(model, license)
-  }
+  model.runtimeState = deriveRuntimeState(model)
   return model
 }
 
-export function deriveRuntimeState(account: AccountSession, license: LicenseSnapshot): AccountSession['runtimeState'] {
-  if (license.accessMode === 'locked' && !license.authorized) return 'locked'
-  if (license.accessMode === 'trial' && license.authorized) return 'trial_active'
+export function deriveRuntimeState(account: AccountSession): AccountSession['runtimeState'] {
   if (account.state === 'paused') return 'paused'
   if (account.state === 'waiting' && !account.actionActive) return 'ready'
   if (!account.actionActive) return 'login_required'
@@ -77,32 +72,10 @@ export function deriveRuntimeState(account: AccountSession, license: LicenseSnap
   return 'ready'
 }
 
-export function normalizeLicenseSnapshot(raw: AnyRecord = {}): LicenseSnapshot {
-  return {
-    enabled: raw.enabled === true,
-    available: raw.available === true,
-    authorized: raw.authorized === true,
-    unrestricted: raw.unrestricted === true,
-    state: String(raw.state || 'disabled'),
-    message: String(raw.message || ''),
-    accessMode: (raw.accessMode || 'disabled') as LicenseSnapshot['accessMode'],
-    trialState: String(raw.trialState || 'none'),
-    trialExpireAt: Number(raw.trialExpireAt || 0),
-    trialRemainingSec: Number(raw.trialRemainingSec || 0),
-    requiresActivation: raw.requiresActivation === true,
-    licensePlan: String(raw.licensePlan || raw.plan || ''),
-    features: raw.features && typeof raw.features === 'object' ? raw.features : {},
-    featureFlags: raw.featureFlags && typeof raw.featureFlags === 'object' ? raw.featureFlags : {},
-    checkedAt: Number(raw.checkedAt || Date.now())
-  }
-}
-
 export function statusTone(state: AccountSession['runtimeState']) {
   switch (state) {
-    case 'locked':
     case 'error':
       return 'text-rose-300 border-rose-400/25 bg-rose-500/10'
-    case 'trial_active':
     case 'ready':
       return 'text-emerald-200 border-emerald-400/20 bg-emerald-500/10'
     case 'scanning':
@@ -121,10 +94,6 @@ export function statusTone(state: AccountSession['runtimeState']) {
 
 export function statusText(state: AccountSession['runtimeState']) {
   switch (state) {
-    case 'locked':
-      return '已锁定'
-    case 'trial_active':
-      return '试用中'
     case 'ready':
       return '待命'
     case 'scanning':

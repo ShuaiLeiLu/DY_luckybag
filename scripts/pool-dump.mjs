@@ -15,8 +15,6 @@ function resolveBaseUrl() {
     const parsed = JSON.parse(raw)
     const fromDesktop = String(parsed?.desktop?.poolServerUrl || '').trim()
     if (fromDesktop) return fromDesktop.replace(/\/+$/, '')
-    const fromMiniapp = String(parsed?.miniapp?.baseUrl || '').trim()
-    if (fromMiniapp) return fromMiniapp.replace(/\/+$/, '')
   } catch (_) {
     // ignore
   }

@@ -1,4 +1,4 @@
-import type { LicenseSnapshot, UpdateSnapshot } from '@shared/models'
+import type { UpdateSnapshot } from '@shared/models'
 
 export type HotUpdateSnapshot = {
   status: string
@@ -10,24 +10,6 @@ export type HotUpdateSnapshot = {
   message: string
   checkedAt: number
   appliedEntryFile: string
-}
-
-export const emptyLicense: LicenseSnapshot = {
-  enabled: false,
-  available: false,
-  authorized: false,
-  unrestricted: false,
-  state: 'disabled',
-  message: '未连接授权服务',
-  accessMode: 'disabled',
-  trialState: 'none',
-  trialExpireAt: 0,
-  trialRemainingSec: 0,
-  requiresActivation: false,
-  licensePlan: '',
-  features: {},
-  featureFlags: {},
-  checkedAt: 0
 }
 
 export const emptyUpdate: UpdateSnapshot = {

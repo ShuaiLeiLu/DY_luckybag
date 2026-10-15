@@ -1,16 +1,11 @@
 import { useState } from 'react'
-import { Badge, Button, Modal, Space, Tag, Tooltip } from 'antd'
+import { Button, Modal, Tooltip } from 'antd'
 import {
   SoundOutlined,
-  CloudDownloadOutlined,
-  ThunderboltOutlined,
-  CheckCircleOutlined,
-  ClockCircleOutlined,
-  ExclamationCircleOutlined
+  CloudDownloadOutlined
 } from '@ant-design/icons'
-import type { DispatchSummary, LicenseSnapshot, UpdateSnapshot } from '@shared/models'
-import { formatRelative } from '../../lib/runtime'
-import { MarkdownNotice } from '../../features/license/LicenseGate'
+import type { DispatchSummary, UpdateSnapshot } from '@shared/models'
+import { MarkdownNotice } from '../MarkdownNotice'
 
 interface AppHeaderProps {
   totalDiamonds: number
@@ -19,7 +14,6 @@ interface AppHeaderProps {
   runningCount: number
   accountCount: number
   dispatchSummary: DispatchSummary
-  license: LicenseSnapshot
   announcementMarkdown: string
   updateState: UpdateSnapshot
   useHotUpdateBadge: boolean
@@ -33,16 +27,12 @@ export function AppHeader({
   runningCount,
   accountCount,
   dispatchSummary,
-  license,
   announcementMarkdown,
   updateState,
   useHotUpdateBadge,
   onInstallUpdate
 }: AppHeaderProps) {
   const [noticeModalOpen, setNoticeModalOpen] = useState(false)
-
-  const isTrial = license.accessMode === 'trial'
-  const isAuthorized = license.authorized || isTrial
 
   return (
     <header className="flex h-16 shrink-0 items-center justify-between border-b border-slate-800/80 bg-slate-950/70 px-6 backdrop-blur-md select-none">
@@ -176,28 +166,6 @@ export function AppHeader({
           </Button>
         )}
 
-        {/* 授权状态徽章 */}
-        <div className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-1.5">
-          <span className="text-[11px] text-slate-400">授权:</span>
-          {isAuthorized ? (
-            isTrial ? (
-              <span className="flex items-center gap-1 text-xs font-medium text-amber-300">
-                <ClockCircleOutlined className="text-[11px]" />
-                试用中 (余{formatRelative(license.trialRemainingSec)})
-              </span>
-            ) : (
-              <span className="flex items-center gap-1 text-xs font-medium text-emerald-400">
-                <CheckCircleOutlined className="text-[11px]" />
-                已授权
-              </span>
-            )
-          ) : (
-            <span className="flex items-center gap-1 text-xs font-medium text-rose-400">
-              <ExclamationCircleOutlined className="text-[11px]" />
-              {license.message || '未授权'}
-            </span>
-          )}
-        </div>
       </div>
     </header>
   )

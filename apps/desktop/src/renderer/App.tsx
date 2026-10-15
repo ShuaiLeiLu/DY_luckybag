@@ -9,19 +9,10 @@ import {
 import LotteryManager from '../services/LotteryManager-lite'
 import {
   FIXED_POOL_SERVER_URL,
-  normalizePoolServerUrl,
-  resolveLicenseFingerprint,
-  resolvePoolClientId,
-  uploadLotteryHistoryRecord
+  normalizePoolServerUrl
 } from '../services/poolClient'
-import {
-  deriveRuntimeState,
-  formatRelative
-} from './lib/runtime'
 import { buildLegacyConfig } from './features/accounts/legacyConfig'
-import { LicenseGate } from './features/license/LicenseGate'
-import { formatHotUpdateStatusText, formatUpdateStatusText } from './features/license/presentation'
-import { useLicenseBinding } from './features/license/useLicenseBinding'
+import { formatHotUpdateStatusText, formatUpdateStatusText } from './lib/updatePresentation'
 import { useAdaptivePolling } from './hooks/useAdaptivePolling'
 import { useAccountSelection } from './hooks/useAccountSelection'
 import { SettingsDrawer } from './features/settings/SettingsDrawer'
@@ -44,7 +35,7 @@ import type {
   UpdateSnapshot
 } from '@shared/models'
 import { DEFAULT_DESKTOP_SETTINGS } from '@shared/defaultSettings'
-import { useLicenseNotice } from './hooks/useLicenseNotice'
+import { useDesktopUpdates } from './hooks/useDesktopUpdates'
 import { emptyHotUpdate, emptyUpdate } from './lib/defaultSnapshots'
 
 type AnyRecord = Record<string, any>
@@ -126,8 +117,6 @@ export default function App() {
   const [selectedAccountId, setSelectedAccountId] = useState('')
   const [activeView, setActiveView] = useState<MainView>('dashboard')
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [forceShowMainWhenLocked, setForceShowMainWhenLocked] = useState(false)
-  const [manualShowLicenseGate, setManualShowLicenseGate] = useState(false)
   const lastRuntimeLogRef = useRef<Map<string, { key: string; at: number }>>(new Map())
 
   const {
@@ -178,33 +167,17 @@ export default function App() {
     return true
   }
 
-  const poolClientId = useMemo(() => resolvePoolClientId(), [])
   const activePoolServerUrl = useMemo(() => {
     return normalizePoolServerUrl(settings.poolServerUrl) || FIXED_POOL_SERVER_URL
   }, [settings.poolServerUrl])
-  const poolFingerprint = useMemo(() => resolveLicenseFingerprint(), [])
 
   const {
-    license,
-    licenseKey,
-    licenseBusy,
     announcementMarkdown,
     updateState,
     hotUpdateState,
-    refreshLicense,
-    handleStartTrial,
-    handleActivate,
-    setLicenseKey,
     setUpdateState,
     setHotUpdateState
-  } = useLicenseNotice({
-    poolServerUrl: activePoolServerUrl,
-    poolClientId,
-    poolFingerprint,
-    appVersion: bootstrap?.appVersion || '3.0.0',
-    onLog: addLog,
-    getCurrentAccounts: () => accounts.length
-  })
+  } = useDesktopUpdates(activePoolServerUrl)
 
   const selectedAccount = accounts.find((item) => item.id === selectedAccountId) || accounts[0] || null
 
@@ -230,40 +203,6 @@ export default function App() {
     try {
       const saved = await window.electronAPI.desktop.appendHistoryRecord(normalizedRecord)
       const nextRecord = saved?.item || normalizedRecord
-      void uploadLotteryHistoryRecord(activePoolServerUrl, {
-        localHistoryId: Number(nextRecord?.id || normalizedRecord.id || 0),
-        recordType: String(nextRecord?.recordType || normalizedRecord.recordType || ''),
-        clientId: poolClientId,
-        fingerprint: poolFingerprint,
-        appVersion: String(bootstrap?.appVersion || ''),
-        accountId: String(nextRecord?.accountId || normalizedRecord.accountId || ''),
-        accountNickname: String(nextRecord?.accountNickname || normalizedRecord.accountNickname || ''),
-        roomId: String(nextRecord?.roomId || normalizedRecord.roomId || ''),
-        webRid: String(nextRecord?.webRid || normalizedRecord.webRid || ''),
-        lotteryId: String(nextRecord?.lotteryId || normalizedRecord.lotteryId || ''),
-        authorNickname: String(nextRecord?.authorNickname || normalizedRecord.authorNickname || ''),
-        lotteryName: String(nextRecord?.lotteryName || normalizedRecord.lotteryName || ''),
-        predictedProbability: Number(nextRecord?.predictedProbability || normalizedRecord.predictedProbability || 0),
-        predictedJoinTotal: Number(nextRecord?.predictedJoinTotal || normalizedRecord.predictedJoinTotal || 0),
-        joinTotal: Number(nextRecord?.joinTotal || normalizedRecord.joinTotal || 0),
-        luckyCount: Number(nextRecord?.luckyCount || normalizedRecord.luckyCount || 0),
-        onlineTotal: Number(nextRecord?.onlineTotal || normalizedRecord.onlineTotal || 0),
-        totalAmount: Number(nextRecord?.totalAmount || normalizedRecord.totalAmount || 0),
-        prizeType: nextRecord?.prizeType ?? normalizedRecord.prizeType ?? null,
-        prizeInfo: (nextRecord?.prizeInfo || normalizedRecord.prizeInfo || {}) as Record<string, unknown>,
-        conditions: Array.isArray(nextRecord?.conditions) ? nextRecord.conditions : (Array.isArray(normalizedRecord.conditions) ? normalizedRecord.conditions : []),
-        remainingSec: Number(nextRecord?.remainingSec || normalizedRecord.remainingSec || 0),
-        serverScore: Number(nextRecord?.serverScore || normalizedRecord.serverScore || 0),
-        startTime: Number(nextRecord?.startTime || normalizedRecord.startTime || 0),
-        joinMode: String(nextRecord?.joinMode || normalizedRecord.joinMode || ''),
-        joinStatus: String(nextRecord?.joinStatus || normalizedRecord.joinStatus || ''),
-        resultStatus: String(nextRecord?.resultStatus || normalizedRecord.resultStatus || ''),
-        resultReason: String(nextRecord?.resultReason || normalizedRecord.resultReason || ''),
-        joinedAt: Number(nextRecord?.joinedAt || normalizedRecord.joinedAt || 0),
-        endTime: Number(nextRecord?.endTime || normalizedRecord.endTime || 0),
-        rewardAmount: Number(nextRecord?.rewardAmount || normalizedRecord.rewardAmount || 0),
-        createdAt: Number(nextRecord?.createdAt || normalizedRecord.createdAt || 0)
-      }).catch(() => {})
       startTransition(() => {
         setHistoryRecords((current) => [nextRecord as LotteryHistoryRecord, ...current].slice(0, 240))
       })
@@ -286,7 +225,6 @@ export default function App() {
   } = useAccountLifecycle({
     accounts,
     settings,
-    license,
     manager,
     activePoolServerUrl,
     addLog,
@@ -434,18 +372,9 @@ export default function App() {
   }, [activePoolServerUrl, manager])
 
   useEffect(() => {
-    void refreshLicense()
     void refreshDispatch()
     void refreshLearning()
   }, [activePoolServerUrl])
-
-  useEffect(() => {
-    setAccounts((current) => current.map((account) => {
-      const next = { ...account, runtimeState: deriveRuntimeState(account, license) }
-      syncRuntimeRef(next)
-      return next
-    }))
-  }, [license.accessMode, license.authorized, license.trialState])
 
   useAccountSelection({
     accounts,
@@ -456,7 +385,6 @@ export default function App() {
   useAdaptivePolling({
     hasActiveAccounts: accounts.some((account) => account.actionActive),
     refreshDispatch: () => void refreshDispatch(),
-    refreshLicense: () => void refreshLicense(),
     refreshLearning: () => void refreshLearning()
   })
 
@@ -493,45 +421,16 @@ export default function App() {
     return [...historyRecords].sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
   }, [historyRecords])
 
-  const gateLocked = license.accessMode === 'locked' && license.requiresActivation
-
-  const {
-    bindBusy,
-    bindSession,
-    bindMiniAppCodeUrl,
-    bindMiniAppScanCodeUrl,
-    createBindSession,
-    refreshBindSessionStatus
-  } = useLicenseBinding({
-    poolServerUrl: activePoolServerUrl,
-    poolClientId,
-    poolFingerprint,
-    appVersion: bootstrap?.appVersion || '3.0.0',
-    autoCreateEnabled: gateLocked,
-    onLicenseRefresh: refreshLicense,
-    onLog: addLog
-  })
-
-  const showGate = (gateLocked && !forceShowMainWhenLocked) || manualShowLicenseGate
-
   return (
     <>
       <AppLayout
         sider={
           <AppSider
             activeView={activeView}
-            onViewChange={(view) => {
-              setActiveView(view)
-              setManualShowLicenseGate(false)
-            }}
+            onViewChange={setActiveView}
             appVersion={bootstrap?.appVersion || displayUpdateState.currentVersion || '3.0.0'}
-            license={license}
             onAddAccount={addAccount}
             onOpenSettings={() => setSettingsOpen(true)}
-            onOpenLicenseGate={() => {
-              setManualShowLicenseGate(true)
-              setForceShowMainWhenLocked(false)
-            }}
           />
         }
         header={
@@ -542,7 +441,6 @@ export default function App() {
             runningCount={runningCount}
             accountCount={accounts.length}
             dispatchSummary={dispatchSummary}
-            license={license}
             announcementMarkdown={announcementMarkdown}
             updateState={displayUpdateState}
             useHotUpdateBadge={useHotUpdateBadge}
@@ -556,91 +454,12 @@ export default function App() {
           />
         }
       >
-        {showGate ? (
-          <div className="h-full w-full overflow-auto p-4 sm:p-6">
-            <LicenseGate
-              license={license}
-              licenseKey={licenseKey}
-              announcementMarkdown={announcementMarkdown}
-              bindBusy={bindBusy}
-              bindSession={bindSession}
-              miniAppCodeUrl={bindMiniAppCodeUrl}
-              miniAppScanCodeUrl={bindMiniAppScanCodeUrl}
-              onLicenseKeyChange={setLicenseKey}
-              onStartTrial={handleStartTrial}
-              onActivate={handleActivate}
-              onCreateBindSession={() => void createBindSession()}
-              onRefreshBindStatus={() => void refreshBindSessionStatus(true)}
-              onBackToMain={() => {
-                setManualShowLicenseGate(false)
-                if (gateLocked) {
-                  setForceShowMainWhenLocked(true)
-                }
-              }}
-              busy={licenseBusy}
-            />
-          </div>
-        ) : (
-          <div className="h-full w-full">
-            {activeView === 'dashboard' && (
-              <div className="grid h-full grid-cols-1 gap-4 xl:grid-cols-12 overflow-hidden">
-                {/* 左栏 7 列：账号列表 + 待抢福袋池 */}
-                <div className="flex h-full flex-col gap-4 overflow-hidden xl:col-span-7">
-                  <div className="max-h-[50%] min-h-[220px] flex-1 overflow-hidden">
-                    <AccountListPanel
-                      accounts={accounts}
-                      selectedAccountId={selectedAccountId}
-                      onSelectAccount={setSelectedAccountId}
-                      onToggleAccount={(account) => {
-                        if (account.actionActive) {
-                          void stopAccount(account.id)
-                        } else {
-                          void startAccountScanning(account.id)
-                        }
-                      }}
-                      onReloginAccount={(account) => void startAccountWithLogin(account.id, true)}
-                      onDeleteAccount={(account) => void removeAccount(account.id)}
-                      onAddAccount={addAccount}
-                    />
-                  </div>
-                  <div className="h-[48%] min-h-[260px] overflow-hidden">
-                    <LotteryListPanel
-                      lotteriesByAccount={lotteriesByAccount}
-                      accountsMap={accountsMap}
-                    />
-                  </div>
-                </div>
-
-                {/* 右栏 5 列：选中账号状态流 + 实时系统日志 */}
-                <div className="flex h-full flex-col gap-4 overflow-hidden xl:col-span-5">
-                  <div className="max-h-[50%] min-h-[260px] flex-1 overflow-hidden">
-                    <TaskDetailPanel
-                      selectedAccount={selectedAccount}
-                      accounts={accounts}
-                      onToggleAccount={(account) => {
-                        if (account.actionActive) {
-                          void stopAccount(account.id)
-                        } else {
-                          void startAccountScanning(account.id)
-                        }
-                      }}
-                      onReloginAccount={(account) => void startAccountWithLogin(account.id, true)}
-                    />
-                  </div>
-                  <div className="h-[48%] min-h-[220px] overflow-hidden">
-                    <TimelinePanel
-                      logs={logs}
-                      logListRef={logListRef}
-                      onLogListScroll={handleLogListScroll}
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {activeView === 'accounts' && (
-              <div className="grid h-full grid-cols-1 gap-4 xl:grid-cols-12 overflow-hidden">
-                <div className="h-full overflow-hidden xl:col-span-8">
+        <div className="h-full w-full">
+          {activeView === 'dashboard' && (
+            <div className="grid h-full grid-cols-1 gap-4 xl:grid-cols-12 overflow-hidden">
+              {/* 左栏 7 列：账号列表 + 待抢福袋池 */}
+              <div className="flex h-full flex-col gap-4 overflow-hidden xl:col-span-7">
+                <div className="max-h-[50%] min-h-[220px] flex-1 overflow-hidden">
                   <AccountListPanel
                     accounts={accounts}
                     selectedAccountId={selectedAccountId}
@@ -657,7 +476,17 @@ export default function App() {
                     onAddAccount={addAccount}
                   />
                 </div>
-                <div className="h-full overflow-hidden xl:col-span-4">
+                <div className="h-[48%] min-h-[260px] overflow-hidden">
+                  <LotteryListPanel
+                    lotteriesByAccount={lotteriesByAccount}
+                    accountsMap={accountsMap}
+                  />
+                </div>
+              </div>
+
+              {/* 右栏 5 列：选中账号状态流 + 实时系统日志 */}
+              <div className="flex h-full flex-col gap-4 overflow-hidden xl:col-span-5">
+                <div className="max-h-[50%] min-h-[260px] flex-1 overflow-hidden">
                   <TaskDetailPanel
                     selectedAccount={selectedAccount}
                     accounts={accounts}
@@ -671,26 +500,69 @@ export default function App() {
                     onReloginAccount={(account) => void startAccountWithLogin(account.id, true)}
                   />
                 </div>
+                <div className="h-[48%] min-h-[220px] overflow-hidden">
+                  <TimelinePanel
+                    logs={logs}
+                    logListRef={logListRef}
+                    onLogListScroll={handleLogListScroll}
+                  />
+                </div>
               </div>
-            )}
+            </div>
+          )}
 
-            {activeView === 'history' && (
-              <div className="h-full overflow-hidden">
-                <HistoryPanel records={sortedHistoryRecords} />
-              </div>
-            )}
-
-            {activeView === 'logs' && (
-              <div className="h-full overflow-hidden">
-                <TimelinePanel
-                  logs={logs}
-                  logListRef={logListRef}
-                  onLogListScroll={handleLogListScroll}
+          {activeView === 'accounts' && (
+            <div className="grid h-full grid-cols-1 gap-4 xl:grid-cols-12 overflow-hidden">
+              <div className="h-full overflow-hidden xl:col-span-8">
+                <AccountListPanel
+                  accounts={accounts}
+                  selectedAccountId={selectedAccountId}
+                  onSelectAccount={setSelectedAccountId}
+                  onToggleAccount={(account) => {
+                    if (account.actionActive) {
+                      void stopAccount(account.id)
+                    } else {
+                      void startAccountScanning(account.id)
+                    }
+                  }}
+                  onReloginAccount={(account) => void startAccountWithLogin(account.id, true)}
+                  onDeleteAccount={(account) => void removeAccount(account.id)}
+                  onAddAccount={addAccount}
                 />
               </div>
-            )}
-          </div>
-        )}
+              <div className="h-full overflow-hidden xl:col-span-4">
+                <TaskDetailPanel
+                  selectedAccount={selectedAccount}
+                  accounts={accounts}
+                  onToggleAccount={(account) => {
+                    if (account.actionActive) {
+                      void stopAccount(account.id)
+                    } else {
+                      void startAccountScanning(account.id)
+                    }
+                  }}
+                  onReloginAccount={(account) => void startAccountWithLogin(account.id, true)}
+                />
+              </div>
+            </div>
+          )}
+
+          {activeView === 'history' && (
+            <div className="h-full overflow-hidden">
+              <HistoryPanel records={sortedHistoryRecords} />
+            </div>
+          )}
+
+          {activeView === 'logs' && (
+            <div className="h-full overflow-hidden">
+              <TimelinePanel
+                logs={logs}
+                logListRef={logListRef}
+                onLogListScroll={handleLogListScroll}
+              />
+            </div>
+          )}
+        </div>
       </AppLayout>
 
       <SettingsDrawer

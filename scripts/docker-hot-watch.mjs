@@ -38,7 +38,6 @@ const IGNORED_PARTS = new Set([
   'dist-electron',
   'dy-fudai-desktop',
   'runtime-logs',
-  'mysql-data-local',
   'redis-data'
 ])
 

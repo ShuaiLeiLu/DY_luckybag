@@ -26,7 +26,7 @@ print_help() {
 
 选项:
   --redis              使用内置 Redis compose（docker-compose.redis.yml）
-  --local              启动本地完整栈（MySQL + Redis + pool-server + license-admin）
+  --local              启动本地完整栈（Redis + pool-server）
   --skip-build         跳过镜像构建，直接启动容器
   --no-clean           启动前不清理旧容器
   --image <name>       镜像名，默认 dy-pool-server
@@ -135,7 +135,7 @@ IMAGE_REF="${IMAGE_NAME}:${IMAGE_TAG}"
 echo ">>> 部署目录: ${POOL_DIR}"
 echo ">>> 镜像: ${IMAGE_REF}"
 if [[ "${USE_LOCAL_STACK}" == "1" ]]; then
-  echo ">>> 模式: local(本地 MySQL + Redis + pool-server + license-admin)"
+  echo ">>> 模式: local(本地 Redis + pool-server)"
 elif [[ "${USE_REDIS}" == "1" ]]; then
   echo ">>> 模式: redis(内置 Redis 容器)"
 else
@@ -159,7 +159,7 @@ else
 fi
 
 if [[ "${NO_CLEAN}" != "1" ]]; then
-  docker rm -f dy-pool-server dy-pool-server-local dy-license-admin-local >/dev/null 2>&1 || true
+  docker rm -f dy-pool-server dy-pool-server-local >/dev/null 2>&1 || true
   if [[ "${USE_LOCAL_STACK}" != "1" && "${USE_REDIS}" != "1" ]]; then
     docker rm -f dy-pool-redis >/dev/null 2>&1 || true
   fi
@@ -180,8 +180,6 @@ fi
 
 if [[ "${USE_LOCAL_STACK}" == "1" ]]; then
   echo "本地服务: http://127.0.0.1:${POOL_PORT}"
-  echo "本地管理后台: http://127.0.0.1:${ADMIN_PORT:-9091}/admin"
-  echo "本地管理员: ${POOL_LICENSE_ADMIN_USERNAME:-admin} / ${POOL_LICENSE_ADMIN_PASSWORD:-admin123456}"
   echo "查看日志: docker logs -f dy-pool-server-local"
 else
   echo "查看日志: docker logs -f dy-pool-server"

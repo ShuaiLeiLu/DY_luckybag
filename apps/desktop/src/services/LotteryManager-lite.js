@@ -1189,14 +1189,6 @@ class LotteryManager {
       return '请求超时，请稍后重试'
     }
 
-    const codeMap = {
-      license_backend_unavailable: '授权服务暂不可用',
-      license_not_authorized: '授权未生效',
-      license_client_id_required: '缺少客户端标识',
-      license_fingerprint_required: '缺少设备指纹'
-    }
-    if (codeMap[text]) return codeMap[text]
-
     const httpMatch = text.match(/^http_(\d{3})$/i)
     if (httpMatch) return `请求失败（HTTP ${httpMatch[1]}）`
     return text

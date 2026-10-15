@@ -1,54 +1,51 @@
-# 抖娃福袋助手 - 全栈部署指南 (Ready for Production)
+# 抖娃福袋部署指南
 
-这份指南将指导您如何把配置好的【桌面端】、【小程序端】和【服务端】打包并部署上线。
+## 配置
 
-## 步骤 1：同步全局配置
-在项目根目录（`dy_fudai`）下，有一个核心配置文件 `config.json`。请确保里面的域名（`poolServerUrl`, `baseUrl`）、MySQL 密码、微信小程序 `AppId` 和 `AppSecret` 已经修改为您线上的真实数据。
+将根目录 `config.example.json` 复制为 `config.json`，设置：
 
-确认无误后，在根目录运行自动化脚本，它会将配置刷入所有前后端代码中：
+- `desktop.poolServerUrl`：桌面端访问的业务服务地址。
+- `poolServer.server`：服务端监听地址、端口和请求体限制。
+- `poolServer.redis`：共享候选池的 Redis 地址及连接参数；关闭 `enabled` 可使用内存模式。
+- `poolServer.desktopNoticeMarkdown`：可选的桌面端系统公告。
+- `desktop.updateFeedUrl` 和热更新配置：客户端更新资源地址。
+
+桌面端和服务端均可直接读取根配置。需要同步桌面端内置地址及生成服务端独立配置时，执行 `node deploy-setup.js`。
+
+## 服务端
+
+在仓库根目录执行：
+
 ```bash
-node deploy-setup.js
+npm ci
+npm run server:docker:build
+npm run server:docker:up
 ```
-*(注：如果看到三个 ✅ 符号，说明配置同步成功。)*
 
----
+默认部署使用 `config.json` 中配置的外部 Redis。需要同时部署 Redis 时，执行：
 
-## 步骤 2：部署服务端 (Backend / Pool Server)
-服务端采用 Go 语言编写，依赖 MySQL 和 Redis。项目已经内置了 `docker-compose.yml`，推荐使用 Docker 一键部署。
-
-1. 将 `apps/pool-server` 目录上传到您的云服务器。
-2. 在服务器的 `pool-server` 目录下，运行以下命令启动服务：
 ```bash
-docker-compose up -d --build
+bash ./scripts/deploy-pool-local.sh --redis
 ```
 
-本地开发时，如果希望修改代码后自动更新 Docker，可在仓库根目录运行：
+本地开发环境使用示例配置和内置 Redis：
+
 ```bash
 npm run server:docker:up:local
+# 修改源码后自动构建、重启
+npm run server:docker:watch:local
 ```
-本地完整 Docker 栈包含 MySQL、Redis、pool-server 和 license-admin。需要代码修改后自动更新时运行 `npm run server:docker:watch:local`；脚本会先部署一次，之后监听 Go 服务端、Desktop 源码、Docker 文件和配置，检测到修改后自动重建镜像并重启容器。
-3. **域名反向代理**：配置 Nginx（或宝塔面板），将您的域名（例如 `http://fudai.shuai.help:9090`）反向代理到服务器的 `9090` 端口。
 
----
+业务服务默认监听 `9090` 端口，可将域名反向代理到此端口。
+健康检查地址：`http://127.0.0.1:9090/health`。
+镜像构建会同时生成桌面前端热更新资源，通过 `/desktop/hot-manifest.json` 和 `/desktop/<version>/` 提供访问。
 
-## 步骤 3：发布微信小程序 (License Miniapp)
-小程序用作用户的“授权控制台”。
+## Windows 桌面端
 
-1. 打开 **微信开发者工具**。
-2. 导入目录：选择 `apps/license-miniapp` 文件夹。
-3. 检查效果：此时您应该能看到全新的极简深色控制台。
-4. **上传代码**：点击右上角的“上传”按钮。
-5. 登录微信公众平台，将刚刚上传的版本提交审核，审核通过后发布上线。
-
----
-
-## 步骤 4：打包桌面端客户端 (Windows Desktop App)
-桌面端是用户实际挂机跑任务的程序。
-
-1. 确保您在 `dy_fudai` 根目录下，并安装了所有依赖（如果您还没安装依赖，请运行 `npm install`）。
-2. 运行构建与打包命令：
 ```bash
-npm run desktop:build
-npm run desktop:dist
+npm ci
+npm run desktop:electron:build:win
 ```
-3. 打包完成后，您可以在 `apps/desktop/dist` 目录下找到 `.exe` 安装包。将这个安装包分发给您的用户即可。
+
+安装包输出到 `apps/desktop/dist-electron`；单独的前端构建产物位于 `apps/desktop/dist`。
+打开客户端后直接进入工作台，添加抖音账号、扫码登录并启动任务。

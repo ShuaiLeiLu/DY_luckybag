@@ -1,34 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import type { AccountSession, LicenseSnapshot } from '@shared/models'
+import type { AccountSession } from '@shared/models'
 import {
   createAccountModel,
   deriveRuntimeState,
   formatRelative,
   mergeAccountModel,
-  normalizeLicenseSnapshot,
   statusText
 } from './runtime'
-
-function createLicense(overrides: Partial<LicenseSnapshot> = {}): LicenseSnapshot {
-  return {
-    enabled: true,
-    available: true,
-    authorized: true,
-    unrestricted: false,
-    state: 'licensed',
-    message: '',
-    accessMode: 'licensed',
-    trialState: 'none',
-    trialExpireAt: 0,
-    trialRemainingSec: 0,
-    requiresActivation: false,
-    licensePlan: 'pro',
-    features: {},
-    featureFlags: {},
-    checkedAt: 0,
-    ...overrides
-  }
-}
 
 function createAccount(overrides: Partial<AccountSession> = {}): AccountSession {
   return {
@@ -70,34 +48,18 @@ function createAccount(overrides: Partial<AccountSession> = {}): AccountSession 
 }
 
 describe('runtime helpers', () => {
-  it('normalizes license snapshot fields', () => {
-    const result = normalizeLicenseSnapshot({
-      enabled: true,
-      available: true,
-      authorized: false,
-      accessMode: 'locked',
-      trialState: 'expired',
-      trialRemainingSec: 0,
-      requiresActivation: true,
-      licensePlan: 'trial-3d',
-      featureFlags: { dispatch: true }
-    })
-
-    expect(result.accessMode).toBe('locked')
-    expect(result.requiresActivation).toBe(true)
-    expect(result.featureFlags.dispatch).toBe(true)
-  })
-
-  it('derives locked runtime state from license gate', () => {
-    const account = createAccount({ actionActive: true, state: 'running' })
-    const runtimeState = deriveRuntimeState(account, createLicense({
-      authorized: false,
-      accessMode: 'locked',
-      requiresActivation: true
-    }))
-
-    expect(runtimeState).toBe('locked')
-    expect(statusText(runtimeState)).toBe('已锁定')
+  it.each([
+    [{ state: 'waiting', actionActive: false }, 'ready'],
+    [{ state: 'paused', actionActive: false }, 'paused'],
+    [{ state: 'opened', actionActive: false }, 'login_required'],
+    [{ state: 'running', actionActive: true }, 'preheating'],
+    [{ state: 'running', actionActive: true, currentTaskStage: 'claimed' }, 'claiming'],
+    [{ state: 'running', actionActive: true, currentTaskStage: 'joining' }, 'joining'],
+    [{ state: 'running', actionActive: true, currentTaskStage: 'waiting_draw' }, 'waiting_result'],
+    [{ state: 'running', actionActive: true, currentTaskStage: 'post_draw_stay' }, 'cooldown']
+  ] as const)('derives account state from its current activity: %j', (patch, expected) => {
+    const model = mergeAccountModel(createAccount(), patch)
+    expect(model.runtimeState).toBe(expected)
   })
 
   it('derives scanner runtime state when account is active', () => {
@@ -107,7 +69,7 @@ describe('runtime helpers', () => {
       state: 'running'
     })
 
-    expect(deriveRuntimeState(account, createLicense())).toBe('scanning')
+    expect(deriveRuntimeState(account)).toBe('scanning')
   })
 
   it('creates account model with defaults and trimmed nickname', () => {
@@ -131,13 +93,14 @@ describe('runtime helpers', () => {
     }), {
       state: 'opened',
       actionActive: true
-    }, createLicense())
+    })
 
     expect(model.id).toBe('account_3')
     expect(model.nickname).toBe('账号3')
     expect(model.token).toBe('session-token')
     expect(model.state).toBe('opened')
     expect(model.actionActive).toBe(true)
+    expect(model.runtimeState).toBe('ready')
   })
 
   it('formats relative seconds for dashboard chips', () => {

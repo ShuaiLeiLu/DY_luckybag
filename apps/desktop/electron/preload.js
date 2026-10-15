@@ -1,5 +1,3 @@
-const crypto = require('crypto')
-const os = require('os')
 const { contextBridge, ipcRenderer } = require('electron')
 
 const INVOKE_CHANNELS = new Set([
@@ -51,28 +49,6 @@ const EVENT_CHANNELS = new Set([
   'desktop:hot-update-state'
 ])
 
-function buildMachineFingerprint() {
-  const interfaces = os.networkInterfaces()
-  const macs = []
-  Object.values(interfaces || {}).forEach((list) => {
-    ;(Array.isArray(list) ? list : []).forEach((item) => {
-      const mac = String(item?.mac || '').trim().toLowerCase()
-      if (!mac || mac === '00:00:00:00:00:00') return
-      macs.push(mac)
-    })
-  })
-  const stableParts = [
-    os.hostname(),
-    os.platform(),
-    os.arch(),
-    ...macs.sort()
-  ]
-  const raw = stableParts.join('|')
-  return `machine_${crypto.createHash('sha256').update(raw).digest('hex').slice(0, 32)}`
-}
-
-const MACHINE_FINGERPRINT = buildMachineFingerprint()
-
 function invoke(channel, payload) {
   if (!INVOKE_CHANNELS.has(channel)) {
     throw new Error(`IPC invoke channel is not allowed: ${channel}`)
@@ -90,7 +66,6 @@ function on(channel, handler) {
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  machineFingerprint: MACHINE_FINGERPRINT,
   invoke,
   on,
   desktop: {

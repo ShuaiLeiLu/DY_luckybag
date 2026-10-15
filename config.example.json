@@ -47,12 +47,6 @@
       "allCount": 24
     }
   },
-  "miniapp": {
-    "baseUrl": "https://fudai.shuai.help/admin",
-    "rewardedVideoAdUnitId": "YOUR_AD_UNIT_ID_HERE",
-    "signinRewardDays": 1,
-    "adUnlockDays": 1
-  },
   "poolServer": {
     "server": {
       "host": "0.0.0.0",
@@ -67,28 +61,6 @@
       "expireSweepMS": 500,
       "shards": 64
     },
-    "license": {
-      "enabled": true,
-      "unrestricted": false,
-      "host": "YOUR_DB_HOST_HERE",
-      "adminToken": "YOUR_ADMIN_TOKEN_HERE",
-      "adUnlockDays": 1,
-      "miniAppEnabled": true,
-      "miniAppAppId": "YOUR_WECHAT_APP_ID_HERE",
-      "miniAppAppSecret": "YOUR_WECHAT_APP_SECRET_HERE",
-      "miniAppSessionSecret": "YOUR_SESSION_SECRET_HERE",
-      "miniAppSessionTTLMin": 1440,
-      "miniAppPagePath": "pages/index/index",
-      "miniAppEnvVersion": "release",
-      "port": 3306,
-      "user": "root",
-      "password": "YOUR_DB_PASSWORD_HERE",
-      "database": "dy_fudai_prod",
-      "params": "charset=utf8mb4&parseTime=true&loc=Local",
-      "maxOpenConns": 8,
-      "maxIdleConns": 4,
-      "connMaxLifetimeMin": 30
-    },
     "redis": {
       "enabled": true,
       "addr": "YOUR_REDIS_HOST_HERE:6379",
@@ -100,6 +72,7 @@
       "dialTimeoutMS": 2000,
       "readTimeoutMS": 3000,
       "writeTimeoutMS": 3000
-    }
+    },
+    "desktopNoticeMarkdown": ""
   }
 }

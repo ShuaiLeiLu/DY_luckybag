@@ -2,8 +2,6 @@ export const FIXED_POOL_SERVER_URL = 'http://fudai.shuai.help:9090'
 let configuredPoolServerUrl = FIXED_POOL_SERVER_URL
 const DEFAULT_TIMEOUT_MS = 3200
 const CLIENT_ID_STORAGE_KEY = 'DY_POOL_CLIENT_ID'
-const LICENSE_FP_STORAGE_KEY = 'DY_LICENSE_FINGERPRINT'
-const CURRENT_ACCOUNTS_STORAGE_KEY = 'DY_CURRENT_ACCOUNTS'
 
 type PoolFilters = Record<string, unknown>
 type PoolOptions = Record<string, any>
@@ -57,11 +55,6 @@ function appendFilters(params: URLSearchParams, filters: PoolFilters | null | un
     }
     params.set(key, String(rawValue))
   })
-}
-
-function isMachineFingerprint(value: unknown) {
-  const text = toStringValue(value)
-  return /^machine_[a-f0-9]{32}$/i.test(text)
 }
 
 function notifyPayloadError(payload: Record<string, unknown>, fallback: string) {
@@ -164,20 +157,7 @@ async function requestJSON(
   try {
     const headers: Record<string, string> = { 'content-type': 'application/json' }
     const stableClientId = toStringValue(resolvePoolClientId())
-    const stableFingerprint = toStringValue(resolveLicenseFingerprint())
-    let currentAccounts = ''
-    try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        currentAccounts = String(window.localStorage.getItem(CURRENT_ACCOUNTS_STORAGE_KEY) || '').trim()
-      }
-    } catch (_) {
-      // ignore
-    }
     if (stableClientId) headers['x-pool-client-id'] = stableClientId
-    if (stableFingerprint) headers['x-license-fingerprint'] = stableFingerprint
-    if (currentAccounts && Number.isFinite(Number(currentAccounts)) && Number(currentAccounts) >= 0) {
-      headers['x-current-accounts'] = String(Math.floor(Number(currentAccounts)))
-    }
 
     const res = await fetch(`${normalizePoolServerUrl(baseUrl)}${path}`, {
       method,
@@ -236,35 +216,6 @@ export function resolvePoolClientId() {
     }
   } catch (_) {}
   return `client_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
-}
-
-/**
- * 获取当前客户端稳定授权指纹。
- * 仅接受 Electron 主进程生成的 machine 指纹，避免随机指纹绕过设备绑定。
- * @returns {string}
- */
-export function resolveLicenseFingerprint() {
-  try {
-    const electronFingerprint = typeof window !== 'undefined'
-      ? toStringValue(window.electronAPI?.machineFingerprint)
-      : ''
-    if (isMachineFingerprint(electronFingerprint)) {
-      try {
-        if (typeof window !== 'undefined' && window.localStorage) {
-          window.localStorage.setItem(LICENSE_FP_STORAGE_KEY, electronFingerprint)
-        }
-      } catch (_) {}
-      return electronFingerprint
-    }
-  } catch (_) {}
-
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      const existing = toStringValue(window.localStorage.getItem(LICENSE_FP_STORAGE_KEY))
-      if (isMachineFingerprint(existing)) return existing
-    }
-  } catch (_) {}
-  return ''
 }
 
 /**
@@ -555,61 +506,6 @@ export async function reportPoolTaskFeedback(baseUrl: string, options: PoolOptio
 }
 
 /**
- * 上传福袋参与历史记录到服务端，供后续机器学习分析。
- * @param {string} baseUrl 服务地址
- * @param {{localHistoryId?:number,recordType?:string,clientId?:string,fingerprint?:string,appVersion?:string,accountId?:string,accountNickname?:string,roomId?:string,webRid?:string,lotteryId?:string,authorNickname?:string,lotteryName?:string,predictedProbability?:number,predictedJoinTotal?:number,joinTotal?:number,luckyCount?:number,onlineTotal?:number,totalAmount?:number,prizeType?:any,prizeInfo?:object,conditions?:Array,remainingSec?:number,serverScore?:number,startTime?:number,joinMode?:string,joinStatus?:string,resultStatus?:string,resultReason?:string,joinedAt?:number,endTime?:number,rewardAmount?:number,createdAt?:number,timeoutMs?:number}} options 参数
- * @returns {Promise<object>}
- */
-export async function uploadLotteryHistoryRecord(baseUrl: string, options: PoolOptions = {}): Promise<PoolClientResponse> {
-  const accessor = createOptionAccessor(options)
-  const res = await requestJSON(baseUrl, '/lottery/history/upload', {
-    method: 'POST',
-    body: {
-      localHistoryId: clampInt(accessor.num('localHistoryId', 0), 0, Number.MAX_SAFE_INTEGER),
-      recordType: accessor.str('recordType'),
-      clientId: accessor.str('clientId'),
-      fingerprint: accessor.str('fingerprint'),
-      appVersion: accessor.str('appVersion'),
-      accountId: accessor.str('accountId'),
-      accountNickname: accessor.str('accountNickname'),
-      roomId: accessor.str('roomId'),
-      webRid: accessor.str('webRid'),
-      lotteryId: accessor.str('lotteryId'),
-      authorNickname: accessor.str('authorNickname'),
-      lotteryName: accessor.str('lotteryName'),
-      predictedProbability: accessor.num('predictedProbability', 0),
-      predictedJoinTotal: accessor.num('predictedJoinTotal', 0),
-      joinTotal: accessor.num('joinTotal', 0),
-      luckyCount: accessor.num('luckyCount', 0),
-      onlineTotal: accessor.num('onlineTotal', 0),
-      totalAmount: accessor.num('totalAmount', 0),
-      prizeType: getOptionValue(options, 'prizeType') ?? null,
-      prizeInfo: accessor.record('prizeInfo') ?? {},
-      conditions: accessor.arr('conditions'),
-      remainingSec: accessor.num('remainingSec', 0),
-      serverScore: accessor.num('serverScore', 0),
-      startTime: accessor.num('startTime', 0),
-      joinMode: accessor.str('joinMode'),
-      joinStatus: accessor.str('joinStatus'),
-      resultStatus: accessor.str('resultStatus'),
-      resultReason: accessor.str('resultReason'),
-      joinedAt: accessor.num('joinedAt', 0),
-      endTime: accessor.num('endTime', 0),
-      rewardAmount: accessor.num('rewardAmount', 0),
-      createdAt: accessor.num('createdAt', 0)
-    },
-    timeoutMs: accessor.num('timeoutMs', 2200)
-  })
-  if (!res.ok) return res
-  const payload = isObject(res.data) ? res.data : {}
-  if (payload.ok !== true) {
-    const errorMessage = notifyPayloadError(payload, 'lottery_history_upload_failed')
-    return { ok: false, status: res.status, data: payload, error: errorMessage }
-  }
-  return { ok: true, status: res.status, data: payload }
-}
-
-/**
  * 拉取服务端任务调试摘要和当前租约列表。
  * @param {string} baseUrl 服务地址
  * @param {{clientId?:string,accountId?:string,filters?:object,limit?:number,timeoutMs?:number}} options 参数
@@ -805,137 +701,6 @@ export async function fetchPoolLearningDebug(baseUrl: string, options: PoolOptio
   const payload = isObject(res.data) ? res.data : {}
   if (payload.ok !== true) {
     const errorMessage = notifyPayloadError(payload, 'learning_debug_failed')
-    return { ok: false, status: res.status, data: payload, error: errorMessage }
-  }
-  return { ok: true, status: res.status, data: payload }
-}
-
-/**
- * 获取当前客户端授权状态。
- * @param {string} baseUrl 服务地址
- * @param {{clientId?:string,fingerprint?:string,timeoutMs?:number}} options 参数
- * @returns {Promise<object>}
- */
-export async function fetchLicenseStatus(baseUrl: string, options: PoolOptions = {}): Promise<PoolClientResponse> {
-  const accessor = createOptionAccessor(options)
-  const params = new URLSearchParams()
-  const clientId = accessor.str('clientId')
-  const fingerprint = accessor.str('fingerprint')
-  if (clientId) params.set('clientId', clientId)
-  if (fingerprint) params.set('fingerprint', fingerprint)
-  const query = params.toString()
-  const res = await requestJSON(baseUrl, `/license/status${query ? `?${query}` : ''}`, {
-    timeoutMs: accessor.num('timeoutMs', DEFAULT_TIMEOUT_MS)
-  })
-  if (!res.ok) return res
-  const payload = isObject(res.data) ? res.data : {}
-  if (payload.ok !== true) {
-    const errorMessage = notifyPayloadError(payload, 'license_status_failed')
-    return { ok: false, status: res.status, data: payload, error: errorMessage }
-  }
-  return { ok: true, status: res.status, data: payload }
-}
-
-/**
- * 使用授权码激活当前客户端。
- * @param {string} baseUrl 服务地址
- * @param {{licenseKey:string,clientId?:string,fingerprint?:string,appVersion?:string,currentAccounts?:number,timeoutMs?:number}} options 参数
- * @returns {Promise<object>}
- */
-export async function activateLicense(baseUrl: string, options: PoolOptions = {}): Promise<PoolClientResponse> {
-  const accessor = createOptionAccessor(options)
-  const res = await requestJSON(baseUrl, '/license/activate', {
-    method: 'POST',
-    body: {
-      licenseKey: accessor.str('licenseKey'),
-      clientId: accessor.str('clientId'),
-      fingerprint: accessor.str('fingerprint'),
-      appVersion: accessor.str('appVersion'),
-      currentAccounts: Math.max(0, accessor.num('currentAccounts', 0))
-    },
-    timeoutMs: accessor.num('timeoutMs', DEFAULT_TIMEOUT_MS)
-  })
-  if (!res.ok) return res
-  const payload = isObject(res.data) ? res.data : {}
-  if (payload.ok !== true) {
-    const errorMessage = notifyPayloadError(payload, 'license_activate_failed')
-    return { ok: false, status: res.status, data: payload, error: errorMessage }
-  }
-  return { ok: true, status: res.status, data: payload }
-}
-
-/**
- * 为当前设备开启一次性 3 天试用。
- * @param {string} baseUrl 服务地址
- * @param {{clientId?:string,fingerprint?:string,appVersion?:string,timeoutMs?:number}} options 参数
- * @returns {Promise<object>}
- */
-export async function startLicenseTrial(baseUrl: string, options: PoolOptions = {}): Promise<PoolClientResponse> {
-  const accessor = createOptionAccessor(options)
-  const res = await requestJSON(baseUrl, '/license/trial/start', {
-    method: 'POST',
-    body: {
-      clientId: accessor.str('clientId'),
-      fingerprint: accessor.str('fingerprint'),
-      appVersion: accessor.str('appVersion')
-    },
-    timeoutMs: accessor.num('timeoutMs', DEFAULT_TIMEOUT_MS)
-  })
-  if (!res.ok) return res
-  const payload = isObject(res.data) ? res.data : {}
-  if (payload.ok !== true) {
-    const errorMessage = notifyPayloadError(payload, 'license_trial_start_failed')
-    return { ok: false, status: res.status, data: payload, error: errorMessage }
-  }
-  return { ok: true, status: res.status, data: payload }
-}
-
-/**
- * 创建一次性扫码绑定会话，二维码 60 秒内有效。
- * @param {string} baseUrl 服务地址
- * @param {{clientId?:string,fingerprint?:string,appVersion?:string,adUnlockDays?:number,timeoutMs?:number}} options 参数
- * @returns {Promise<object>}
- */
-export async function createLicenseBindSession(baseUrl: string, options: PoolOptions = {}): Promise<PoolClientResponse> {
-  const accessor = createOptionAccessor(options)
-  const res = await requestJSON(baseUrl, '/license/bind-session/create', {
-    method: 'POST',
-    body: {
-      clientId: accessor.str('clientId'),
-      fingerprint: accessor.str('fingerprint'),
-      appVersion: accessor.str('appVersion'),
-      adUnlockDays: Math.max(0, accessor.num('adUnlockDays', 0))
-    },
-    timeoutMs: accessor.num('timeoutMs', DEFAULT_TIMEOUT_MS)
-  })
-  if (!res.ok) return res
-  const payload = isObject(res.data) ? res.data : {}
-  if (payload.ok !== true) {
-    const errorMessage = notifyPayloadError(payload, 'license_bind_create_failed')
-    return { ok: false, status: res.status, data: payload, error: errorMessage }
-  }
-  return { ok: true, status: res.status, data: payload }
-}
-
-/**
- * 查询一次性扫码绑定会话状态，供客户端轮询授权结果。
- * @param {string} baseUrl 服务地址
- * @param {{bindToken?:string,timeoutMs?:number}} options 参数
- * @returns {Promise<object>}
- */
-export async function fetchLicenseBindSessionStatus(baseUrl: string, options: PoolOptions = {}): Promise<PoolClientResponse> {
-  const accessor = createOptionAccessor(options)
-  const params = new URLSearchParams()
-  const bindToken = accessor.str('bindToken')
-  if (bindToken) params.set('bindToken', bindToken)
-  const query = params.toString()
-  const res = await requestJSON(baseUrl, `/license/bind-session/status${query ? `?${query}` : ''}`, {
-    timeoutMs: accessor.num('timeoutMs', DEFAULT_TIMEOUT_MS)
-  })
-  if (!res.ok) return res
-  const payload = isObject(res.data) ? res.data : {}
-  if (payload.ok !== true) {
-    const errorMessage = notifyPayloadError(payload, 'license_bind_status_failed')
     return { ok: false, status: res.status, data: payload, error: errorMessage }
   }
   return { ok: true, status: res.status, data: payload }

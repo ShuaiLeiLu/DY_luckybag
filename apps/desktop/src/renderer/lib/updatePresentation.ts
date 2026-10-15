@@ -1,21 +1,7 @@
-﻿import type { LicenseSnapshot, UpdateSnapshot } from '@shared/models'
+import type { UpdateSnapshot } from '@shared/models'
 
 function normalizeKey(value: unknown) {
   return String(value || '').trim().toLowerCase()
-}
-
-/**
- * 授权模式文案映射。
- * 兼容服务端扩展值（如 unrestricted_server / unrestricted (server)）。
- */
-export function formatAccessModeText(accessMode: LicenseSnapshot['accessMode'] | string) {
-  const key = normalizeKey(accessMode)
-  if (!key || key === 'disabled') return '未启用'
-  if (key.includes('unrestricted')) return '服务端免授权'
-  if (key.includes('licensed') || key.includes('pro')) return '正式授权'
-  if (key.includes('trial')) return '试用中'
-  if (key.includes('locked') || key.includes('forbidden')) return '已锁定'
-  return String(accessMode || '未知模式')
 }
 
 /**
@@ -46,19 +32,4 @@ export function formatHotUpdateStatusText(status: string) {
   if (key.includes('applied') || key.includes('ready')) return '前端已更新'
   if (key.includes('error') || key.includes('failed')) return '更新异常'
   return String(status || '未知状态')
-}
-
-/**
- * 授权计划文案映射。
- */
-export function formatLicensePlanText(license: LicenseSnapshot) {
-  const raw = String(license?.licensePlan || '').trim()
-  const key = raw.toLowerCase()
-  if (!key) {
-    return license.authorized ? formatAccessModeText(license.accessMode) : '未授权'
-  }
-  if (key.includes('unrestricted')) return '服务端免授权'
-  if (key.includes('trial')) return '3天试用'
-  if (key.includes('licensed') || key.includes('pro')) return '正式授权'
-  return raw
 }

@@ -27,8 +27,7 @@ COPY cmd ./cmd
 COPY internal ./internal
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /out/poolserver ./cmd/poolserver && \
-    go build -trimpath -ldflags="-s -w" -o /out/licenseadmin ./cmd/licenseadmin
+    go build -trimpath -ldflags="-s -w" -o /out/poolserver ./cmd/poolserver
 
 FROM alpine:3.20
 
@@ -38,7 +37,6 @@ RUN addgroup -S app && adduser -S -G app app \
 WORKDIR /app
 
 COPY --from=builder /out/poolserver /app/poolserver
-COPY --from=builder /out/licenseadmin /app/licenseadmin
 COPY static /app/static
 
 ENV POOL_SERVER_HOST=0.0.0.0
@@ -46,7 +44,7 @@ ENV POOL_SERVER_PORT=9090
 ENV POOL_CONFIG_FILE=/app/config.json
 ENV POOL_DESKTOP_STATIC_DIR=/app/static/desktop
 
-EXPOSE 9090 9091
+EXPOSE 9090
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
   CMD wget -q -T 2 -O - http://127.0.0.1:9090/health >/dev/null || exit 1

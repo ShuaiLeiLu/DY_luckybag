@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	licensepkg "dy_fudai/pool-server-go/internal/license"
 	"dy_fudai/pool-server-go/internal/pool"
 )
 
@@ -31,7 +29,8 @@ type taskOwnerRequest struct {
 }
 
 type fileConfig struct {
-	Server struct {
+	DesktopNoticeMarkdown string `json:"desktopNoticeMarkdown"`
+	Server                struct {
 		Host         string `json:"host"`
 		Port         int    `json:"port"`
 		MaxBodyBytes int64  `json:"maxBodyBytes"`
@@ -47,29 +46,6 @@ type fileConfig struct {
 		LearningWinWeight  float64 `json:"learningWinWeight"`
 		FeedbackLogPath    string  `json:"feedbackLogPath"`
 	} `json:"pool"`
-	License struct {
-		Enabled              bool   `json:"enabled"`
-		Unrestricted         bool   `json:"unrestricted"`
-		AdminToken           string `json:"adminToken"`
-		AdUnlockDays         int    `json:"adUnlockDays"`
-		MiniAppEnabled       bool   `json:"miniAppEnabled"`
-		MiniAppAppID         string `json:"miniAppAppId"`
-		MiniAppAppSecret     string `json:"miniAppAppSecret"`
-		MiniAppSessionSecret string `json:"miniAppSessionSecret"`
-		MiniAppSessionTTLMin int    `json:"miniAppSessionTTLMin"`
-		MiniAppPagePath      string `json:"miniAppPagePath"`
-		MiniAppEnvVersion    string `json:"miniAppEnvVersion"`
-		DSN                  string `json:"dsn"`
-		Host                 string `json:"host"`
-		Port                 int    `json:"port"`
-		User                 string `json:"user"`
-		Password             string `json:"password"`
-		Database             string `json:"database"`
-		Params               string `json:"params"`
-		MaxOpenConns         int    `json:"maxOpenConns"`
-		MaxIdleConns         int    `json:"maxIdleConns"`
-		ConnMaxLifetimeMin   int    `json:"connMaxLifetimeMin"`
-	} `json:"license"`
 	Redis struct {
 		Enabled        bool   `json:"enabled"`
 		Addr           string `json:"addr"`
@@ -157,7 +133,7 @@ func loadConfigFile(path string) (fileConfig, bool, error) {
 		return cfg, true, nil
 	}
 
-	// 兼容旧配置：直接使用 server/pool/license/redis 作为根结构。
+	// 兼容旧配置：直接使用 server/pool/redis 作为根结构。
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, false, err
 	}
@@ -201,168 +177,9 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "content-type,x-pool-client-id,x-license-fingerprint,x-client-id,x-current-accounts,x-admin-token,authorization")
+	w.Header().Set("Access-Control-Allow-Headers", "content-type,x-pool-client-id")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if s := strings.TrimSpace(v); s != "" {
-			return s
-		}
-	}
-	return ""
-}
-
-func extractLicenseIdentity(r *http.Request) (string, string) {
-	clientID := firstNonEmpty(
-		r.URL.Query().Get("clientId"),
-		r.Header.Get("x-pool-client-id"),
-		r.Header.Get("x-client-id"),
-	)
-	fingerprint := firstNonEmpty(
-		r.URL.Query().Get("fingerprint"),
-		r.Header.Get("x-license-fingerprint"),
-	)
-	return clientID, fingerprint
-}
-
-func extractCurrentAccountsHint(r *http.Request) (int, bool) {
-	raw := firstNonEmpty(
-		r.URL.Query().Get("currentAccounts"),
-		r.Header.Get("x-current-accounts"),
-	)
-	if raw == "" {
-		return 0, false
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil || n < 0 {
-		return 0, false
-	}
-	return n, true
-}
-
-func writeLicenseGuardErr(w http.ResponseWriter, httpStatus int, errCode, msg string, status map[string]any) {
-	payload := map[string]any{
-		"ok":    false,
-		"error": errCode,
-	}
-	if msg != "" {
-		payload["message"] = msg
-	}
-	if status != nil {
-		payload["license"] = status
-	}
-	writeJSON(w, httpStatus, payload)
-}
-
-func ensureLicenseAuthorized(w http.ResponseWriter, r *http.Request, licenseSvc *licensepkg.Service) bool {
-	if licenseSvc == nil {
-		return true
-	}
-	if unrestricted, err := licenseSvc.IsUnrestricted(r.Context()); err == nil && unrestricted {
-		clientID, fingerprint := extractLicenseIdentity(r)
-		if clientID != "" && fingerprint != "" {
-			_, _ = licenseSvc.Status(r.Context(), clientID, fingerprint)
-		}
-		return true
-	} else if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"ok":    false,
-			"error": "license_backend_unavailable",
-			"license": map[string]any{
-				"enabled":      true,
-				"available":    false,
-				"authorized":   false,
-				"unrestricted": false,
-				"state":        "backend_unavailable",
-				"message":      "授权服务不可用",
-				"checkedAt":    time.Now().UnixMilli(),
-			},
-		})
-		return false
-	}
-
-	clientID, fingerprint := extractLicenseIdentity(r)
-	if clientID == "" {
-		writeLicenseGuardErr(w, http.StatusUnauthorized, "license_client_id_required", "缺少 clientId", map[string]any{
-			"enabled":      true,
-			"available":    true,
-			"authorized":   false,
-			"unrestricted": false,
-			"state":        "invalid_client",
-			"message":      "缺少 clientId",
-			"checkedAt":    time.Now().UnixMilli(),
-		})
-		return false
-	}
-	if fingerprint == "" {
-		writeLicenseGuardErr(w, http.StatusUnauthorized, "license_fingerprint_required", "缺少 fingerprint", map[string]any{
-			"enabled":      true,
-			"available":    true,
-			"authorized":   false,
-			"unrestricted": false,
-			"state":        "invalid_fingerprint",
-			"message":      "缺少设备指纹",
-			"checkedAt":    time.Now().UnixMilli(),
-		})
-		return false
-	}
-
-	status, err := licenseSvc.Status(r.Context(), clientID, fingerprint)
-	if err != nil && status.Available == false {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"ok":      false,
-			"error":   "license_backend_unavailable",
-			"license": status,
-		})
-		return false
-	}
-	if status.Enabled != true {
-		return true
-	}
-	if status.Authorized != true {
-		writeJSON(w, http.StatusForbidden, map[string]any{
-			"ok":      false,
-			"error":   "license_not_authorized",
-			"license": status,
-		})
-		return false
-	}
-	return true
-}
-
-func extractAdminToken(r *http.Request) string {
-	bearer := ""
-	auth := strings.TrimSpace(r.Header.Get("authorization"))
-	if len(auth) > 7 && strings.EqualFold(auth[:7], "bearer ") {
-		bearer = strings.TrimSpace(auth[7:])
-	}
-	return firstNonEmpty(
-		r.Header.Get("x-admin-token"),
-		bearer,
-	)
-}
-
-func ensureAdminAuthorized(w http.ResponseWriter, r *http.Request, expectedToken string) bool {
-	adminToken := strings.TrimSpace(expectedToken)
-	if adminToken == "" {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"ok":    false,
-			"error": "admin_not_configured",
-		})
-		return false
-	}
-	gotToken := strings.TrimSpace(extractAdminToken(r))
-	if gotToken == "" || subtle.ConstantTimeCompare([]byte(gotToken), []byte(adminToken)) != 1 {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{
-			"ok":    false,
-			"error": "admin_unauthorized",
-		})
-		return false
-	}
-	return true
 }
 
 // parseBody 方法：解析请求体。
@@ -608,102 +425,6 @@ func main() {
 		pc.FeedbackLogPath = v
 	}
 
-	lc := licensepkg.Config{
-		Enabled:              false,
-		DefaultUnrestricted:  false,
-		Host:                 "127.0.0.1",
-		Port:                 3306,
-		User:                 "root",
-		Database:             "dy_fudai",
-		Params:               "charset=utf8mb4&parseTime=true&loc=Local",
-		MaxOpenConns:         8,
-		MaxIdleConns:         4,
-		ConnMaxLifetimeMin:   30,
-		MiniAppEnabled:       false,
-		MiniAppSessionTTLMin: 1440,
-		MiniAppPagePath:      "pages/index/index",
-		MiniAppEnvVersion:    "release",
-	}
-	adminToken := ""
-	adminPortalURL := "http://127.0.0.1:9091/admin"
-	licenseAdUnlockDays := 1
-	if hasFileCfg {
-		lc.Enabled = fileCfg.License.Enabled
-		lc.DefaultUnrestricted = fileCfg.License.Unrestricted
-		adminToken = strings.TrimSpace(fileCfg.License.AdminToken)
-		if fileCfg.License.AdUnlockDays > 0 {
-			licenseAdUnlockDays = fileCfg.License.AdUnlockDays
-		}
-		lc.MiniAppEnabled = fileCfg.License.MiniAppEnabled
-		lc.MiniAppAppID = strings.TrimSpace(fileCfg.License.MiniAppAppID)
-		lc.MiniAppAppSecret = strings.TrimSpace(fileCfg.License.MiniAppAppSecret)
-		lc.MiniAppSessionSecret = strings.TrimSpace(fileCfg.License.MiniAppSessionSecret)
-		if fileCfg.License.MiniAppSessionTTLMin > 0 {
-			lc.MiniAppSessionTTLMin = fileCfg.License.MiniAppSessionTTLMin
-		}
-		if strings.TrimSpace(fileCfg.License.MiniAppPagePath) != "" {
-			lc.MiniAppPagePath = strings.TrimSpace(fileCfg.License.MiniAppPagePath)
-		}
-		if strings.TrimSpace(fileCfg.License.MiniAppEnvVersion) != "" {
-			lc.MiniAppEnvVersion = strings.TrimSpace(fileCfg.License.MiniAppEnvVersion)
-		}
-		if strings.TrimSpace(fileCfg.License.DSN) != "" {
-			lc.DSN = strings.TrimSpace(fileCfg.License.DSN)
-		}
-		if strings.TrimSpace(fileCfg.License.Host) != "" {
-			lc.Host = strings.TrimSpace(fileCfg.License.Host)
-		}
-		if fileCfg.License.Port > 0 {
-			lc.Port = fileCfg.License.Port
-		}
-		if strings.TrimSpace(fileCfg.License.User) != "" {
-			lc.User = strings.TrimSpace(fileCfg.License.User)
-		}
-		if strings.TrimSpace(fileCfg.License.Password) != "" {
-			lc.Password = fileCfg.License.Password
-		}
-		if strings.TrimSpace(fileCfg.License.Database) != "" {
-			lc.Database = strings.TrimSpace(fileCfg.License.Database)
-		}
-		if strings.TrimSpace(fileCfg.License.Params) != "" {
-			lc.Params = strings.TrimSpace(fileCfg.License.Params)
-		}
-		if fileCfg.License.MaxOpenConns > 0 {
-			lc.MaxOpenConns = fileCfg.License.MaxOpenConns
-		}
-		if fileCfg.License.MaxIdleConns > 0 {
-			lc.MaxIdleConns = fileCfg.License.MaxIdleConns
-		}
-		if fileCfg.License.ConnMaxLifetimeMin > 0 {
-			lc.ConnMaxLifetimeMin = fileCfg.License.ConnMaxLifetimeMin
-		}
-	}
-	lc.Enabled = getenvBool("POOL_LICENSE_ENABLED", lc.Enabled)
-	lc.DefaultUnrestricted = getenvBool("POOL_LICENSE_UNRESTRICTED", lc.DefaultUnrestricted)
-	lc.MiniAppEnabled = getenvBool("POOL_LICENSE_MINIAPP_ENABLED", lc.MiniAppEnabled)
-	lc.MiniAppAppID = getenvStr("POOL_LICENSE_MINIAPP_APP_ID", lc.MiniAppAppID)
-	lc.MiniAppAppSecret = getenvStr("POOL_LICENSE_MINIAPP_APP_SECRET", lc.MiniAppAppSecret)
-	lc.MiniAppSessionSecret = getenvStr("POOL_LICENSE_MINIAPP_SESSION_SECRET", lc.MiniAppSessionSecret)
-	lc.MiniAppSessionTTLMin = getenvInt("POOL_LICENSE_MINIAPP_SESSION_TTL_MIN", lc.MiniAppSessionTTLMin)
-	lc.MiniAppPagePath = getenvStr("POOL_LICENSE_MINIAPP_PAGE_PATH", lc.MiniAppPagePath)
-	lc.MiniAppEnvVersion = getenvStr("POOL_LICENSE_MINIAPP_ENV_VERSION", lc.MiniAppEnvVersion)
-	lc.DSN = getenvStr("POOL_LICENSE_DSN", lc.DSN)
-	lc.Host = getenvStr("POOL_LICENSE_MYSQL_HOST", lc.Host)
-	lc.Port = getenvInt("POOL_LICENSE_MYSQL_PORT", lc.Port)
-	lc.User = getenvStr("POOL_LICENSE_MYSQL_USER", lc.User)
-	lc.Password = getenvStr("POOL_LICENSE_MYSQL_PASSWORD", lc.Password)
-	lc.Database = getenvStr("POOL_LICENSE_MYSQL_DATABASE", lc.Database)
-	lc.Params = getenvStr("POOL_LICENSE_MYSQL_PARAMS", lc.Params)
-	lc.MaxOpenConns = getenvInt("POOL_LICENSE_MYSQL_MAX_OPEN_CONNS", lc.MaxOpenConns)
-	lc.MaxIdleConns = getenvInt("POOL_LICENSE_MYSQL_MAX_IDLE_CONNS", lc.MaxIdleConns)
-	lc.ConnMaxLifetimeMin = getenvInt("POOL_LICENSE_MYSQL_CONN_MAX_LIFETIME_MIN", lc.ConnMaxLifetimeMin)
-	adminToken = strings.TrimSpace(getenvStr("POOL_LICENSE_ADMIN_TOKEN", getenvStr("LICENSE_ADMIN_TOKEN", adminToken)))
-	adminPortalURL = strings.TrimSpace(getenvStr("POOL_ADMIN_PORTAL_URL", adminPortalURL))
-	licenseAdUnlockDays = getenvInt("POOL_LICENSE_AD_UNLOCK_DAYS", licenseAdUnlockDays)
-	if licenseAdUnlockDays <= 0 {
-		licenseAdUnlockDays = 1
-	}
-
 	rc := pool.DefaultRedisConfig()
 	redisEnabled := false
 	if hasFileCfg {
@@ -766,25 +487,7 @@ func main() {
 		_ = svc.Close()
 	}()
 
-	licenseSvc, licenseErr := licensepkg.NewService(lc)
-	if licenseErr != nil {
-		log.Printf("[pool-server-go] license init failed: %v", licenseErr)
-	} else if lc.Enabled {
-		log.Printf("[pool-server-go] license=mysql host=%s port=%d db=%s unrestrictedDefault=%v", lc.Host, lc.Port, lc.Database, lc.DefaultUnrestricted)
-	} else {
-		log.Printf("[pool-server-go] license=disabled")
-	}
-	if strings.TrimSpace(adminToken) != "" {
-		log.Printf("[pool-server-go] license-admin-token=enabled")
-	} else {
-		log.Printf("[pool-server-go] license-admin=disabled (set POOL_LICENSE_ADMIN_TOKEN)")
-	}
-	log.Printf("[pool-server-go] admin portal=%s", adminPortalURL)
-	defer func() {
-		if licenseSvc != nil {
-			_ = licenseSvc.Close()
-		}
-	}()
+	noticeMarkdown := strings.TrimSpace(getenvStr("POOL_DESKTOP_NOTICE_MARKDOWN", fileCfg.DesktopNoticeMarkdown))
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -852,148 +555,6 @@ func main() {
 		})
 	})
 
-	mux.HandleFunc("/license/status", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"ok": true,
-				"license": map[string]any{
-					"enabled":    false,
-					"available":  false,
-					"authorized": false,
-					"state":      "disabled",
-					"message":    "未启用授权",
-					"checkedAt":  time.Now().UnixMilli(),
-					"features":   map[string]any{},
-				},
-			})
-			return
-		}
-
-		clientID := strings.TrimSpace(r.URL.Query().Get("clientId"))
-		fingerprint := strings.TrimSpace(r.URL.Query().Get("fingerprint"))
-		status, err := licenseSvc.Status(r.Context(), clientID, fingerprint)
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "license": status})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "license": status})
-	})
-
-	mux.HandleFunc("/license/activate", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"ok":    false,
-				"error": "license_disabled",
-				"license": map[string]any{
-					"enabled":    false,
-					"available":  false,
-					"authorized": false,
-					"state":      "disabled",
-					"message":    "未启用授权",
-					"checkedAt":  time.Now().UnixMilli(),
-					"features":   map[string]any{},
-				},
-			})
-			return
-		}
-
-		var req struct {
-			LicenseKey   string `json:"licenseKey"`
-			ClientID     string `json:"clientId"`
-			Fingerprint  string `json:"fingerprint"`
-			AppVersion   string `json:"appVersion"`
-			CurrentAccts int    `json:"currentAccounts"`
-		}
-		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
-			writeBodyErr(w, err)
-			return
-		}
-
-		status, err := licenseSvc.Activate(r.Context(), licensepkg.ActivateRequest{
-			LicenseKey:   req.LicenseKey,
-			ClientID:     req.ClientID,
-			Fingerprint:  req.Fingerprint,
-			AppVersion:   req.AppVersion,
-			CurrentAccts: req.CurrentAccts,
-		})
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error(), "license": status})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "license": status})
-	})
-
-	mux.HandleFunc("/license/trial/start", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"ok":    false,
-				"error": "license_disabled",
-				"license": map[string]any{
-					"enabled":            false,
-					"available":          false,
-					"authorized":         false,
-					"state":              "disabled",
-					"message":            "未启用授权",
-					"checkedAt":          time.Now().UnixMilli(),
-					"features":           map[string]any{},
-					"featureFlags":       map[string]bool{},
-					"accessMode":         "disabled",
-					"trialState":         "none",
-					"trialExpireAt":      int64(0),
-					"trialRemainingSec":  int64(0),
-					"requiresActivation": false,
-					"licensePlan":        "",
-				},
-			})
-			return
-		}
-
-		var req struct {
-			ClientID    string `json:"clientId"`
-			Fingerprint string `json:"fingerprint"`
-			AppVersion  string `json:"appVersion"`
-		}
-		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
-			writeBodyErr(w, err)
-			return
-		}
-
-		status, err := licenseSvc.StartTrial(r.Context(), licensepkg.TrialRequest{
-			ClientID:    req.ClientID,
-			Fingerprint: req.Fingerprint,
-			AppVersion:  req.AppVersion,
-		})
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error(), "license": status})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "license": status})
-	})
-
 	mux.HandleFunc("/desktop/notice", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions {
 			writeJSON(w, http.StatusNoContent, map[string]any{})
@@ -1003,454 +564,12 @@ func main() {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 			return
 		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "markdown": ""})
-			return
-		}
-		markdown, err := licenseSvc.GetDesktopNoticeMarkdown(r.Context())
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "desktop_notice_unavailable", "markdown": ""})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "markdown": markdown})
-	})
-
-	mux.HandleFunc("/license/bind-session/create", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-
-		var req struct {
-			ClientID     string `json:"clientId"`
-			Fingerprint  string `json:"fingerprint"`
-			AppVersion   string `json:"appVersion"`
-			AdUnlockDays int    `json:"adUnlockDays"`
-		}
-		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
-			writeBodyErr(w, err)
-			return
-		}
-		if req.AdUnlockDays <= 0 {
-			req.AdUnlockDays = licenseAdUnlockDays
-		}
-		session, err := licenseSvc.CreateBindSession(r.Context(), licensepkg.CreateBindSessionRequest{
-			ClientID:     req.ClientID,
-			Fingerprint:  req.Fingerprint,
-			AppVersion:   req.AppVersion,
-			AdUnlockDays: req.AdUnlockDays,
-		})
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":      true,
-			"session": session,
-			"qrText":  strings.TrimSpace(session.BindToken),
-		})
-	})
-
-	mux.HandleFunc("/license/bind-session/status", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-
-		bindToken := strings.TrimSpace(r.URL.Query().Get("bindToken"))
-		session, err := licenseSvc.GetBindSession(r.Context(), bindToken)
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":      true,
-			"session": session,
-			"qrText":  strings.TrimSpace(session.BindToken),
-		})
-	})
-
-	mux.HandleFunc("/license/bind-session/miniapp-code", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-
-		bindRef := firstNonEmpty(
-			strings.TrimSpace(r.URL.Query().Get("sceneCode")),
-			strings.TrimSpace(r.URL.Query().Get("scene")),
-			strings.TrimSpace(r.URL.Query().Get("bindToken")),
-		)
-		imageBytes, contentType, err := licenseSvc.GetMiniAppCodeImage(r.Context(), bindRef)
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "content-type")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(imageBytes)
-	})
-
-	mux.HandleFunc("/license/bind-session/scan-code", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-
-		bindRef := firstNonEmpty(
-			strings.TrimSpace(r.URL.Query().Get("sceneCode")),
-			strings.TrimSpace(r.URL.Query().Get("scene")),
-			strings.TrimSpace(r.URL.Query().Get("bindToken")),
-		)
-		imageBytes, contentType, err := licenseSvc.GetMiniAppScanCodeImage(r.Context(), bindRef)
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "content-type")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(imageBytes)
-	})
-
-	mux.HandleFunc("/license/bind-session/scan", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureAdminAuthorized(w, r, adminToken) {
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-
-		var req struct {
-			BindToken string `json:"bindToken"`
-			OpenID    string `json:"openId"`
-			UnionID   string `json:"unionId"`
-			Nickname  string `json:"nickname"`
-		}
-		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
-			writeBodyErr(w, err)
-			return
-		}
-		session, err := licenseSvc.MarkBindSessionScanned(r.Context(), licensepkg.BindSessionScanRequest{
-			BindToken: req.BindToken,
-			OpenID:    req.OpenID,
-			UnionID:   req.UnionID,
-			Nickname:  req.Nickname,
-		})
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": session})
-	})
-
-	mux.HandleFunc("/license/bind-session/grant", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureAdminAuthorized(w, r, adminToken) {
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-
-		var req struct {
-			BindToken string `json:"bindToken"`
-			Days      int    `json:"days"`
-		}
-		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
-			writeBodyErr(w, err)
-			return
-		}
-		if req.Days <= 0 {
-			req.Days = licenseAdUnlockDays
-		}
-		session, err := licenseSvc.GrantBindSession(r.Context(), licensepkg.BindSessionGrantRequest{
-			BindToken: req.BindToken,
-			Days:      req.Days,
-		})
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": session})
-	})
-
-	mux.HandleFunc("/miniapp/auth/login", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-		var req struct {
-			Code string `json:"code"`
-		}
-		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
-			writeBodyErr(w, err)
-			return
-		}
-		session, err := licenseSvc.MiniAppLogin(r.Context(), req.Code)
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": session})
-	})
-
-	mux.HandleFunc("/miniapp/bootstrap", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		unrestricted := false
-		if licenseSvc != nil {
-			if value, err := licenseSvc.IsUnrestricted(r.Context()); err == nil {
-				unrestricted = value
-			}
-		}
-		reason := ""
-		message := "ok"
-		ready := false
-		switch {
-		case !lc.Enabled:
-			reason = "license_disabled"
-			message = "授权服务未启用"
-		case licenseErr != nil:
-			reason = "license_service_init_failed"
-			message = "授权服务初始化失败"
-		case unrestricted:
-			reason = "license_unrestricted"
-			message = "服务端免授权已开启"
-			ready = true
-		case !lc.MiniAppEnabled:
-			reason = "miniapp_disabled"
-			message = "小程序授权未启用"
-		case strings.TrimSpace(lc.MiniAppAppID) == "" || strings.TrimSpace(lc.MiniAppAppSecret) == "":
-			reason = "miniapp_config_incomplete"
-			message = "服务端未配置小程序参数"
-		case strings.TrimSpace(lc.MiniAppSessionSecret) == "":
-			reason = "miniapp_session_secret_required"
-			message = "服务端缺少会话密钥"
-		default:
-			ready = true
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true,
-			"bootstrap": map[string]any{
-				"licenseEnabled": lc.Enabled,
-				"unrestricted":   unrestricted,
-				"miniAppEnabled": lc.MiniAppEnabled,
-				"ready":          ready,
-				"reason":         reason,
-				"message":        message,
-				"adUnlockDays":   licenseAdUnlockDays,
-				"pagePath":       lc.MiniAppPagePath,
-				"envVersion":     lc.MiniAppEnvVersion,
-				"serverTime":     time.Now().UnixMilli(),
-			},
-		})
-	})
-
-	mux.HandleFunc("/miniapp/bind-session/status", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-		bindRef := firstNonEmpty(
-			strings.TrimSpace(r.URL.Query().Get("scene")),
-			strings.TrimSpace(r.URL.Query().Get("sceneCode")),
-			strings.TrimSpace(r.URL.Query().Get("bindToken")),
-		)
-		session, err := licenseSvc.MiniAppGetBindSession(r.Context(), bindRef)
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": session})
-	})
-
-	mux.HandleFunc("/miniapp/bind-session/scan", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-		var req struct {
-			BindToken    string `json:"bindToken"`
-			Scene        string `json:"scene"`
-			SceneCode    string `json:"sceneCode"`
-			SessionToken string `json:"sessionToken"`
-			Nickname     string `json:"nickname"`
-		}
-		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
-			writeBodyErr(w, err)
-			return
-		}
-		bindRef := firstNonEmpty(req.Scene, req.SceneCode, req.BindToken)
-		session, err := licenseSvc.MiniAppScanBindSession(r.Context(), bindRef, req.SessionToken, req.Nickname)
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": session})
-	})
-
-	mux.HandleFunc("/miniapp/bind-session/grant", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-		var req struct {
-			BindToken    string `json:"bindToken"`
-			Scene        string `json:"scene"`
-			SceneCode    string `json:"sceneCode"`
-			SessionToken string `json:"sessionToken"`
-			Days         int    `json:"days"`
-		}
-		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
-			writeBodyErr(w, err)
-			return
-		}
-		if req.Days <= 0 {
-			req.Days = licenseAdUnlockDays
-		}
-		bindRef := firstNonEmpty(req.Scene, req.SceneCode, req.BindToken)
-		session, err := licenseSvc.MiniAppGrantBindSession(r.Context(), bindRef, req.SessionToken, req.Days)
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": session})
-	})
-
-	mux.HandleFunc("/admin", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		target := strings.TrimSpace(adminPortalURL)
-		if target == "" {
-			writeJSON(w, http.StatusGone, map[string]any{
-				"ok":      false,
-				"error":   "admin_moved",
-				"message": "管理后台已迁移至独立服务，请联系管理员获取入口。",
-			})
-			return
-		}
-		http.Redirect(w, r, target, http.StatusTemporaryRedirect)
-	})
-	mux.HandleFunc("/admin/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		writeJSON(w, http.StatusGone, map[string]any{
-			"ok":      false,
-			"error":   "admin_moved",
-			"message": "管理后台接口已迁移到独立服务。",
-			"portal":  strings.TrimSpace(adminPortalURL),
-		})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "markdown": noticeMarkdown})
 	})
 
 	mux.HandleFunc("/filter/profile", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions {
 			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 		switch r.Method {
@@ -1478,9 +597,6 @@ func main() {
 		}
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 
@@ -1608,9 +724,6 @@ func main() {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 			return
 		}
-		if !ensureLicenseAuthorized(w, r, licenseSvc) {
-			return
-		}
 		limit := 50
 		if s := r.URL.Query().Get("limit"); s != "" {
 			if n, err := strconv.Atoi(s); err == nil && n > 0 {
@@ -1660,9 +773,6 @@ func main() {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 			return
 		}
-		if !ensureLicenseAuthorized(w, r, licenseSvc) {
-			return
-		}
 
 		clientID := strings.TrimSpace(r.URL.Query().Get("clientId"))
 		if clientID == "" {
@@ -1689,9 +799,6 @@ func main() {
 		}
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 
@@ -1731,9 +838,6 @@ func main() {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 			return
 		}
-		if !ensureLicenseAuthorized(w, r, licenseSvc) {
-			return
-		}
 
 		var req struct {
 			ClientID   string `json:"clientId"`
@@ -1767,9 +871,6 @@ func main() {
 		}
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 
@@ -1819,9 +920,6 @@ func main() {
 		}
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 
@@ -1877,9 +975,6 @@ func main() {
 		}
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 
@@ -1944,9 +1039,6 @@ func main() {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 			return
 		}
-		if !ensureLicenseAuthorized(w, r, licenseSvc) {
-			return
-		}
 
 		var req struct {
 			ClientID  string `json:"clientId"`
@@ -1976,9 +1068,6 @@ func main() {
 		}
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 
@@ -2012,9 +1101,6 @@ func main() {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 			return
 		}
-		if !ensureLicenseAuthorized(w, r, licenseSvc) {
-			return
-		}
 
 		var req struct {
 			ClientID        string `json:"clientId"`
@@ -2045,9 +1131,6 @@ func main() {
 		}
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 
@@ -2123,111 +1206,6 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "recorded": true})
 	})
 
-	mux.HandleFunc("/lottery/history/upload", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			writeJSON(w, http.StatusNoContent, map[string]any{})
-			return
-		}
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureLicenseAuthorized(w, r, licenseSvc) {
-			return
-		}
-		if licenseSvc == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "license_service_unavailable"})
-			return
-		}
-
-		var req struct {
-			LocalHistoryID       int64          `json:"localHistoryId"`
-			RecordType           string         `json:"recordType"`
-			ClientID             string         `json:"clientId"`
-			Fingerprint          string         `json:"fingerprint"`
-			AppVersion           string         `json:"appVersion"`
-			AccountID            string         `json:"accountId"`
-			AccountNickname      string         `json:"accountNickname"`
-			RoomID               string         `json:"roomId"`
-			WebRid               string         `json:"webRid"`
-			LotteryID            string         `json:"lotteryId"`
-			AuthorNickname       string         `json:"authorNickname"`
-			LotteryName          string         `json:"lotteryName"`
-			PredictedProbability float64        `json:"predictedProbability"`
-			PredictedJoinTotal   float64        `json:"predictedJoinTotal"`
-			JoinTotal            float64        `json:"joinTotal"`
-			LuckyCount           float64        `json:"luckyCount"`
-			OnlineTotal          float64        `json:"onlineTotal"`
-			TotalAmount          float64        `json:"totalAmount"`
-			PrizeType            any            `json:"prizeType"`
-			PrizeInfo            map[string]any `json:"prizeInfo"`
-			Conditions           []any          `json:"conditions"`
-			RemainingSec         float64        `json:"remainingSec"`
-			ServerScore          float64        `json:"serverScore"`
-			StartTime            int64          `json:"startTime"`
-			JoinMode             string         `json:"joinMode"`
-			JoinStatus           string         `json:"joinStatus"`
-			ResultStatus         string         `json:"resultStatus"`
-			ResultReason         string         `json:"resultReason"`
-			JoinedAt             int64          `json:"joinedAt"`
-			EndTime              int64          `json:"endTime"`
-			RewardAmount         float64        `json:"rewardAmount"`
-			CreatedAt            int64          `json:"createdAt"`
-		}
-		if err := parseBody(r, sc.MaxBodyBytes, &req); err != nil {
-			writeBodyErr(w, err)
-			return
-		}
-
-		clientID, fingerprint := extractLicenseIdentity(r)
-		if v := strings.TrimSpace(req.ClientID); v != "" {
-			clientID = v
-		}
-		if v := strings.TrimSpace(req.Fingerprint); v != "" {
-			fingerprint = v
-		}
-
-		err := licenseSvc.SaveLotteryParticipationRecord(r.Context(), licensepkg.LotteryParticipationRecord{
-			LocalHistoryID:       req.LocalHistoryID,
-			RecordType:           req.RecordType,
-			ClientID:             clientID,
-			Fingerprint:          fingerprint,
-			AppVersion:           req.AppVersion,
-			AccountID:            req.AccountID,
-			AccountNickname:      req.AccountNickname,
-			RoomID:               req.RoomID,
-			WebRid:               req.WebRid,
-			LotteryID:            req.LotteryID,
-			AuthorNickname:       req.AuthorNickname,
-			LotteryName:          req.LotteryName,
-			PredictedProbability: req.PredictedProbability,
-			PredictedJoinTotal:   req.PredictedJoinTotal,
-			JoinTotal:            req.JoinTotal,
-			LuckyCount:           req.LuckyCount,
-			OnlineTotal:          req.OnlineTotal,
-			TotalAmount:          req.TotalAmount,
-			PrizeType:            req.PrizeType,
-			PrizeInfo:            req.PrizeInfo,
-			Conditions:           req.Conditions,
-			RemainingSec:         req.RemainingSec,
-			ServerScore:          req.ServerScore,
-			StartTimeMS:          req.StartTime,
-			JoinMode:             req.JoinMode,
-			JoinStatus:           req.JoinStatus,
-			ResultStatus:         req.ResultStatus,
-			ResultReason:         req.ResultReason,
-			JoinedAtMS:           req.JoinedAt,
-			EndTimeMS:            req.EndTime,
-			RewardAmount:         req.RewardAmount,
-			CreatedAtMS:          req.CreatedAt,
-		})
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "saved": true})
-	})
-
 	mux.HandleFunc("/task/debug", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions {
 			writeJSON(w, http.StatusNoContent, map[string]any{})
@@ -2235,9 +1213,6 @@ func main() {
 		}
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 
@@ -2264,9 +1239,6 @@ func main() {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 			return
 		}
-		if !ensureLicenseAuthorized(w, r, licenseSvc) {
-			return
-		}
 
 		baseProfile, _ := svc.Profile()
 		effectiveProfile := pool.ApplyProfilePatch(baseProfile, parseTopFilterPatch(r))
@@ -2289,9 +1261,6 @@ func main() {
 		}
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
-			return
-		}
-		if !ensureLicenseAuthorized(w, r, licenseSvc) {
 			return
 		}
 

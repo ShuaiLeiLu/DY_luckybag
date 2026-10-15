@@ -138,7 +138,7 @@ export function AccountCard({
           {isRunning ? '暂停' : '启动'}
         </Button>
 
-        <Tooltip title="重新打开浏览器扫码授权">
+        <Tooltip title="重新打开浏览器扫码登录">
           <Button
             size="small"
             icon={<QrcodeOutlined />}

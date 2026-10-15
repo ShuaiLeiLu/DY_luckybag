@@ -1,4 +1,4 @@
-import { Button, Menu, Space, Tag, Typography } from 'antd'
+import { Button, Menu, Tag, Typography } from 'antd'
 import type { MenuProps } from 'antd'
 import {
   DashboardOutlined,
@@ -6,10 +6,8 @@ import {
   HistoryOutlined,
   FileTextOutlined,
   PlusOutlined,
-  SettingOutlined,
-  SafetyCertificateOutlined
+  SettingOutlined
 } from '@ant-design/icons'
-import type { LicenseSnapshot } from '@shared/models'
 
 export type MainView = 'dashboard' | 'accounts' | 'history' | 'logs'
 
@@ -17,10 +15,8 @@ interface AppSiderProps {
   activeView: MainView
   onViewChange: (view: MainView) => void
   appVersion: string
-  license: LicenseSnapshot
   onAddAccount: () => void
   onOpenSettings: () => void
-  onOpenLicenseGate: () => void
 }
 
 const menuItems: MenuProps['items'] = [
@@ -50,13 +46,9 @@ export function AppSider({
   activeView,
   onViewChange,
   appVersion,
-  license,
   onAddAccount,
-  onOpenSettings,
-  onOpenLicenseGate
+  onOpenSettings
 }: AppSiderProps) {
-  const isAuthorized = license.authorized || license.accessMode === 'trial'
-
   return (
     <div className="flex h-full flex-col justify-between border-r border-slate-800/80 bg-slate-950/80 select-none">
       {/* 顶部 Logo 与系统标题 */}
@@ -68,7 +60,7 @@ export function AppSider({
           <div className="flex flex-col">
             <div className="flex items-center gap-2">
               <span className="font-bold text-sm tracking-wide text-slate-100">福袋工作台</span>
-              <Tag bordered={false} color="blue" className="m-0 text-[10px] px-1.5 py-0 leading-normal">
+              <Tag variant="filled" color="blue" className="m-0 text-[10px] px-1.5 py-0 leading-normal">
                 v{appVersion}
               </Tag>
             </div>
@@ -106,36 +98,16 @@ export function AppSider({
           添加账号
         </Button>
 
-        <div className="grid grid-cols-2 gap-2">
+        <div>
           <Button
             icon={<SettingOutlined />}
+            block
             size="small"
             onClick={onOpenSettings}
             className="text-xs text-slate-300 border-slate-700 bg-slate-900/60 hover:bg-slate-800"
           >
             设置
           </Button>
-          <Button
-            icon={<SafetyCertificateOutlined />}
-            size="small"
-            onClick={onOpenLicenseGate}
-            className="text-xs text-slate-300 border-slate-700 bg-slate-900/60 hover:bg-slate-800"
-          >
-            授权
-          </Button>
-        </div>
-
-        <div className="flex items-center justify-between px-1 pt-1 text-[11px]">
-          <span className="text-slate-500">授权状态</span>
-          {isAuthorized ? (
-            <Tag color="success" bordered={false} className="m-0 text-[10px]">
-              {license.accessMode === 'trial' ? '试用中' : '已授权'}
-            </Tag>
-          ) : (
-            <Tag color="error" bordered={false} className="m-0 text-[10px]">
-              未授权
-            </Tag>
-          )}
         </div>
       </div>
     </div>

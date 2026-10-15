@@ -1,8 +1,6 @@
 const { app, BrowserWindow, ipcMain, safeStorage, powerSaveBlocker } = require('electron')
 const path = require('path')
 const fs = require('fs')
-const os = require('os')
-const crypto = require('crypto')
 const { createLogger } = require('./logger')
 const { createHotUpdateService } = require('./hot-update-service')
 const { createStateStore, DEFAULT_SETTINGS } = require('./state-store')
@@ -441,22 +439,10 @@ function appendRuntimeAccountLog(accountId = '', level = 'info', message = '', s
 }
 
 function getBootstrapSnapshot() {
-  const interfaces = os.networkInterfaces()
-  const macs = []
-  Object.values(interfaces || {}).forEach((list) => {
-    ;(Array.isArray(list) ? list : []).forEach((item) => {
-      const mac = String(item?.mac || '').trim().toLowerCase()
-      if (!mac || mac === '00:00:00:00:00:00') return
-      macs.push(mac)
-    })
-  })
-  const raw = [os.hostname(), os.platform(), os.arch(), ...macs.sort()].join('|')
-  const machineFingerprint = `machine_${crypto.createHash('sha256').update(raw).digest('hex').slice(0, 32)}`
   const store = ensureStateStore()
   const update = ensureUpdateService().getSnapshot()
   return {
     appVersion: app.getVersion(),
-    machineFingerprint,
     settings: store.getSettings(),
     update,
     events: store.listEvents(180),
