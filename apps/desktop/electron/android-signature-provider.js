@@ -8,12 +8,20 @@
 
 const { DouyinBackendError, ERROR_CODES } = require('./douyin-request-models')
 const { signNativeAndroidHeaders } = require('./android-sign-algorithms')
+const { AndroidSdkContext } = require('./android-sdk-context')
 
 class AndroidSignatureProvider {
   constructor(options = {}) {
     this.options = options
     // 支持动态注入自定义签名 hook 函数
     this.customSignerHook = typeof options.signerHook === 'function' ? options.signerHook : null
+    this.requireSdk = options.requireSdk === true
+    this.sdkContext = options.sdkContext || null
+    this.sdkAdapter = options.sdkAdapter || null
+    this.sdkFactory = typeof options.sdkFactory === 'function' ? options.sdkFactory : null
+    if (this.sdkAdapter && !this.sdkContext) this.sdkContext = new AndroidSdkContext({ adapter: this.sdkAdapter,
+      now: options.now, requireVerified: options.requireVerified === true, trustedSamples: options.trustedSamples })
+    this.profile = null
   }
 
   /**
@@ -23,6 +31,33 @@ class AndroidSignatureProvider {
   setSignerHook(hook) {
     if (typeof hook === 'function') {
       this.customSignerHook = hook
+    }
+  }
+
+  /** Configure the SDK once and update it when device registration returns IDs. */
+  setProfile(profile) {
+    this.profile = profile ? { ...profile, deviceInfo: { ...(profile.deviceInfo || {}) } } : null
+    if (!this.sdkContext && this.sdkFactory && this.profile) {
+      this.sdkAdapter = this.sdkFactory(this.profile)
+      this.sdkContext = new AndroidSdkContext({ adapter: this.sdkAdapter, now: this.options.now,
+        requireVerified: this.options.requireVerified === true, trustedSamples: this.options.trustedSamples })
+    }
+    this.sdkContext?.setProfile(this.profile)
+  }
+
+  getStatus() {
+    if (this.sdkContext) return { implementation: 'android-sdk-adapter', ...this.sdkContext.snapshot() }
+    return { implementation: 'experimental-aes-v2', verified: false, initialized: false, requiredSdk: this.requireSdk }
+  }
+
+  async consumeResponse(input) {
+    if (!this.sdkContext) return
+    try { await this.sdkContext.consumeResponse(input) }
+    catch (error) {
+      if (error?.code === ERROR_CODES.ANDROID_TICKET_GUARD_UNAVAILABLE || error?.code === ERROR_CODES.ANDROID_SDK_UNAVAILABLE) throw error
+      throw new DouyinBackendError('Android SDK failed to consume security response', {
+        code: ERROR_CODES.ANDROID_TICKET_GUARD_UNAVAILABLE
+      })
     }
   }
 
@@ -55,13 +90,30 @@ class AndroidSignatureProvider {
       throw new DouyinBackendError('Signature adapter returned no signature', { code: ERROR_CODES.ANDROID_TICKET_GUARD_UNAVAILABLE })
     }
 
+    if (this.sdkContext) {
+      try { return await this.sdkContext.signRequest(context) }
+      catch (error) {
+        if (error?.code) throw error
+        throw new DouyinBackendError('Android SDK failed to produce security headers', {
+          code: ERROR_CODES.ANDROID_TICKET_GUARD_UNAVAILABLE, details: { cause: error?.message || 'unknown' }
+        })
+      }
+    }
+
+    if (this.requireSdk) {
+      throw new DouyinBackendError('No verified Android SDK signer is configured', {
+        code: ERROR_CODES.ANDROID_SDK_UNAVAILABLE
+      })
+    }
+
     // Experimental local implementation: fixed vectors test reproducibility,
     // not platform acceptance or device-bound TicketGuard readiness.
     const nativeHeaders = signNativeAndroidHeaders({
       query: context.query || '',
       params: context.params || null,
       body: context.body || '',
-      requestTicketMs: context.timestampMs
+      requestTicketMs: context.timestampMs,
+      passport: context.responseMode === 'passport'
     })
 
     return {

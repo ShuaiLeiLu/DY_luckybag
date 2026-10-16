@@ -13,19 +13,50 @@ const REGISTER_ORIGIN = 'https://log.snssdk.com'
 const REGISTER_PATH = '/service/2/device_register/'
 const QR_PATH = '/passport/mobile/get_qrcode/'
 const CHECK_PATH = '/passport/mobile/check_qrconnect/'
+const SEND_CODE_PATH = '/passport/mobile/send_code/'
+const VALIDATE_CODE_PATH = '/passport/mobile/validate_code/'
 const APP = ANDROID_APP
 const APP_PACKAGE = ANDROID_PACKAGE
 // Use the same UA as subsequent protocol requests; a local override previously
 // prevented updates to the shared Android UA from reaching Passport requests.
 const USER_AGENT = DEFAULT_ANDROID_USER_AGENT
-const ACCOUNT_PARAMS = Object.freeze({ service: 'aweme.snssdk.com', scene: '0',
-  account_sdk_source: 'app', 'passport-sdk-version': '60759', request_from_account_sdk: '1', is_from_ttaccountsdk: '1' })
+// The trusted capture fixes the exact Passport query set and its order; the two
+// endpoints differ (get_qrcode carries need_logo/source, check carries scene/token).
+// The dotted version string is what the official SDK puts on the wire here, while
+// the registration body keeps the integer version tuple from the manifest.
+const PASSPORT_VERSION_CODE = '40.7.0'
+const QR_PARAMS = Object.freeze({ service: AUTH_ORIGIN, account_sdk_source: 'app', aid: APP.aid,
+  version_code: PASSPORT_VERSION_CODE, 'passport-sdk-version': '60759', request_from_account_sdk: '1',
+  is_from_ttaccountsdk: '1', need_logo: '1', source: 'pad' })
+const CHECK_PARAMS = Object.freeze({ service: 'aweme.snssdk.com', scene: '0', account_sdk_source: 'app',
+  aid: APP.aid, version_code: PASSPORT_VERSION_CODE, 'passport-sdk-version': '60759',
+  request_from_account_sdk: '1', is_from_ttaccountsdk: '1' })
+const ACCOUNT_PARAMS = Object.freeze({ ...CHECK_PARAMS })
+// Phone SMS login (the phone-end default). No mitmproxy capture exists for these
+// two frames yet, so they reuse the trusted Passport parameter style and order;
+// the shape stays unverified until one real platform login succeeds.
+const SMS_BASE_PARAMS = Object.freeze({ service: AUTH_ORIGIN, account_sdk_source: 'app', aid: APP.aid,
+  version_code: PASSPORT_VERSION_CODE, 'passport-sdk-version': '60759', request_from_account_sdk: '1',
+  is_from_ttaccountsdk: '1', mix_mode: '1' })
 function fail(code, extra = {}) { return Object.assign(new Error(code), { code, ...extra }) }
+function normalizeMobile(value) {
+  const text = String(value ?? '').trim().replace(/[\s-]/g, '')
+  if (!/^[1-9][0-9]{6,14}$/.test(text)) throw fail('LOGIN_MOBILE_INVALID')
+  return text
+}
+function normalizeCode(value) {
+  const text = String(value ?? '').trim()
+  if (!/^[0-9]{4,8}$/.test(text)) throw fail('LOGIN_CODE_INVALID')
+  return text
+}
 function decimalID(value) {
   if (typeof value === 'number' && !Number.isSafeInteger(value)) return ''
   const id = String(value ?? '')
   return /^[1-9][0-9]{0,31}$/.test(id) ? id : ''
 }
+// Trusted-capture pattern (see android-protocol-client.js where the transport
+// computes it next to its ticket): 01-01 + the 13-digit millisecond ticket + a
+// 6-digit poll counter, then the lowercase hex of an ASCII marker, then 01.
 function passportData(json) {
   const data = json?.data
   const code = data?.error_code
@@ -51,7 +82,7 @@ function reusableProfile(profile) {
 }
 
 class NativeLoginProvider {
-  constructor({ deviceStore, clientFactory, signer, signerFactory, now = Date.now } = {}) {
+  constructor({ deviceStore, clientFactory, signer, signerFactory, signerOptions = {}, now = Date.now } = {}) {
     this.deviceStore = deviceStore
     this.now = now
     // The native metasec object keeps per-instance state (round counter, cached
@@ -60,7 +91,7 @@ class NativeLoginProvider {
     // registration and Passport are part of the same installation/login context.
     this.clientCache = new Map()
     this.signer = signer || null
-    this.signerFactory = signerFactory || (() => new AndroidSignatureProvider())
+    this.signerFactory = signerFactory || (() => new AndroidSignatureProvider(signerOptions))
     this.controller = new AbortController()
     this.disposed = false
     this.clientFactory = (profile, baseUrl) => {
@@ -74,12 +105,18 @@ class NativeLoginProvider {
         client.setSigner?.(this.signer)
         this.clientCache.set(baseUrl, client)
       }
+      // A signer may be constructed before a request is made. Always refresh
+      // its SDK context with the current profile, including server-issued IDs.
+      this.signer?.setProfile?.(profile)
       this.updateClientProfile(client, profile)
       return client
     }
     this.jar = new CookieJar()
     this.profile = null
     this.token = ''
+    this.passportDs = ''
+    this.smsMobile = ''
+    this.smsToken = ''
     this.authHeaders = {}
   }
   assertActive(signal) {
@@ -93,6 +130,7 @@ class NativeLoginProvider {
   }
   setProfile(profile) {
     this.profile = profile
+    this.signer?.setProfile?.(profile)
     // AndroidProtocolClient copies its deviceInfo at construction. Registration
     // replaces the seed profile, so cached clients must receive the issued IDs.
     for (const client of this.clientCache.values()) this.updateClientProfile(client, profile)
@@ -171,10 +209,12 @@ class NativeLoginProvider {
     // default to "抖音网页版" when carrier_platform_info.device_login_display_name
     // is absent. This is not a desktop Web fallback: only mobile APIs run here.
     const data = passportData(await this.request(AUTH_ORIGIN, QR_PATH, {
-      // The APK's large-screen QR flow selects source=pad and need_logo=1.
-      params: { ...ACCOUNT_PARAMS, service: AUTH_ORIGIN, source: 'pad', need_logo: '1' }, responseMode: 'passport', signal
+      // Trusted capture: nine parameters in this exact order, no deviceInfo expansion.
+      params: QR_PARAMS, responseMode: 'passport', signal
     }))
     if (typeof data.token !== 'string' || !data.token || data.token.length > 4096) throw fail('LOGIN_QR_SCHEMA_UNCONFIRMED')
+    // The check_qrconnect capture echoes the ds issued by this response.
+    this.passportDs = data.ds === undefined || data.ds === null ? '' : String(data.ds).slice(0, 256)
     // Only server-supplied PNG bytes are displayed. Never fetch an arbitrary image URL.
     const qr = String(data.qrcode || '').replace(/^data:image\/png;base64,/, '')
     if (qr.length > 512000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(qr) ||
@@ -185,16 +225,7 @@ class NativeLoginProvider {
     this.token = data.token
     return { qrImage: 'data:image/png;base64,' + qr, expiresAt: Math.min(expiresAt, this.now() + 180000) }
   }
-  async poll(signal) {
-    this.assertActive(signal)
-    if (!this.token) throw fail('LOGIN_QR_EXPIRED')
-    const data = passportData(await this.request(AUTH_ORIGIN, CHECK_PATH, {
-      params: { ...ACCOUNT_PARAMS, token: this.token }, responseMode: 'passport', signal
-    }))
-    if (['new', 'scanned', 'expired', 'refused'].includes(data.status)) return { state: data.status }
-    if (data.status !== 'confirmed') throw fail('LOGIN_STATUS_UNCONFIRMED')
-    // Mobile check_qrconnect returns user_data. Web redirect URLs are not followed.
-    const user = data.user_data
+  commitUser(user) {
     if (!user || typeof user !== 'object') throw fail('LOGIN_SESSION_MISSING')
     const id = decimalID(user.user_id_str || user.user_id || user.uid_str || user.uid)
     if (!id) throw fail('LOGIN_IDENTITY_UNCONFIRMED')
@@ -203,7 +234,48 @@ class NativeLoginProvider {
       if (typeof sessionId !== 'string' || !/^[A-Za-z0-9._~-]{1,4096}$/.test(sessionId)) throw fail('LOGIN_SESSION_MISSING')
       this.jar.setCookieSync(`sessionid=${sessionId}; Path=/; Secure; HttpOnly`, AUTH_ORIGIN)
     }
-    return { state: 'confirmed', userId: id }
+    return id
+  }
+  async poll(signal) {
+    this.assertActive(signal)
+    if (!this.token) throw fail('LOGIN_QR_EXPIRED')
+    // The trusted capture echoes the ds issued by the get_qrcode response here;
+    // x-tt-env and x-tt-trace-id are computed by the transport next to its ticket.
+    const headers = this.passportDs ? { 'x-tt-dt': this.passportDs } : {}
+    const data = passportData(await this.request(AUTH_ORIGIN, CHECK_PATH, {
+      params: { ...CHECK_PARAMS, token: this.token }, responseMode: 'passport', headers, signal
+    }))
+    if (['new', 'scanned', 'expired', 'refused'].includes(data.status)) return { state: data.status }
+    if (data.status !== 'confirmed') throw fail('LOGIN_STATUS_UNCONFIRMED')
+    // Mobile check_qrconnect returns user_data. Web redirect URLs are not followed.
+    return { state: 'confirmed', userId: this.commitUser(data.user_data) }
+  }
+  async sendCode(mobile, signal) {
+    this.assertActive(signal)
+    if (!validProfile(this.profile)) throw fail('LOGIN_DEVICE_INVALID')
+    this.smsMobile = normalizeMobile(mobile)
+    const data = passportData(await this.request(AUTH_ORIGIN, SEND_CODE_PATH, {
+      params: { ...SMS_BASE_PARAMS, mobile: this.smsMobile }, responseMode: 'passport', signal
+    }))
+    if (data.ds !== undefined && data.ds !== null) this.passportDs = String(data.ds).slice(0, 256)
+    const token = typeof data.token === 'string' && data.token ? data.token.slice(0, 4096) : ''
+    if (!token) throw fail('LOGIN_SMS_TOKEN_MISSING')
+    this.smsToken = token
+    return { sent: true }
+  }
+  async verifyCode(code, signal) {
+    this.assertActive(signal)
+    if (!this.smsToken || !this.smsMobile) throw fail('LOGIN_SMS_TOKEN_MISSING')
+    const value = normalizeCode(code)
+    const headers = this.passportDs ? { 'x-tt-dt': this.passportDs } : {}
+    const data = passportData(await this.request(AUTH_ORIGIN, VALIDATE_CODE_PATH, {
+      params: { ...SMS_BASE_PARAMS, mobile: this.smsMobile, code: value, token: this.smsToken },
+      responseMode: 'passport', headers, signal
+    }))
+    // The official validate frames expose the account either as data.user or as
+    // the same user_data shape as check_qrconnect; both are accepted here and
+    // stay unverified until one real platform login succeeds.
+    return { state: 'confirmed', userId: this.commitUser(data.user || data.user_data) }
   }
   async verify(userId, signal) {
     this.assertActive(signal)
@@ -221,7 +293,8 @@ class NativeLoginProvider {
     if (this.disposed) return
     this.disposed = true
     this.controller.abort()
-    this.token = ''; this.jar.removeAllCookiesSync(); this.authHeaders = {}; this.profile = null
+    this.token = ''; this.passportDs = ''; this.smsMobile = ''; this.smsToken = ''
+    this.jar.removeAllCookiesSync(); this.authHeaders = {}; this.profile = null
     const resources = new Set([...this.clientCache.values(), this.signer])
     this.clientCache.clear(); this.signer = null
     for (const resource of resources) {
@@ -230,4 +303,4 @@ class NativeLoginProvider {
   }
 }
 module.exports = { NativeLoginProvider, passportData, decimalID, validProfile, reusableProfile, APP, ACCOUNT_PARAMS,
-  AUTH_ORIGIN, REGISTER_ORIGIN, REGISTER_PATH, QR_PATH, CHECK_PATH }
+  AUTH_ORIGIN, REGISTER_ORIGIN, REGISTER_PATH, QR_PATH, CHECK_PATH, SEND_CODE_PATH, VALIDATE_CODE_PATH }

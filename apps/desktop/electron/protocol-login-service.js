@@ -7,9 +7,14 @@ const MESSAGES = Object.freeze({
   LOGIN_DEVICE_INVALID: '本机保存的设备参数无效。',
   LOGIN_APP_UNSUPPORTED: '原生扫码接口拒绝当前应用参数（业务码 11），未获取到二维码。',
   LOGIN_CLIENT_REJECTED: '平台返回版本或客户端来源校验失败（1049）。账号未保存，需要继续适配协议客户端。',
+  ANDROID_SDK_UNAVAILABLE: '当前未接入已验证的 Android 原生安全 SDK，登录已停止；不会继续发送实验性签名或重复刷新二维码。',
+  ANDROID_TICKET_GUARD_UNAVAILABLE: 'Android 原生安全 SDK 未生成完整安全头，登录已停止；账号未保存。',
   LOGIN_PASSPORT_REJECTED: '原生登录接口拒绝了本次请求。',
   LOGIN_QR_SCHEMA_UNCONFIRMED: '二维码响应格式未确认，无法展示。',
   LOGIN_QR_EXPIRED: '二维码已过期，请重新获取。',
+  LOGIN_MOBILE_INVALID: '手机号格式不正确，请输入 7-15 位数字手机号。',
+  LOGIN_CODE_INVALID: '验证码格式不正确，请输入 4-8 位数字。',
+  LOGIN_SMS_TOKEN_MISSING: '验证码尚未发送或已失效，请重新发送。',
   LOGIN_CHALLENGE_REQUIRED: '平台要求额外身份验证，本次协议登录已停止。',
   LOGIN_STATUS_UNCONFIRMED: '服务端返回了尚未识别的扫码状态，本次登录已停止。',
   LOGIN_SESSION_MISSING: '扫码响应缺少完整的安卓会话，账号未保存。',
@@ -39,19 +44,21 @@ class ProtocolLoginService {
     const item = this.current
     if (!item || (attemptId && item.id !== attemptId)) return { success: false, code: 'LOGIN_ATTEMPT_NOT_FOUND' }
     if (!TERMINAL.has(item.state) && this.now() >= item.expiresAt) this.finish(item, 'expired', { code: 'LOGIN_QR_EXPIRED', message: MESSAGES.LOGIN_QR_EXPIRED })
-    return { success: true, attemptId: item.id, state: item.state, expiresAt: item.expiresAt,
+    return { success: true, attemptId: item.id, state: item.state, expiresAt: item.expiresAt, mode: item.mode,
       qrImage: ['waiting', 'scanned'].includes(item.state) ? item.qrImage : '',
       ...(item.error ? { error: item.error } : {}), ...(item.account ? { account: item.account } : {}) }
   }
-  start({ accountId } = {}) {
+  start({ accountId, mode } = {}) {
     const existing = accountId ? this.sessions.get(accountId) : null
     if (accountId && !existing) return { success: false, code: 'LOGIN_ACCOUNT_NOT_FOUND' }
     // Same-account renewal must have a known identity to prevent accidental replacement.
     if (existing && !existing.userId) return { success: false, code: 'LOGIN_IDENTITY_UNCONFIRMED',
-      error: '该旧会话尚无已确认的 UID，请使用添加账号扫码登录，避免覆盖其他账号。' }
+      error: '该旧会话尚无已确认的 UID，请使用添加账号验证码登录，避免覆盖其他账号。' }
     this.cancel()
     try { this.deviceStore?.assertAvailable() } catch (error) { return { success: false, error: safeError(error).message, code: 'LOGIN_STORAGE_UNAVAILABLE' } }
     const item = { id: crypto.randomUUID(), accountId, expectedUserId: existing?.userId,
+      // The phone end uses SMS verification-code login by default; QR stays for pad.
+      mode: mode === 'qr' ? 'qr' : 'sms', mobile: '', code: '',
       state: 'registering', expiresAt: this.now() + 180000, controller: new AbortController(), provider: this.providerFactory() }
     this.current = item
     void this.begin(item)
@@ -75,15 +82,56 @@ class ProtocolLoginService {
     try {
       const signal = item.controller.signal
       await item.provider.prepare(signal); this.assertActive(item)
-      item.state = 'requesting_qr'
-      const qr = await item.provider.createQR(signal); this.assertActive(item)
-      item.qrImage = qr.qrImage; item.expiresAt = Math.min(item.expiresAt, qr.expiresAt)
-      this.assertActive(item); item.state = 'waiting'
-      item.expiryTimer = this.schedule(() => {
-        if (this.active(item)) this.finish(item, 'expired', { code: 'LOGIN_QR_EXPIRED', message: MESSAGES.LOGIN_QR_EXPIRED })
-      }, Math.max(0, item.expiresAt - this.now()))
-      item.expiryTimer?.unref?.()
-      this.next(item)
+      if (item.mode === 'qr') {
+        item.state = 'requesting_qr'
+        const qr = await item.provider.createQR(signal); this.assertActive(item)
+        item.qrImage = qr.qrImage; item.expiresAt = Math.min(item.expiresAt, qr.expiresAt)
+        this.assertActive(item); item.state = 'waiting'
+        this.armExpiry(item)
+        this.next(item)
+        return
+      }
+      // SMS login: both steps follow the user's input, no timer polling between them.
+      item.state = 'waiting_mobile'
+      this.armExpiry(item)
+    } catch (error) { this.fail(item, error) }
+  }
+  armExpiry(item) {
+    item.expiryTimer = this.schedule(() => {
+      if (this.active(item)) this.finish(item, 'expired', { code: 'LOGIN_QR_EXPIRED', message: MESSAGES.LOGIN_QR_EXPIRED })
+    }, Math.max(0, item.expiresAt - this.now()))
+    item.expiryTimer?.unref?.()
+  }
+  submit(input = {}) {
+    const item = this.current
+    if (!item || (input.attemptId && item.id !== input.attemptId) || !this.active(item) || item.mode !== 'sms') {
+      return { success: false, code: 'LOGIN_ATTEMPT_NOT_FOUND' }
+    }
+    try {
+      if (item.state === 'waiting_mobile') {
+        if (String(input.mobile ?? '').trim() === '') throw Object.assign(new Error(), { code: 'LOGIN_MOBILE_INVALID' })
+        item.mobile = String(input.mobile).trim()
+        void this.sendCode(item)
+      } else if (item.state === 'waiting_code') {
+        if (String(input.code ?? '').trim() === '') throw Object.assign(new Error(), { code: 'LOGIN_CODE_INVALID' })
+        item.code = String(input.code).trim()
+        void this.validateCode(item)
+      } else {
+        return { success: false, code: 'LOGIN_ATTEMPT_NOT_FOUND' }
+      }
+    } catch (error) { this.fail(item, error) }
+    return this.snapshot(item.id)
+  }
+  async sendCode(item) {
+    try {
+      await item.provider.sendCode(item.mobile, item.controller.signal); this.assertActive(item)
+      item.state = 'waiting_code'
+    } catch (error) { this.fail(item, error) }
+  }
+  async validateCode(item) {
+    try {
+      const result = await item.provider.verifyCode(item.code, item.controller.signal); this.assertActive(item)
+      await this.confirmSession(item, result)
     } catch (error) { this.fail(item, error) }
   }
   next(item) {
@@ -104,20 +152,23 @@ class ProtocolLoginService {
         if (result.state === 'scanned') item.state = 'scanned'
         this.next(item); return
       }
-      if (result.state !== 'confirmed') throw Object.assign(new Error(), { code: 'LOGIN_STATUS_UNCONFIRMED' })
-      if (item.expectedUserId && result.userId !== item.expectedUserId) throw Object.assign(new Error(), { code: 'LOGIN_ACCOUNT_MISMATCH' })
-      item.state = 'verifying'; item.qrImage = ''
-      const session = await item.provider.verify(result.userId, item.controller.signal); this.assertActive(item)
-      if (session.userId !== result.userId) throw Object.assign(new Error(), { code: 'LOGIN_ACCOUNT_MISMATCH' })
-      const duplicate = this.sessions.list().find(account => account.userId === session.userId)
-      const accountId = item.accountId || duplicate?.id || `dy_${session.userId}`
-      item.state = 'saving'
-      // Synchronous atomic persistence: cancellation cannot race between this check and commit.
-      try { item.account = this.sessions.save({ ...session, accountId }) }
-      catch { throw Object.assign(new Error(), { code: 'LOGIN_STORAGE_FAILED' }) }
-      this.finish(item, 'completed')
-      this.onSaved(item.account)
+      await this.confirmSession(item, result)
     } catch (error) { this.fail(item, error) }
+  }
+  async confirmSession(item, result) {
+    if (result.state !== 'confirmed') throw Object.assign(new Error(), { code: 'LOGIN_STATUS_UNCONFIRMED' })
+    if (item.expectedUserId && result.userId !== item.expectedUserId) throw Object.assign(new Error(), { code: 'LOGIN_ACCOUNT_MISMATCH' })
+    item.state = 'verifying'; item.qrImage = ''
+    const session = await item.provider.verify(result.userId, item.controller.signal); this.assertActive(item)
+    if (session.userId !== result.userId) throw Object.assign(new Error(), { code: 'LOGIN_ACCOUNT_MISMATCH' })
+    const duplicate = this.sessions.list().find(account => account.userId === session.userId)
+    const accountId = item.accountId || duplicate?.id || `dy_${session.userId}`
+    item.state = 'saving'
+    // Synchronous atomic persistence: cancellation cannot race between this check and commit.
+    try { item.account = this.sessions.save({ ...session, accountId }) }
+    catch { throw Object.assign(new Error(), { code: 'LOGIN_STORAGE_FAILED' }) }
+    this.finish(item, 'completed')
+    this.onSaved(item.account)
   }
   cancel(attemptId) {
     const item = this.current

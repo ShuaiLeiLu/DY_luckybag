@@ -295,3 +295,40 @@ npm run protocol:verify-native-core
 `npm run protocol:verify-native-core` 目前 10 项通过，覆盖 1,024 组摘要压缩、19 个摘要长度、连续分块、1,024 次尾部对照、公开分组密码向量、256 组分组/密钥扩展对照及完整 Helios 封装。CI 已加入此命令。从固定 ELF/DEX 全量提取及 fixture 比对也通过。
 
 当前正式请求仍调用实验性签名；完整 SDK 接入没有完成。接下来必须恢复请求结构 `+32/+184` 等值的初始化来源、Medusa 的剩余状态位与外层计算、其余头生成，再统一接入共享 SDK 实例。需要保留 SDK 生命周期：当前默认 NativeLoginProvider 每个请求会创建新的协议 client，完整 SDK 接入时必须共享签名实例，否则计数/缓存状态会丢失。不得用仅返回已有头、伪造 ready=true 或失败后退回 AES 的方式完成接入。
+
+## 十四、桌面端接入边界（2026-10-16）
+
+桌面端新增 `AndroidSdkContext` 作为原生 SDK 的唯一状态边界。它保存初始化 profile、请求序号、响应计数和服务端缓存，并在设备注册返回新 `device_id`/`iid` 后更新同一上下文；`AndroidProtocolClient` 会把每次响应交回该上下文，避免按 origin 或请求重新创建安全对象。
+
+生产主进程只从 `DY_ANDROID_SDK_MODULE` 加载外部适配器。适配器必须提供 `initialize`（可选）、`signRequest`/`sign`、完整安全头集合和 `verified: true` 的可信样本验收标记；响应可通过 `consumeResponse` 更新 TicketGuard 状态。缺少适配器或可信验收时，登录在申请二维码前失败并返回 `ANDROID_SDK_UNAVAILABLE`，不会再发送 `experimental-aes-v2`。`DY_PROTOCOL_FIXTURE_URL` 仅用于离线传输夹具。
+
+这次改动完成了生命周期和失败边界，未把 Helios/Medusa 局部算法冒充完整签名，也没有声称 1049 已通过。仍需把真实 Android SDK 适配器及同版本、脱敏的请求/响应样本接入后，才能进行扫码验收和会话重启恢复验收。
+
+## 十五、可信 mitmproxy 样本对照（2026-10-16）
+
+用户提供的两份官方抓帧确立了这两个 Passport 接口的权威线格式，桌面端已逐字段对齐：
+
+1. `GET /passport/mobile/get_qrcode/` query 精确 9 项、固定顺序：
+   `service=https://aweme.snssdk.com&account_sdk_source=app&aid=1128&version_code=40.7.0&passport-sdk-version=60759&request_from_account_sdk=1&is_from_ttaccountsdk=1&need_logo=1&source=pad`。
+   注意 `version_code` 在 Passport 帧上是点分串 `40.7.0`，而注册体继续携带整数元组 `version_code=400700 / manifest_version_code=400701 / update_version_code=40709900`。
+   请求头仅 4 个：`Content-Type: application/x-www-form-urlencoded; charset=UTF-8`、`x-ss-req-ticket`（13 位毫秒）、`x-tt-passport-csrf-token`、`sdk-version: 2`；官方帧没有 `User-Agent`/`Accept`。
+2. `GET /passport/mobile/check_qrconnect/` query 精确 9 项：
+   `service=aweme.snssdk.com&scene=0&account_sdk_source=app&aid=1128&version_code=40.7.0&passport-sdk-version=60759&request_from_account_sdk=1&is_from_ttaccountsdk=1&token=…`（service 此处为裸 host）。
+   额外头：`Cookie`、`x-tt-dt`、`x-tt-env=api_sdk`、`x-tt-trace-id`。
+   - `x-tt-dt` = 上一次响应 `data.ds` 的回显（样本 `34753071110558734140038605914790133644`）。
+   - `x-tt-trace-id` = `01-01` + 13 位毫秒 ticket + 6 位零填充序号 + `-` + ASCII 标记的小写 hex + `-01`；样本首轮标记 `GEDMOCRATION_1`（hex `4745444d4f43524154494f4e5f31`），第二轮 `DMOCRATION_2`。
+   - 响应 `status:"confirmed"` 时 `data.user{session_key,uid,secret,expires_in}`，响应头 `x-tt-token`。
+3. 两接口均不携带 `x-argus`/`x-gorgon`/`x-ladon`/`x-khronos`。因此 passport 模式下实验签名 `signNativeAndroidHeaders` 只回 `x-ss-req-ticket`；`x-tt-dt/x-tt-env/x-tt-trace-id` 由传输层在 ticket 旁计算并计入 `SECURITY_HEADERS` 完整性判定。
+
+实现落点：`native-login-provider.js`（`QR_PARAMS`/`CHECK_PARAMS` 固定参数集与 `passportDs` 缓存）、`android-protocol-client.js`（passport 基头、ticket 旁的 trace/env、`responseMode` 注入签名上下文）、`android-sign-algorithms.js`（passport 分支）。1049 是否随之消除仍以一次真实平台登录为准（见 `docs/AUTOMATION_VALIDATION.md`）。
+
+## 16. 手机验证码登录端点（2026-10-16，来自 APK 字符串表）
+
+手机端默认使用短信验证码登录（pad 端才有扫码）。对 `classes19.dex`/`classes26.dex` 字符串 ID 表直接扫描得到官方端点：
+
+- `/passport/mobile/send_code/`、`/passport/mobile/send_code/v1/`
+- `/passport/mobile/validate_code/`、`/passport/mobile/validate_code/v1/`
+- 相关：`/passport/mobile/send_voice_code/`、`/passport/mobile/sms_login/`
+- 参数字面量（classes14/22/28/36/42/46）：`verify_code`、`last_send_time`、`mix_mode`、`need_logo`、`tt_data`
+
+实现落点：`native-login-provider.js` 新增 `SEND_CODE_PATH`/`VALIDATE_CODE_PATH` 与 `sendCode`/`verifyCode`（复用同一 passport 参数风格、`responseMode:'passport'`、`x-tt-dt` 回显与 CSRF 镜像），`protocol-login-service.js` 增加 `waiting_mobile`/`waiting_code` 两步输入态与 `submit` 通道，渲染层 `ProtocolLoginDialog.tsx` 提供手机号/验证码输入。这两条帧尚无 mitmproxy 可信样本，逐字段形状标记为未验证；以一次真实平台登录为准。

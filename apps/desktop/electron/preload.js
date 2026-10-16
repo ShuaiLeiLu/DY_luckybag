@@ -1,7 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron')
 const channels = new Set([
   'protocol:list-sessions', 'protocol:import-session', 'protocol:remove-session', 'protocol:session-status', 'protocol:verify',
-  'protocol:login-start', 'protocol:login-status', 'protocol:login-cancel',
+  'protocol:login-start', 'protocol:login-status', 'protocol:login-submit', 'protocol:login-cancel',
   'search-live-by-all', 'search-live-by-category', 'get-lottery-detail', 'get-lottery-result', 'get-redpacket-detail',
   'attend-lottery', 'room-like', 'room-chat', 'scan-debug-log',
   'desktop:get-bootstrap', 'desktop:save-settings', 'desktop:get-update-state', 'desktop:check-for-updates',

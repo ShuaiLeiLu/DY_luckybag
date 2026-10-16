@@ -12,6 +12,7 @@ const { AndroidProtocolClient } = require('./android-protocol-client')
 const { createProtocolDeviceStore } = require('./protocol-device-store')
 const { NativeLoginProvider } = require('./native-login-provider')
 const { ProtocolLoginService } = require('./protocol-login-service')
+const { createProductionSignerFactory } = require('./android-sdk-adapter')
 
 const customRoot = Boolean(process.env.DY_PROJECT_ROOT)
 const projectRoot = customRoot ? path.resolve(process.env.DY_PROJECT_ROOT)
@@ -61,6 +62,7 @@ function registerHandlers() {
   handle('protocol:list-sessions', () => ({ success: true, accounts: sessions.list() }))
   handle('protocol:login-start', input => login.start(input))
   handle('protocol:login-status', ({ attemptId } = {}) => login.snapshot(attemptId))
+  handle('protocol:login-submit', input => login.submit(input))
   handle('protocol:login-cancel', ({ attemptId } = {}) => login.cancel(attemptId))
   handle('protocol:session-status', ({ accountId } = {}) => protocol.status(accountId))
   handle('protocol:import-session', async ({ filePath, accountId } = {}) => {
@@ -121,10 +123,11 @@ app.whenReady().then(async () => {
     clientFactory = session => new AndroidProtocolClient({ baseUrl: fixture.origin, deviceInfo: session.deviceInfo,
       userAgent: session.userAgent, authHeaders: session.authHeaders })
   }
-  protocol = new ProtocolRuntime({ getSession: id => sessions.get(id), clientFactory })
+  const signerFactory = createProductionSignerFactory({ allowExperimental: Boolean(process.env.DY_PROTOCOL_FIXTURE_URL) })
+  protocol = new ProtocolRuntime({ getSession: id => sessions.get(id), clientFactory, signerFactory })
   const deviceStore = createProtocolDeviceStore({ filePath: path.join(app.getPath('userData'), 'state/protocol-device.json'), safeStorage })
   login = new ProtocolLoginService({ sessions, deviceStore,
-    providerFactory: () => new NativeLoginProvider({ deviceStore, clientFactory }),
+    providerFactory: () => new NativeLoginProvider({ deviceStore, clientFactory, signerFactory }),
     onSaved: account => { protocol.invalidate(account.id); emit('protocol:session-saved', account) } })
   const settings = state.getSettings()
   updates = createUpdateService({ feedUrl: settings.updateFeedUrl, onChange: snapshot => emit('desktop:update-state', snapshot) })
@@ -157,4 +160,4 @@ app.whenReady().then(async () => {
   flushTimer.unref()
 }).catch(error => { logger.error('桌面端初始化失败', error.message); app.exit(1) })
 app.on('window-all-closed', () => app.quit())
-app.on('will-quit', () => { clearInterval(flushTimer); login?.dispose() })
+app.on('will-quit', () => { clearInterval(flushTimer); login?.dispose(); protocol?.dispose?.() })

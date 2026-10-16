@@ -40,8 +40,17 @@ async function electronTest() {
   const blocked = await invoke('attend-lottery', { accountId: 'dy_10001', roomId: '123', lotteryId: '456' })
   assert.equal(blocked.success, false)
   await evaluate(`Array.from(document.querySelectorAll('button')).find(x=>x.innerText.trim()==='添加账号').click()`)
-  await waitUntil(async () => !!await evaluate(`document.querySelector('img[alt="抖音安卓协议登录二维码"]')`))
-  await waitUntil(async () => (await evaluate('document.body.innerText')).includes('已扫码，请在手机上确认登录'))
+  await waitUntil(async () => (await evaluate('document.body.innerText')).includes('请输入手机号发送验证码'))
+  const fillInput = (id, value) => evaluate(`(() => {
+    const input=document.querySelector('#${id}');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,${JSON.stringify(value)});
+    input.dispatchEvent(new Event('input',{bubbles:true}));
+  })()`)
+  await fillInput('protocol-sms-mobile', '13800000000')
+  await evaluate(`Array.from(document.querySelectorAll('button')).find(x=>x.innerText.trim()==='发送验证码').click()`)
+  await waitUntil(async () => (await evaluate('document.body.innerText')).includes('验证码已发送，请输入收到的验证码'))
+  await fillInput('protocol-sms-code', '123456')
+  await evaluate(`Array.from(document.querySelectorAll('button')).find(x=>x.innerText.trim()==='提交验证码').click()`)
   await waitUntil(async () => (await evaluate('document.body.innerText')).includes('登录成功，会话已自动保存'))
   assert.equal((await invoke('protocol:login-status')).state, 'completed')
   assert.equal(JSON.stringify(await invoke('protocol:login-status')).includes('fixture-account-secret'), false)
@@ -142,6 +151,22 @@ async function nodeTest() {
         status: 'confirmed', user_data: { user_id: '10001', session_key: 'fixture-account-secret' }
       } })); return
     }
+    if (url.pathname === '/passport/mobile/send_code/') {
+      // Phone SMS step 1: fixed Passport order plus the mobile number.
+      assert.equal([...url.searchParams.keys()].join('&'),
+        'service&account_sdk_source&aid&version_code&passport-sdk-version&request_from_account_sdk&is_from_ttaccountsdk&mix_mode&mobile')
+      assert.equal(url.searchParams.get('mobile'), '13800000000')
+      res.end(JSON.stringify({ message: 'success', data: { token: 'fixture-sms-token', ds: 'fixture-sms-ds' } })); return
+    }
+    if (url.pathname === '/passport/mobile/validate_code/') {
+      assert.equal([...url.searchParams.keys()].join('&'),
+        'service&account_sdk_source&aid&version_code&passport-sdk-version&request_from_account_sdk&is_from_ttaccountsdk&mix_mode&mobile&code&token')
+      assert.equal(url.searchParams.get('mobile'), '13800000000')
+      assert.equal(url.searchParams.get('code'), '123456')
+      assert.equal(url.searchParams.get('token'), 'fixture-sms-token')
+      assert.equal(req.headers['x-tt-dt'], 'fixture-sms-ds')
+      res.end(JSON.stringify({ message: 'success', data: { user: { user_id: '10001', session_key: 'fixture-account-secret' } } })); return
+    }
     assert.equal(req.headers.cookie, 'sessionid=fixture-account-secret')
     if (url.pathname === '/aweme/v1/user/profile/self/') res.end(JSON.stringify({ status_code: 0, user: { uid: '10001', nickname: '协议测试账号' } }))
     else if (url.pathname === '/webcast/lottery/melon/lottery_info/') res.end(JSON.stringify({ status_code: 0, data: { lottery_info: {
@@ -187,13 +212,13 @@ async function nodeTest() {
     assert.equal(code, 0, output.replaceAll(token, '[redacted]'))
     assert.ok(fs.existsSync(path.join(dir, 'desktop-smoke-ok.json')))
     assert.equal(sideEffects, 1)
-    assert.deepEqual(received, ['/service/2/device_register/', '/passport/mobile/get_qrcode/',
-      '/passport/mobile/check_qrconnect/', '/passport/mobile/check_qrconnect/', '/aweme/v1/user/profile/self/',
+    assert.deepEqual(received, ['/service/2/device_register/', '/passport/mobile/send_code/',
+      '/passport/mobile/validate_code/', '/aweme/v1/user/profile/self/',
       '/aweme/v1/user/profile/self/', '/webcast/lottery/melon/lottery_info/', '/webcast/lottery/melon/'])
     const learning = await call('/learning/debug')
     assert.equal(learning.data.summary.feedbackCount, 1)
     assert.equal(learning.data.summary.drawWon, 1)
-    console.log('Offline smoke passed: fixture QR login + encrypted session/device + Electron UI/IPC + protocol HTTP + Go pool.')
+    console.log('Offline smoke passed: fixture SMS login + encrypted session/device + Electron UI/IPC + protocol HTTP + Go pool.')
     console.log('Evidence: ' + path.join(dir, 'desktop-smoke-ok.json'))
   } finally {
     if (electron && electron.exitCode === null) electron.kill()

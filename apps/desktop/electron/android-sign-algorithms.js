@@ -315,13 +315,18 @@ function nativeXSecurityArgus(params, timestamp, body = '') {
  * @param {string|Buffer} [ctx.body] - POST body
  * @param {number|string} [ctx.timestamp] - 秒级时间戳，缺省用当前时间
  * @param {number} [ctx.requestTicketMs] - 请求层在签名前确定的毫秒时间戳
+ * @param {boolean} [ctx.passport] - Passport 移动接口样本中仅出现请求票据，无 x-argus
  */
-function signNativeAndroidHeaders({ query = '', params = null, body = '', timestamp, requestTicketMs } = {}) {
+function signNativeAndroidHeaders({ query = '', params = null, body = '', timestamp, requestTicketMs, passport = false } = {}) {
   const resolvedParams = params || parseQueryToParams(query)
   const ticketMs = requestTicketMs !== undefined ? Number(requestTicketMs) : timestamp !== undefined && timestamp !== null && timestamp !== ''
     ? Number(timestamp) * 1000
     : Date.now()
   if (!Number.isSafeInteger(ticketMs) || ticketMs <= 0) throw new Error('Invalid request timestamp')
+  if (passport) {
+    // Trusted capture: the Passport mobile endpoints carry only x-ss-req-ticket.
+    return { 'x-ss-req-ticket': String(ticketMs) }
+  }
   const ts = Math.floor(ticketMs / 1000)
 
   return {

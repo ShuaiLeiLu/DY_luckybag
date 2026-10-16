@@ -47,13 +47,30 @@ npm run protocol:login-diagnose
 先补齐 32.2.6 的完整版本字段，再升级为官方 40.7.0 的版本组和 SDK 参数，最后补齐真实响应下发的 Passport CSRF 头，确认后仍返回 1049。
 因此不能将 1049 唯一归因于版本号，也不能据此断言具体是哪一项签名或设备条件未通过。
 
+### 可信样本对照（2026-10-16，mitmproxy 抓取官方帧）
+
+两条官方请求固定了该接口的线格式，本地实现已按其逐字段对齐：
+
+- `get_qrcode` query 精确 9 项、固定顺序：`service=https://aweme.snssdk.com&account_sdk_source=app&aid=1128&version_code=40.7.0&passport-sdk-version=60759&request_from_account_sdk=1&is_from_ttaccountsdk=1&need_logo=1&source=pad`；`version_code` 为点分串（注册体仍用整数版本元组）。头仅 `Content-Type`、`x-ss-req-ticket`（13 位毫秒）、`x-tt-passport-csrf-token`、`sdk-version:2`，无 User-Agent/Accept。
+- `check_qrconnect` query 精确 9 项：`service=aweme.snssdk.com&scene=0&…&is_from_ttaccountsdk=1&token=…`；额外头 `Cookie`、`x-tt-dt`、`x-tt-env=api_sdk`、`x-tt-trace-id`。`x-tt-dt` 回显上一次响应的 `data.ds`。
+- `x-tt-trace-id` 形如 `01-01` + 13 位毫秒 ticket + 6 位序号 + `-` + ASCII 标记的小写 hex + `-01`；首轮标记 `GEDMOCRATION_1`，其后 `DMOCRATION_{n}`。
+- 这两个 Passport 接口上官方不发 `x-argus`/`x-gorgon`/`x-ladon`；passport 模式的实验签名只回 `x-ss-req-ticket`。
+
+### 手机验证码登录（2026-10-16，手机端默认方式）
+
+手机端默认走短信验证码，桌面端以它为主流程（pad 端才使用扫码）。端点取自 APK 字符串表（classes19/classes26.dex）：
+
+- `POST/GET /passport/mobile/send_code/`：参数沿用已确证的 Passport 固定顺序 `service&account_sdk_source&aid&version_code&passport-sdk-version&request_from_account_sdk&is_from_ttaccountsdk&mix_mode`，再追加 `mobile`；响应 `data.token` 作为校验凭据、`data.ds` 供下一步回显。
+- `GET /passport/mobile/validate_code/`：在以上基础上追加 `mobile&code&token`，并回显 `x-tt-dt`。成功后以 `data.user`/`data.user_data` 的 `user_id`+`session_key` 建立会话，再走同一自我资料校验。
+- 这两条帧没有 mitmproxy 可信样本，参数与头集合仍标记为未验证；只有真实平台登录成功才确立其被接受。
+
 authentication=failed（扫码会话交换未成功）；signature=unverified；details=not_tested；sessionSaved=false。
 只有设备参数已加密保存；未把二维码令牌、HTTP 200 或手机确认当作可用会话。没有发起真实福袋参与请求。
 本地 experimental-aes-v1 固定向量仅证明计算一致性，未实现官方设备密钥证明，也没有真实账号身份读取成功的证据。
 
 ## 剩余阻塞
 
-1. 适配并验证真实原生请求签名、客户端校验和设备证明上下文，完成扫码后的会话交换。禁止用猜测签名宣称登录成功。
+1. 适配并验证真实原生请求签名、客户端校验和设备证明上下文，完成扫码后的会话交换。生产登录要求 `DY_ANDROID_SDK_MODULE` 提供同一实例的初始化、真实请求样本校验、完整安全头生成和响应消费；没有该适配器或样本校验失败时在申请二维码前停止。禁止用猜测签名宣称登录成功。
 2. 自我资料返回当前账号 UID，验证会话加密保存和重启后恢复；遇到验证要求时停止。
 3. 登录完成后通过原生直播列表发现目标直播间，再确认真实详情返回有效 lottery_id 和开奖时间。用户没有提供 room_id，当前受登录阻塞，尚未启动此项测试。
 4. 后续单次参与、开奖响应和登录刷新协议，均需单独验收。

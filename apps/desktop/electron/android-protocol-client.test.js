@@ -142,4 +142,15 @@ describe('AndroidProtocolClient', () => {
     await expect(new AndroidProtocolClient({ transport, signer }).get('/webcast/feed/')).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
     expect(transport.request).not.toHaveBeenCalled()
   })
+
+  it('feeds the exact response back to the stateful signer before business validation', async () => {
+    const transport = createMockTransport({ status_code: 1049, data: { error: true } })
+    const signer = {
+      signRequest: vi.fn(async () => ({ headers: { 'x-argus': 'fixture-only' } })),
+      consumeResponse: vi.fn(async () => {})
+    }
+    await expect(new AndroidProtocolClient({ transport, signer }).get('/webcast/feed/')).rejects.toThrow()
+    expect(signer.consumeResponse).toHaveBeenCalledOnce()
+    expect(signer.consumeResponse.mock.calls[0][0]).toMatchObject({ statusCode: 200, body: { status_code: 1049 } })
+  })
 })

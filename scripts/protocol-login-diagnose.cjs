@@ -2,6 +2,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { NativeLoginProvider, APP, ACCOUNT_PARAMS } = require('../apps/desktop/electron/native-login-provider')
 const { safeError } = require('../apps/desktop/electron/protocol-login-service')
+const { createProductionSignerFactory } = require('../apps/desktop/electron/android-sdk-adapter')
 
 async function main() {
   const args = process.argv.slice(2)
@@ -9,14 +10,14 @@ async function main() {
   const output = index >= 0 ? args[index + 1] : ''
   if (index >= 0 && (!output || output.startsWith('--'))) throw new Error('Missing report path')
   const report = { checkedAt: new Date().toISOString(), mode: 'android-mobile-qr',
-    simulatorRequired: false, webExecution: false, signatureImplementation: 'experimental-aes-v2',
+    simulatorRequired: false, webExecution: false, signatureImplementation: process.env.DY_ANDROID_SDK_MODULE ? 'configured-android-sdk' : 'unavailable',
     client: { appVersion: APP.version_name, versionCode: APP.version_code,
       manifestVersionCode: APP.manifest_version_code, updateVersionCode: APP.update_version_code,
       passportSdkVersion: ACCOUNT_PARAMS['passport-sdk-version'] },
     device: 'not_tested', qr: 'not_tested', polling: 'not_tested',
     authentication: 'not_tested', sessionSaved: false }
   if (args.includes('--live')) {
-    const provider = new NativeLoginProvider()
+    const provider = new NativeLoginProvider({ signerFactory: createProductionSignerFactory() })
     try {
       report.stage = 'device_registration'
       await provider.prepare(); report.device = 'server_assigned'

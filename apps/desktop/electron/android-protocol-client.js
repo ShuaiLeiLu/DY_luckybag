@@ -3,6 +3,7 @@ const https = require('node:https')
 const querystring = require('node:querystring')
 const { AndroidSignatureProvider } = require('./android-signature-provider')
 const { getXSsStub } = require('./android-sign-algorithms')
+const { hasSecurityHeader } = require('./android-sdk-context')
 const { DouyinBackendError, ERROR_CODES } = require('./douyin-request-models')
 const { DEFAULT_ANDROID_USER_AGENT } = require('./android-client-profile')
 
@@ -50,6 +51,7 @@ class AndroidProtocolClient {
     this.timeoutMs = Math.max(100, Math.min(30000, Number(timeoutMs) || 10000))
     this.maxResponseBytes = maxResponseBytes
     this.transport = transport
+    this.passportSeq = 0
   }
   getSigner() { return this.signer }
   setSigner(signer) { if (signer) this.signer = signer }
@@ -62,11 +64,19 @@ class AndroidProtocolClient {
     signal?.throwIfAborted()
     method = String(method).toUpperCase()
     if (!['GET', 'POST'].includes(method)) throw new DouyinBackendError('Invalid protocol method', { code: ERROR_CODES.INVALID_PARAMS })
-    const queryParams = method === 'GET' ? { ...this.deviceInfo, ...params } : { ...this.deviceInfo }
+    // The trusted Passport capture shows an exact parameter set in a fixed
+    // order; the full deviceInfo expansion only applies to Aweme/webcast calls.
+    const queryParams = method === 'GET'
+      ? (responseMode === 'passport' ? { ...params } : { ...this.deviceInfo, ...params })
+      : { ...this.deviceInfo }
     const query = querystring.stringify(queryParams)
     const url = new URL(`${this.baseUrl}${pathname}${query ? '?' + query : ''}`)
     let requestBody = body === null ? null : Buffer.from(body)
-    const requestHeaders = mergeHeaders({ 'User-Agent': this.userAgent, Accept: 'application/json', 'sdk-version': '2' }, this.authHeaders, headers)
+    const requestHeaders = mergeHeaders(responseMode === 'passport'
+      // Trusted capture: these endpoints carry only the form Content-Type and
+      // sdk-version in the base set (no User-Agent/Accept in the official frames).
+      ? { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'sdk-version': '2' }
+      : { 'User-Agent': this.userAgent, Accept: 'application/json', 'sdk-version': '2' }, this.authHeaders, headers)
     if (method === 'POST' && requestBody === null && isForm) {
       requestBody = Buffer.from(querystring.stringify(params), 'utf8')
       setComputedHeader(requestHeaders, 'Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8')
@@ -78,9 +88,23 @@ class AndroidProtocolClient {
     setComputedHeader(requestHeaders, 'Content-Length', requestBody === null ? null : String(requestBody.byteLength))
     const timestampMs = Date.now()
     setComputedHeader(requestHeaders, 'x-ss-req-ticket', String(timestampMs))
-    for (const name of ['x-argus', 'x-gorgon', 'x-ladon', 'x-khronos']) setComputedHeader(requestHeaders, name, null)
+    if (responseMode === 'passport' && pathname === '/passport/mobile/check_qrconnect/') {
+      // Trusted capture: the QR-check request adds the fixed api_sdk environment
+      // and a trace id built from this request's 13-digit ticket plus a 6-digit
+      // poll counter, then the lowercase hex of an ASCII marker and 01.
+      this.passportSeq += 1
+      const word = String(this.passportSeq).padStart(6, '0')
+      const marker = this.passportSeq === 1 ? 'GEDMOCRATION_1' : `DMOCRATION_${this.passportSeq}`
+      setComputedHeader(requestHeaders, 'x-tt-env', 'api_sdk')
+      setComputedHeader(requestHeaders, 'x-tt-trace-id',
+        `01-01${timestampMs}${word}-${Buffer.from(marker, 'utf8').toString('hex')}-01`)
+    }
+    // Never let a header from a previous request masquerade as fresh SDK
+    // output. Stateful adapters may re-add the complete set below.
+    for (const name of ['x-argus', 'x-security-argus', 'x-gorgon', 'x-ladon', 'x-khronos',
+      'x-helios', 'x-medusa', 'x-perseus', 'x-bd-client-key', 'x-bd-kmsv']) setComputedHeader(requestHeaders, name, null)
     const context = Object.freeze({ method, url: url.href, pathname, query: url.search.slice(1),
-      params: Object.freeze({ ...queryParams }), timestampMs,
+      params: Object.freeze({ ...queryParams }), timestampMs, responseMode,
       headers: Object.freeze({ ...requestHeaders }), body: requestBody === null ? null : Buffer.from(requestBody),
       deviceInfo: Object.freeze({ ...this.deviceInfo }) })
     const signed = await this.signer.signRequest(context)
@@ -100,9 +124,9 @@ class AndroidProtocolClient {
       if (!original && ['x-ss-stub', 'content-length'].includes(name.toLowerCase())) throw signingMismatch('Signer added body metadata without a body')
     }
     const finalHeaders = mergeHeaders(requestHeaders, signed?.headers)
-    // x-security-argus belongs to the official hybrid bridge's context headers;
-    // it is not a second mandatory cryptographic signature for native requests.
-    if (!signed?.headers?.[headerKey(signed.headers, 'x-argus')]) throw new DouyinBackendError('Signer did not produce required headers', { code: ERROR_CODES.ANDROID_TICKET_GUARD_UNAVAILABLE })
+    // The adapter, rather than this transport, decides which native security
+    // headers are required for the configured SDK/version branch.
+    if (!hasSecurityHeader(signed?.headers)) throw new DouyinBackendError('Signer did not produce required headers', { code: ERROR_CODES.ANDROID_TICKET_GUARD_UNAVAILABLE })
     const transport = this.transport || (url.protocol === 'https:' ? https : http)
     return new Promise((resolve, reject) => {
       let timer
@@ -128,15 +152,25 @@ class AndroidProtocolClient {
         })
         res.on('aborted', () => finish(new DouyinBackendError('Response aborted', { code: ERROR_CODES.NETWORK_ERROR, retryable: true })))
         res.on('error', () => finish(new DouyinBackendError('Response interrupted', { code: ERROR_CODES.NETWORK_ERROR, retryable: true })))
-        res.on('end', () => {
+        res.on('end', async () => {
           if (settled) return
           const status = Number(res.statusCode || 0)
           if (status < 200 || status >= 300) return finish(new DouyinBackendError('HTTP request rejected', {
             statusCode: status, code: classifyHTTP(status), retryable: status >= 500
           }))
+          const responseHeaders = Object.fromEntries(Object.entries(res.headers || {}).map(([name, value]) => [
+            name, Array.isArray(value) ? value.slice() : value
+          ]))
           try {
-            const json = parseProtocolJSON(Buffer.concat(chunks).toString('utf8'))
+            const rawBody = Buffer.concat(chunks)
+            const json = parseProtocolJSON(rawBody.toString('utf8'))
             if (!json || typeof json !== 'object' || Array.isArray(json)) throw new Error('Invalid JSON shape')
+            // TicketGuard/Metasec consumes response headers and body to update
+            // the same SDK instance used for signing the request. Keep this
+            // callback before business validation so an upstream challenge can
+            // refresh the SDK state without creating a second client.
+            await this.signer.consumeResponse?.({ request: context, signed, statusCode: status,
+              headers: responseHeaders, body: json, rawBody })
             // Passport and device registration have different envelopes from Aweme.
             // Their callers validate the envelope before using any returned credentials.
             if (responseMode === 'business' && json.status_code !== 0) {
@@ -152,7 +186,12 @@ class AndroidProtocolClient {
             finish(null, includeResponse ? { json, statusCode: status, headers: {
               'set-cookie': res.headers?.['set-cookie'] || [], 'x-tt-token': res.headers?.['x-tt-token'] || ''
             } } : json)
-          } catch { finish(new DouyinBackendError('Non-JSON or invalid response', { code: ERROR_CODES.NON_JSON_RESPONSE, statusCode: status })) }
+          } catch (error) {
+            if (error?.code === ERROR_CODES.ANDROID_TICKET_GUARD_UNAVAILABLE || error?.code === ERROR_CODES.ANDROID_SDK_UNAVAILABLE) {
+              return finish(error)
+            }
+            finish(new DouyinBackendError('Non-JSON or invalid response', { code: ERROR_CODES.NON_JSON_RESPONSE, statusCode: status }))
+          }
         })
       })
       timer = setTimeout(() => {

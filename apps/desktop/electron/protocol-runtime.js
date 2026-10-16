@@ -24,22 +24,51 @@ function requireBusinessOK(json) {
 }
 
 class ProtocolRuntime {
-  constructor({ getSession, clientFactory, now = Date.now } = {}) {
+  constructor({ getSession, clientFactory, signerFactory = null, now = Date.now } = {}) {
     this.getSession = getSession || (() => null)
-    this.clientFactory = clientFactory || ((session, host) => new AndroidProtocolClient({
-      baseUrl: host || 'https://webcast.amemv.com', deviceInfo: session.deviceInfo, userAgent: session.userAgent, authHeaders: session.authHeaders
+    this.signerFactory = signerFactory
+    this.clientFactory = clientFactory || ((session, host, options = {}) => new AndroidProtocolClient({
+      baseUrl: host || 'https://webcast.amemv.com', deviceInfo: session.deviceInfo, userAgent: session.userAgent,
+      authHeaders: session.authHeaders, signer: options.signer
     }))
     this.now = now
     this.reports = new Map()
+    this.clients = new Map()
+    this.signers = new Map()
   }
-  invalidate(accountId) { this.reports.delete(accountId) }
+  invalidate(accountId) {
+    this.reports.delete(accountId)
+    const prefix = `${accountId}|`
+    for (const [key, client] of this.clients) if (key.startsWith(prefix)) {
+      try { client.dispose?.() } catch {}
+      this.clients.delete(key)
+    }
+    const signer = this.signers.get(String(accountId))
+    try { signer?.dispose?.() } catch {}
+    this.signers.delete(String(accountId))
+  }
   session(accountId) {
     const session = this.getSession(accountId)
     if (!session) throw Object.assign(new Error('Missing session'), { code: 'AUTHENTICATION_REQUIRED' })
     return session
   }
   fingerprint(session) { return crypto.createHash('sha256').update(JSON.stringify(session)).digest('hex') }
-  client(session, host) { return this.clientFactory(session, host) }
+  client(session, host) {
+    const accountId = String(session.accountId || session.userId || '')
+    const origin = host || 'https://webcast.amemv.com'
+    const key = `${accountId}|${origin}`
+    if (this.clients.has(key)) return this.clients.get(key)
+    let signer = this.signers.get(accountId)
+    if (!signer && this.signerFactory) {
+      signer = this.signerFactory(session)
+      this.signers.set(accountId, signer)
+      signer.setProfile?.(session)
+    }
+    const client = this.clientFactory(session, host, { signer })
+    client.setSigner?.(signer)
+    this.clients.set(key, client)
+    return client
+  }
   headers(session) { return { ...session.authHeaders, Cookie: session.cookie } }
   accountReady(accountId) {
     const session = this.getSession(accountId)
@@ -58,6 +87,11 @@ class ProtocolRuntime {
     report.authentication = { status: 'local_only', code: 'SESSION_PRESENT' }
     try {
       const json = requireBusinessOK(await this.client(session, 'https://aweme.snssdk.com').get(PROFILE_PATH, {}, this.headers(session)))
+      const signerStatus = this.signers.get(String(session.accountId || session.userId))?.getStatus?.()
+      if (signerStatus) {
+        report.signature.implementation = signerStatus.implementation
+        if (signerStatus.verified === true) report.signature.status = 'sdk_verified'
+      }
       const user = json.user || json.data?.user
       const rawUID = user?.uid_str || user?.uid || ''
       const uid = String(rawUID)
@@ -112,6 +146,11 @@ class ProtocolRuntime {
       if (['AUTHENTICATION_REQUIRED', 'RATE_LIMITED_OR_RISK', 'NON_JSON_RESPONSE'].includes(error.code)) this.invalidate(input.accountId)
       return failure(error)
     }
+  }
+  dispose() {
+    for (const client of this.clients.values()) { try { client.dispose?.() } catch {} }
+    for (const signer of this.signers.values()) { try { signer.dispose?.() } catch {} }
+    this.clients.clear(); this.signers.clear(); this.reports.clear()
   }
 }
 module.exports = { ProtocolRuntime, PROFILE_PATH, DETAILS_PATH, requireBusinessOK, failure }

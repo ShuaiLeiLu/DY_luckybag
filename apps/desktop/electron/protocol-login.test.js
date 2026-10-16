@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
-const { NativeLoginProvider, passportData, REGISTER_PATH, QR_PATH, CHECK_PATH } = require('./native-login-provider')
+const { NativeLoginProvider, passportData, REGISTER_PATH, QR_PATH, CHECK_PATH, SEND_CODE_PATH, VALIDATE_CODE_PATH } = require('./native-login-provider')
 const { ProtocolLoginService } = require('./protocol-login-service')
 const { createProtocolSessionStore } = require('./protocol-session-store')
 const { createProtocolDeviceStore } = require('./protocol-device-store')
@@ -30,17 +30,24 @@ function store() {
 function service(options = {}) {
   const storage = store()
   const provider = { prepare: vi.fn(async () => {}), createQR: vi.fn(async () => ({ qrImage: `data:image/png;base64,${png}`, expiresAt: Date.now() + 60000 })),
-    poll: vi.fn(async () => ({ state: 'confirmed', userId: '123' })), verify: vi.fn(async () => secretSession), dispose: vi.fn() }
+    poll: vi.fn(async () => ({ state: 'confirmed', userId: '123' })), verify: vi.fn(async () => secretSession), dispose: vi.fn(),
+    sendCode: vi.fn(async () => ({ sent: true })), verifyCode: vi.fn(async () => ({ state: 'confirmed', userId: '123' })) }
   const onSaved = vi.fn()
   const login = new ProtocolLoginService({ sessions: storage.sessions, providerFactory: () => provider, onSaved, ...options })
   return { ...storage, provider, onSaved, login }
+}
+function qrService(options = {}) {
+  const context = service(options)
+  const start = context.login.start.bind(context.login)
+  context.login.start = input => start({ ...(input || {}), mode: 'qr' })
+  return context
 }
 async function advance(ms = 2500) { await vi.advanceTimersByTimeAsync(ms) }
 
 describe('native QR login lifecycle', () => {
   it('saves only after mobile confirmation plus self-profile verification, encrypted and recoverable', async () => {
     vi.useFakeTimers()
-    const { login, sessions, filePath, safeStorage, onSaved, provider } = service()
+    const { login, sessions, filePath, safeStorage, onSaved, provider } = qrService()
     const first = login.start(); await advance(0)
     expect(login.snapshot(first.attemptId).state).toBe('waiting')
     expect(sessions.list()).toEqual([])
@@ -56,7 +63,7 @@ describe('native QR login lifecycle', () => {
   })
   it('keeps scanned state monotonic, polls sequentially and honors expiry', async () => {
     vi.useFakeTimers()
-    const { login, provider, sessions } = service()
+    const { login, provider, sessions } = qrService()
     provider.poll.mockResolvedValueOnce({ state: 'scanned' }).mockResolvedValue({ state: 'new' })
     login.start(); await advance(5000)
     expect(login.snapshot().state).toBe('scanned'); expect(provider.poll).toHaveBeenCalledTimes(2)
@@ -67,7 +74,7 @@ describe('native QR login lifecycle', () => {
   })
   it('cancels a pending request and never commits its late confirmation', async () => {
     vi.useFakeTimers()
-    const { login, provider, sessions } = service()
+    const { login, provider, sessions } = qrService()
     let resolve
     provider.verify.mockImplementation(() => new Promise(done => { resolve = done }))
     const attempt = login.start(); await advance()
@@ -78,7 +85,7 @@ describe('native QR login lifecycle', () => {
   })
   it('a stale cancel cannot cancel the replacement attempt', async () => {
     vi.useFakeTimers()
-    const { login } = service()
+    const { login } = qrService()
     const old = login.start(); await advance(0)
     const current = login.start(); login.cancel(old.attemptId); await advance(0)
     expect(login.snapshot(current.attemptId).state).toBe('waiting')
@@ -87,7 +94,7 @@ describe('native QR login lifecycle', () => {
   })
   it('rejects a different account without overwriting the old credentials', async () => {
     vi.useFakeTimers()
-    const { login, sessions, provider } = service()
+    const { login, sessions, provider } = qrService()
     sessions.save({ ...secretSession, accountId: 'existing', userId: '456' })
     login.start({ accountId: 'existing' }); await advance()
     expect(login.snapshot().error.code).toBe('LOGIN_ACCOUNT_MISMATCH')
@@ -95,7 +102,7 @@ describe('native QR login lifecycle', () => {
   })
   it('renews a duplicate UID under its existing account id', async () => {
     vi.useFakeTimers()
-    const { login, sessions } = service()
+    const { login, sessions } = qrService()
     sessions.save({ ...secretSession, accountId: 'existing' })
     login.start(); await advance()
     expect(sessions.list().map(account => account.id)).toEqual(['existing'])
@@ -103,7 +110,7 @@ describe('native QR login lifecycle', () => {
   it('stops on unknown states, risk, and refused confirmation without retry or credential leakage', async () => {
     vi.useFakeTimers()
     for (const outcome of ['unknown', 'risk', 'refused']) {
-      const { login, provider, sessions } = service()
+      const { login, provider, sessions } = qrService()
       if (outcome === 'risk') provider.poll.mockRejectedValue(Object.assign(new Error('private-token'), { code: 'RATE_LIMITED_OR_RISK' }))
       else provider.poll.mockResolvedValue({ state: outcome })
       login.start(); await advance(10000)
@@ -114,7 +121,7 @@ describe('native QR login lifecycle', () => {
   })
   it('does not report success if encryption/persistence fails', async () => {
     vi.useFakeTimers()
-    const { login, sessions, onSaved } = service()
+    const { login, sessions, onSaved } = qrService()
     vi.spyOn(sessions, 'save').mockImplementation(() => { throw new Error('private local path') })
     login.start(); await advance()
     expect(login.snapshot().error.code).toBe('LOGIN_STORAGE_FAILED'); expect(onSaved).not.toHaveBeenCalled()
@@ -122,7 +129,7 @@ describe('native QR login lifecycle', () => {
   })
   it('stops after client rejection following a scan, with no save or automatic QR retry', async () => {
     vi.useFakeTimers()
-    const { login, provider, sessions, onSaved } = service()
+    const { login, provider, sessions, onSaved } = qrService()
     provider.poll.mockResolvedValueOnce({ state: 'scanned' }).mockRejectedValue(Object.assign(new Error('private upstream'), {
       code: 'LOGIN_CLIENT_REJECTED', businessCode: 1049
     }))
@@ -141,6 +148,61 @@ describe('native QR login lifecycle', () => {
   })
 })
 
+describe('phone SMS login lifecycle', () => {
+  it('is the default mode and completes via mobile, code, then self-profile verification', async () => {
+    vi.useFakeTimers()
+    const { login, sessions, onSaved, provider } = service()
+    const first = login.start(); await advance(0)
+    expect(first.mode).toBe('sms')
+    expect(login.snapshot(first.attemptId).state).toBe('waiting_mobile')
+    expect(login.submit({ attemptId: first.attemptId, mobile: '13800138000' })); await advance(0)
+    expect(provider.sendCode).toHaveBeenCalledWith('13800138000', expect.anything())
+    expect(login.snapshot(first.attemptId).state).toBe('waiting_code')
+    login.submit({ attemptId: first.attemptId, code: '123456' }); await advance(0)
+    expect(provider.verifyCode).toHaveBeenCalledWith('123456', expect.anything())
+    expect(provider.verify).toHaveBeenCalledWith('123', expect.anything())
+    const final = login.snapshot(first.attemptId)
+    expect(final.state).toBe('completed'); expect(final.account.id).toBe('dy_123')
+    expect(onSaved).toHaveBeenCalledOnce(); expect(sessions.get('dy_123').userId).toBe('123')
+    expect(JSON.stringify(final)).not.toMatch(/private-session|private-native-token|device_id/)
+  })
+  it('rejects malformed mobile or code input without calling the provider', async () => {
+    vi.useFakeTimers()
+    const { login, provider } = service()
+    login.start(); await advance(0)
+    expect(login.snapshot().state).toBe('waiting_mobile')
+    login.submit({ mobile: '' })
+    expect(login.snapshot().error.code).toBe('LOGIN_MOBILE_INVALID')
+    expect(provider.sendCode).not.toHaveBeenCalled()
+  })
+  it('stops on a send-code failure and honors expiry while waiting for the code', async () => {
+    vi.useFakeTimers()
+    const { login, provider, sessions } = service()
+    provider.sendCode.mockRejectedValueOnce(Object.assign(new Error('private upstream'), {
+      code: 'LOGIN_CLIENT_REJECTED', businessCode: 1049
+    }))
+    const attempt = login.start(); await advance(0)
+    login.submit({ attemptId: attempt.attemptId, mobile: '13800138000' }); await advance(0)
+    expect(login.snapshot(attempt.attemptId)).toMatchObject({ state: 'failed',
+      error: { code: 'LOGIN_CLIENT_REJECTED', businessCode: 1049 } })
+    expect(provider.verifyCode).not.toHaveBeenCalled(); expect(sessions.list()).toEqual([])
+    const next = login.start(); await advance(0)
+    await advance(180000)
+    expect(login.snapshot(next.attemptId).state).toBe('expired')
+    expect(provider.dispose).toHaveBeenCalledTimes(2)
+  })
+  it('a late code submission for a replaced attempt does not touch the current one', async () => {
+    vi.useFakeTimers()
+    const { login, provider } = service()
+    const old = login.start(); await advance(0)
+    const current = login.start(); await advance(0)
+    expect(login.submit({ attemptId: old.attemptId, code: '123456' })).toMatchObject({ success: false })
+    expect(login.snapshot(current.attemptId).state).toBe('waiting_mobile')
+    expect(provider.verifyCode).not.toHaveBeenCalled()
+    login.dispose()
+  })
+})
+
 describe('Android Passport adapter', () => {
   it.each([false, true])('sends the shared UA through the production client and saves it (existing installation: %s)', async existing => {
     const https = require('node:https')
@@ -149,7 +211,7 @@ describe('Android Passport adapter', () => {
     const request = vi.spyOn(https, 'request').mockImplementation((url, options, callback) => {
       requests.push({ pathname: url.pathname, headers: options.headers, query: url.searchParams })
       const json = url.pathname === REGISTER_PATH ? { device_id_str: profile.deviceInfo.device_id, install_id_str: profile.deviceInfo.iid }
-        : url.pathname === QR_PATH ? { message: 'success', data: { qrcode: png, token: 'fixture-token', expire_time: 60 } }
+        : url.pathname === QR_PATH ? { message: 'success', data: { qrcode: png, token: 'fixture-token', expire_time: 60, ds: 'fixture-ds' } }
         : url.pathname === CHECK_PATH ? { message: 'success', data: { status: 'confirmed', user_data: { user_id: '123', session_key: 'fixture-session' } } }
         : { status_code: 0, user: { uid: '123', nickname: 'fixture' } }
       const req = new EventEmitter()
@@ -168,11 +230,33 @@ describe('Android Passport adapter', () => {
       expect(requests.map(item => item.pathname)).toEqual([
         ...(existing ? [] : [REGISTER_PATH]), QR_PATH, CHECK_PATH, '/aweme/v1/user/profile/self/'
       ])
-      expect(requests.every(item => item.headers['User-Agent'] === DEFAULT_ANDROID_USER_AGENT)).toBe(true)
-      expect(requests.every(item => !item.headers['User-Agent'].includes('DesktopProtocol'))).toBe(true)
+      // The trusted capture omits User-Agent/Accept on the Passport frames only.
+      const nonPassport = requests.filter(item => item.pathname === REGISTER_PATH || item.pathname === '/aweme/v1/user/profile/self/')
+      expect(nonPassport.every(item => item.headers['User-Agent'] === DEFAULT_ANDROID_USER_AGENT)).toBe(true)
+      expect(nonPassport.every(item => !item.headers['User-Agent'].includes('DesktopProtocol'))).toBe(true)
       expect(requests.every(item => /^\d{13}$/.test(item.headers['x-ss-req-ticket']))).toBe(true)
       expect(requests.every(item => item.headers['x-security-argus'] === undefined)).toBe(true)
-      expect(requests.every(item => item.query.get('device_type') === 'Pixel 6' && item.query.get('os_api') === '32')).toBe(true)
+      expect(nonPassport.every(item => item.query.get('device_type') === 'Pixel 6' && item.query.get('os_api') === '32')).toBe(true)
+      // Passport frames carry the exact trusted-capture parameter sets and order.
+      const qrRequest = requests.find(item => item.pathname === QR_PATH)
+      const checkRequest = requests.find(item => item.pathname === CHECK_PATH)
+      expect([...qrRequest.query.keys()]).toEqual([
+        'service', 'account_sdk_source', 'aid', 'version_code', 'passport-sdk-version',
+        'request_from_account_sdk', 'is_from_ttaccountsdk', 'need_logo', 'source'
+      ])
+      expect(qrRequest.query.get('version_code')).toBe('40.7.0')
+      expect([...checkRequest.query.keys()]).toEqual([
+        'service', 'scene', 'account_sdk_source', 'aid', 'version_code', 'passport-sdk-version',
+        'request_from_account_sdk', 'is_from_ttaccountsdk', 'token'
+      ])
+      expect(checkRequest.query.get('token')).toBe('fixture-token')
+      // Only the request ticket appears as security-style output on these frames.
+      expect(qrRequest.headers['x-argus']).toBeUndefined()
+      expect(checkRequest.headers['x-argus']).toBeUndefined()
+      // The QR-check frame echoes the issued ds and adds the two derived headers.
+      expect(checkRequest.headers['x-tt-dt']).toBe('fixture-ds')
+      expect(checkRequest.headers['x-tt-env']).toBe('api_sdk')
+      expect(checkRequest.headers['x-tt-trace-id']).toMatch(/^01-01\d{13}000001-4745444d4f43524154494f4e5f31-01$/)
       expect(deviceStore.save).toHaveBeenCalledWith(expect.objectContaining({ userAgent: DEFAULT_ANDROID_USER_AGENT }))
       expect(session.userAgent).toBe(DEFAULT_ANDROID_USER_AGENT)
       expect(session.deviceInfo.device_id).toBe(profile.deviceInfo.device_id)
