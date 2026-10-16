@@ -1,6 +1,7 @@
 const crypto = require('node:crypto')
 const { CookieJar } = require('tough-cookie')
-const { AndroidProtocolClient, DEFAULT_ANDROID_USER_AGENT } = require('./android-protocol-client')
+const { AndroidProtocolClient, DEFAULT_ANDROID_DEVICE, DEFAULT_ANDROID_USER_AGENT } = require('./android-protocol-client')
+const { AndroidSignatureProvider } = require('./android-signature-provider')
 const { PROFILE_PATH } = require('./protocol-runtime')
 const { ANDROID_APP, ANDROID_DEVICE, ANDROID_PACKAGE, REGISTRATION_PROFILE_VERSION } = require('./android-client-profile')
 
@@ -50,27 +51,55 @@ function reusableProfile(profile) {
 }
 
 class NativeLoginProvider {
-  constructor({ deviceStore, clientFactory, now = Date.now } = {}) {
+  constructor({ deviceStore, clientFactory, signer, signerFactory, now = Date.now } = {}) {
     this.deviceStore = deviceStore
     this.now = now
     // The native metasec object keeps per-instance state (round counter, cached
     // context). One SDK/signature instance must live for the whole login flow, so
-    // memoize the protocol client per origin instead of rebuilding it each request.
+    // memoize clients per origin and share one signer across those origins. Device
+    // registration and Passport are part of the same installation/login context.
     this.clientCache = new Map()
-    this.clientFactory = clientFactory || ((profile, baseUrl) => {
-      if (this.clientCache.has(baseUrl)) return this.clientCache.get(baseUrl)
-      const client = new AndroidProtocolClient({
-        baseUrl, deviceInfo: profile.deviceInfo, userAgent: profile.userAgent
-      })
-      this.clientCache.set(baseUrl, client)
+    this.signer = signer || null
+    this.signerFactory = signerFactory || (() => new AndroidSignatureProvider())
+    this.controller = new AbortController()
+    this.disposed = false
+    this.clientFactory = (profile, baseUrl) => {
+      this.assertActive()
+      let client = this.clientCache.get(baseUrl)
+      if (!client) {
+        this.signer ||= this.signerFactory(profile)
+        client = clientFactory ? clientFactory(profile, baseUrl, { signer: this.signer })
+          : new AndroidProtocolClient({ baseUrl, deviceInfo: profile.deviceInfo,
+            userAgent: profile.userAgent, signer: this.signer })
+        client.setSigner?.(this.signer)
+        this.clientCache.set(baseUrl, client)
+      }
+      this.updateClientProfile(client, profile)
       return client
-    })
+    }
     this.jar = new CookieJar()
     this.profile = null
     this.token = ''
     this.authHeaders = {}
   }
+  assertActive(signal) {
+    if (this.disposed || this.controller.signal.aborted || signal?.aborted) throw fail('LOGIN_CANCELED')
+  }
+  updateClientProfile(client, profile) {
+    if (profile) {
+      client.deviceInfo = { ...DEFAULT_ANDROID_DEVICE, ...profile.deviceInfo }
+      client.userAgent = profile.userAgent
+    }
+  }
+  setProfile(profile) {
+    this.profile = profile
+    // AndroidProtocolClient copies its deviceInfo at construction. Registration
+    // replaces the seed profile, so cached clients must receive the issued IDs.
+    for (const client of this.clientCache.values()) this.updateClientProfile(client, profile)
+  }
   async request(origin, pathname, options = {}) {
+    this.assertActive(options.signal)
+    const signal = options.signal ? AbortSignal.any([options.signal, this.controller.signal]) : this.controller.signal
     const requestURL = origin + pathname
     const cookie = this.jar.getCookieStringSync(requestURL)
     const headers = { ...options.headers, ...this.authHeaders, ...(cookie ? { Cookie: cookie } : {}) }
@@ -82,8 +111,11 @@ class NativeLoginProvider {
       if (csrf && csrf.length <= 4096 && !/[\r\n\x00]/.test(csrf)) headers['x-tt-passport-csrf-token'] = csrf
     }
     const response = await this.clientFactory(this.profile, origin).execute(pathname, {
-      ...options, includeResponse: true, headers
+      ...options, includeResponse: true, headers, signal
     })
+    // A transport or injected adapter can resolve after cancellation. It must
+    // never refill cookies/tokens after dispose or commit a registered device.
+    this.assertActive(signal)
     for (const value of response.headers['set-cookie'] || []) {
       try { this.jar.setCookieSync(value, requestURL) } catch { /* Invalid cookie scope is not accepted. */ }
     }
@@ -92,13 +124,14 @@ class NativeLoginProvider {
     return response.json
   }
   async prepare(signal) {
+    this.assertActive(signal)
     const existing = this.deviceStore?.get()
     if (existing && !validProfile(existing)) throw fail('LOGIN_DEVICE_INVALID')
     if (reusableProfile(existing)) {
       // App request metadata can change without registering another installation.
       // The full version tuple comes from AndroidManifest.xml and X.5yQ, not
       // a guessed newer version. Keep the registered IDs and installation nonces.
-      this.profile = { ...existing, deviceInfo: { ...existing.deviceInfo, ...APP }, userAgent: USER_AGENT }
+      this.setProfile({ ...existing, deviceInfo: { ...existing.deviceInfo, ...APP }, userAgent: USER_AGENT })
       if (JSON.stringify(this.profile) !== JSON.stringify(existing)) this.deviceStore.save(this.profile)
       return
     }
@@ -107,7 +140,7 @@ class NativeLoginProvider {
     // The old encrypted record remains intact if registration fails or is canceled.
     const seed = { ...APP, ...ANDROID_DEVICE, openudid: crypto.randomBytes(8).toString('hex'),
       cdid: crypto.randomUUID(), clientudid: crypto.randomUUID() }
-    this.profile = { deviceInfo: seed, userAgent: USER_AGENT }
+    this.setProfile({ deviceInfo: seed, userAgent: USER_AGENT })
     const header = { ...seed, app_version: APP.version_name, package: APP_PACKAGE,
       os: 'Android', device_model: seed.device_type,
       aid: Number(APP.aid), version_code: Number(APP.version_code),
@@ -123,12 +156,15 @@ class NativeLoginProvider {
     const iid = decimalID(json.install_id_str || json.install_id)
     if (!deviceId || !iid || (json.status_code !== undefined && json.status_code !== 0) ||
       (json.error_code !== undefined && json.error_code !== 0) || json.message === 'error') throw fail('LOGIN_DEVICE_REGISTRATION_REJECTED')
-    signal?.throwIfAborted()
-    this.profile = { deviceInfo: { ...seed, device_id: deviceId, iid }, userAgent: USER_AGENT,
-      registeredAt: this.now(), registrationProfileVersion: REGISTRATION_PROFILE_VERSION }
+    this.assertActive(signal)
+    this.setProfile({ deviceInfo: { ...seed, device_id: deviceId, iid }, userAgent: USER_AGENT,
+      registeredAt: this.now(), registrationProfileVersion: REGISTRATION_PROFILE_VERSION })
     this.deviceStore?.save(this.profile)
   }
   async createQR(signal) {
+    this.assertActive(signal)
+    if (!validProfile(this.profile)) throw fail('LOGIN_DEVICE_INVALID')
+    this.token = ''
     // GetScanCodeTransformer supplies an absolute service URL when issuing the QR;
     // check_qrconnect's SDK builder uses the bare host.
     // The server QR opens the official phone confirmation page, whose title can
@@ -143,13 +179,15 @@ class NativeLoginProvider {
     const qr = String(data.qrcode || '').replace(/^data:image\/png;base64,/, '')
     if (qr.length > 512000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(qr) ||
       !Buffer.from(qr, 'base64').subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) throw fail('LOGIN_QR_SCHEMA_UNCONFIRMED')
-    this.token = data.token
     const expire = Number(data.expire_time)
     const expiresAt = expire > 1e12 ? expire : expire > 1e9 ? expire * 1000 : this.now() + expire * 1000
     if (!Number.isFinite(expiresAt) || expiresAt <= this.now()) throw fail('LOGIN_QR_EXPIRED')
+    this.token = data.token
     return { qrImage: 'data:image/png;base64,' + qr, expiresAt: Math.min(expiresAt, this.now() + 180000) }
   }
   async poll(signal) {
+    this.assertActive(signal)
+    if (!this.token) throw fail('LOGIN_QR_EXPIRED')
     const data = passportData(await this.request(AUTH_ORIGIN, CHECK_PATH, {
       params: { ...ACCOUNT_PARAMS, token: this.token }, responseMode: 'passport', signal
     }))
@@ -168,6 +206,7 @@ class NativeLoginProvider {
     return { state: 'confirmed', userId: id }
   }
   async verify(userId, signal) {
+    this.assertActive(signal)
     const cookie = this.jar.getCookieStringSync(AUTH_ORIGIN + PROFILE_PATH)
     if (!/(?:^|;\s*)sessionid(?:_ss)?=\S+/.test(cookie)) throw fail('LOGIN_SESSION_MISSING')
     const json = await this.request(AUTH_ORIGIN, PROFILE_PATH, { signal })
@@ -178,7 +217,17 @@ class NativeLoginProvider {
       cookie: this.jar.getCookieStringSync(AUTH_ORIGIN + PROFILE_PATH), authHeaders: { ...this.authHeaders },
       deviceInfo: { ...this.profile.deviceInfo }, userAgent: this.profile.userAgent }
   }
-  dispose() { this.token = ''; this.jar.removeAllCookiesSync(); this.authHeaders = {}; this.profile = null; this.clientCache.clear() }
+  dispose() {
+    if (this.disposed) return
+    this.disposed = true
+    this.controller.abort()
+    this.token = ''; this.jar.removeAllCookiesSync(); this.authHeaders = {}; this.profile = null
+    const resources = new Set([...this.clientCache.values(), this.signer])
+    this.clientCache.clear(); this.signer = null
+    for (const resource of resources) {
+      try { resource?.dispose?.()?.catch?.(() => {}) } catch { /* Cleanup must not prevent canceling the login. */ }
+    }
+  }
 }
 module.exports = { NativeLoginProvider, passportData, decimalID, validProfile, reusableProfile, APP, ACCOUNT_PARAMS,
   AUTH_ORIGIN, REGISTER_ORIGIN, REGISTER_PATH, QR_PATH, CHECK_PATH }
