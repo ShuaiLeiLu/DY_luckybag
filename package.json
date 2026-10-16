@@ -19,7 +19,7 @@
     "server:docker:build": "bash ./scripts/build-pool-image.sh",
     "server:docker:up": "bash ./scripts/deploy-pool-local.sh",
     "server:dump": "node ./scripts/pool-dump.mjs",
-    "desktop:electron:dev": "concurrently \"npm run desktop:dev\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
+    "desktop:electron:dev": "concurrently \"npm run desktop:dev\" \"wait-on http://localhost:5180 && cross-env NODE_ENV=development electron .\"",
     "desktop:electron:build:win": "npm run desktop:build && electron-builder --win nsis --x64 --publish never",
     "release:publish": "powershell -ExecutionPolicy Bypass -File ./scripts/release-publish.ps1",
     "server:docker:watch": "node ./scripts/docker-hot-watch.mjs",

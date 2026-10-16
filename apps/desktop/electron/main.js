@@ -142,7 +142,7 @@ app.whenReady().then(async () => {
   } })
   registerHandlers()
   mainWindow = createDesktopWindow({ app, BrowserWindow, logger,
-    DESKTOP_DEV_SERVER_URL: process.env.DY_DESKTOP_DEV_URL || 'http://localhost:5173',
+    DESKTOP_DEV_SERVER_URL: process.env.DY_DESKTOP_DEV_URL || 'http://localhost:5180',
     getHotUpdateEntry: () => {
       const entry = hotUpdates.getAppliedEntryFile()
       if (!entry) return ''

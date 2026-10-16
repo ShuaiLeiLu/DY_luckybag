@@ -1,5 +1,5 @@
 {
-  "poolServerUrl": "http://127.0.0.1:9090",
+  "poolServerUrl": "http://127.0.0.1:9091",
   "updateFeedUrl": "",
   "hotUpdateEnabled": false,
   "hotUpdateManifestUrl": "",

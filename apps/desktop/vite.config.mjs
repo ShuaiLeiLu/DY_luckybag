@@ -25,7 +25,7 @@ export default defineConfig({
   base: './',
   server: {
     host: 'localhost',
-    port: 5173,
+    port: 5180,
     strictPort: true
   },
   test: {
