@@ -87,7 +87,8 @@ async function nodeTest() {
   const dir = fs.mkdtempSync(path.join(root, '.tmp', 'native-smoke-'))
   const token = crypto.randomBytes(32).toString('hex')
   const executable = path.join(dir, process.platform === 'win32' ? 'poolserver.exe' : 'poolserver')
-  execFileSync(process.execPath, [path.join(root, 'run-go.mjs'), '--cwd', path.join(root, 'apps/pool-server'), 'build', '-buildvcs=false', '-o', executable, './cmd/poolserver'], { cwd: root, stdio: 'pipe', windowsHide: true })
+  const goBin = process.env.GO_BIN || 'go'
+  execFileSync(goBin, ['build', '-buildvcs=false', '-o', executable, './cmd/poolserver'], { cwd: path.join(root, 'apps/pool-server'), stdio: 'pipe', windowsHide: true })
   const socket = net.createServer()
   await new Promise(resolve => socket.listen(0, '127.0.0.1', resolve))
   const poolPort = socket.address().port
@@ -105,26 +106,37 @@ async function nodeTest() {
     }
     // Transport tickets use milliseconds; the experimental signature vector's
     // timestamp input still uses seconds. This fixture is not platform validation.
-    const expected = signNativeAndroidHeaders({ query: url.search.slice(1), body, timestamp: Math.floor(Number(ticket) / 1000) })
+    const isPassport = url.pathname.startsWith('/passport/mobile/')
+    const expected = signNativeAndroidHeaders({ query: url.search.slice(1), body, timestamp: Math.floor(Number(ticket) / 1000), passport: isPassport })
     expected['x-ss-req-ticket'] = ticket
     if (Object.entries(expected).some(([k,v]) => req.headers[k] !== v)) {
       res.writeHead(401); res.end(JSON.stringify({ status_code: 8 })); return
     }
+    if (isPassport && req.headers['x-argus'] !== undefined) { res.writeHead(401); res.end(JSON.stringify({ status_code: 8 })); return }
     received.push(url.pathname)
     if (url.pathname === '/service/2/device_register/') {
       assert.equal(req.method, 'POST')
       assert.equal(JSON.parse(body).magic_tag, 'ss_app_log')
       res.end(JSON.stringify({ device_id_str: '111', install_id_str: '222' })); return
     }
-    assert.equal(url.searchParams.get('device_id'), '111')
+    if (!isPassport) assert.equal(url.searchParams.get('device_id'), '111')
     if (url.pathname === '/passport/mobile/get_qrcode/') {
+      // Trusted capture: exact nine-parameter set, no deviceInfo expansion.
+      assert.equal([...url.searchParams.keys()].join('&'),
+        'service&account_sdk_source&aid&version_code&passport-sdk-version&request_from_account_sdk&is_from_ttaccountsdk&need_logo&source')
+      assert.equal(url.searchParams.get('version_code'), '40.7.0')
       assert.equal(url.searchParams.get('source'), 'pad')
       assert.equal(url.searchParams.get('service'), 'https://aweme.snssdk.com')
       res.end(JSON.stringify({ message: 'success', data: { token: 'fixture-qr-token', expire_time: Math.floor(Date.now()/1000)+120,
-        qrcode: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM6sAAAAASUVORK5CYII=' } })); return
+        ds: 'fixture-ds', qrcode: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM6sAAAAASUVORK5CYII=' } })); return
     }
     if (url.pathname === '/passport/mobile/check_qrconnect/') {
+      assert.equal([...url.searchParams.keys()].join('&'),
+        'service&scene&account_sdk_source&aid&version_code&passport-sdk-version&request_from_account_sdk&is_from_ttaccountsdk&token')
       assert.equal(url.searchParams.get('token'), 'fixture-qr-token')
+      assert.equal(req.headers['x-tt-dt'], 'fixture-ds')
+      assert.equal(req.headers['x-tt-env'], 'api_sdk')
+      assert.match(String(req.headers['x-tt-trace-id']), /^01-01\d{13}\d{6}-[0-9a-f]+-01$/)
       loginPolls++
       res.end(JSON.stringify({ message: 'success', data: loginPolls === 1 ? { status: 'scanned' } : {
         status: 'confirmed', user_data: { user_id: '10001', session_key: 'fixture-account-secret' }

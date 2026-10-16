@@ -23,7 +23,7 @@ async function main() {
     const filename = path.resolve(value('--session'))
     if (fs.statSync(filename).size > 131072) throw new Error('会话文件不能超过 128 KiB')
     try { session = normalizeProtocolSession(JSON.parse(fs.readFileSync(filename, 'utf8').replace(/^\uFEFF/, ''))) }
-    catch { throw new Error('会话格式不完整，请按 protocol-session.example.json 提供 Cookie、设备标识和 User-Agent') }
+    catch { throw new Error('会话格式不完整，请提供包含 Cookie、设备标识和 User-Agent 的有效会话 JSON 数据') }
   }
   const runtime = new ProtocolRuntime({ getSession: id => session?.accountId === id ? session : null })
   report.verification = await runtime.verify({ accountId: session?.accountId || '', roomId: value('--room-id') })
