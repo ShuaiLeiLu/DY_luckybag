@@ -339,8 +339,9 @@ npm run protocol:verify-native-core
 
 1. `get_qrcode`：仅可信 9 项参数时返回 `error_code 11`（此功能不支持当前app）；在 `is_from_ttaccountsdk` 之后追加 `device_platform=android` 后返回 `error_code 0` 并携带真实 `qrcode`(PNG data-url)/`token …_lf`/`expire_time`。二分显示 10 个候选字段中只有 `device_platform` 改变结果（os_version/sdk_version/device_type/device_brand/language/device_id/iid 均无影响）。
 2. `check_qrconnect`：追加 `x-tt-dt`/`x-tt-env=api_sdk`/`x-tt-trace-id` 后 `error_code 0`，状态机 `new → expired` 正常。
-3. `send_code`：无 `device_id`+`iid` → `2156 系统繁忙，请重启应用或刷新页面后重试`；两者齐全（无论 0 还是真实值）→ 稳定 `7 系统繁忙，请稍后再试`。逐字段矩阵（os_version、sdk_version、device_type、verify_type、last_send_time、tt_data、need_logo、mix_mode=0/1/缺省、service 裸 host/完整 URL/缺省、phone 替代 mobile、GET query/POST 表单、有无 User-Agent/x-tt-dt/x-tt-trace-id）下返回值不变，`7` 是该形状下的稳态。带 `/v1/` 后缀 → `4044 请将应用升级至最新版本后重试`。
+3. `send_code`：无 `device_id`+`iid` → `2156 系统繁忙，请重启应用或刷新页面后重试`；两者齐全（无论 0 还是真实值）→ 稳定 `7 系统繁忙，请稍后再试`。逐字段矩阵（os_version、sdk_version、device_type、verify_type、last_send_time、tt_data、need_logo、mix_mode=0/1/缺省、service 裸 host/完整 URL/缺省、phone 替代 mobile、GET query/POST 表单、有无 User-Agent/x-tt-dt/x-tt-trace-id）下返回值不变，`7` 是该形状下的稳态（mix_mode=2、ts、sse、device_os_type、`ns/i` 备用 origin 同样为 `7`，.tmp/probe-sms13.cjs）。带 `/v1/` 后缀 → `4044 请将应用升级至最新版本后重试`。
 4. `validate_code`：过期 token → `error_code 1`（会话过期）。
-5. 匿名 `profile/self` → `status_code 8`；`log.snssdk.com/service/2/device_register/` 若只发最小 JSON 体返回 `device_id:0/install_id:0`，需完整 `magic_tag:ss_app_log` 头才分配真实 id。
+5. 匿名 `profile/self` → `status_code 8`；`log.snssdk.com/service/2/device_register/` 若只发最小 JSON 体返回 `device_id:0/install_id:0`，需完整 `magic_tag:ss_app_log` 头才分配真实 id（本轮实测该端点两次返回全 0；provider 优先复用已保存的真实 id）。
+6. Header 层（.tmp/probe-sms11/12.cjs）：send_code 响应头带 `bd-tt-error-code`（镜像 body 的 error_code）与 `x-vc-bdturing-parameters`（`{"code":"40000","subtype":"nocaptcha_collect",…}`）。把 `x-vc-bdturing-parameters` 原样回显到下一次请求（大小写各试一次）结果仍为 `7`；备用 origin `i.snssdk.com` 同为 `7`（`ns.snssdk.com` 无法解析；log 返回 HTML）。
 
 代码落点：`QR_PARAMS`/`CHECK_PARAMS`/`SMS_BASE_PARAMS` 均已含 `device_platform:'android'`；`sendCode`/`verifyCode` 通过 `smsParams` 显式带上 `device_id`+`iid`。以上为在线观察到的响应形状；一次真实手机验证码登录成功后再关闭"未验证"标记。
