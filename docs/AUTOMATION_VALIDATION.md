@@ -51,7 +51,7 @@ npm run protocol:login-diagnose
 
 两条官方请求固定了该接口的线格式，本地实现已按其逐字段对齐：
 
-- `get_qrcode` query 精确 9 项、固定顺序：`service=https://aweme.snssdk.com&account_sdk_source=app&aid=1128&version_code=40.7.0&passport-sdk-version=60759&request_from_account_sdk=1&is_from_ttaccountsdk=1&need_logo=1&source=pad`；`version_code` 为点分串（注册体仍用整数版本元组）。头仅 `Content-Type`、`x-ss-req-ticket`（13 位毫秒）、`x-tt-passport-csrf-token`、`sdk-version:2`，无 User-Agent/Accept。
+- `get_qrcode` query 精确 10 项、固定顺序：可信 9 项 `service=https://aweme.snssdk.com&account_sdk_source=app&aid=1128&version_code=40.7.0&passport-sdk-version=60759&request_from_account_sdk=1&is_from_ttaccountsdk=1&need_logo=1&source=pad`，实时探针确认真实服务还要求 `device_platform=android`（追加在 `is_from_ttaccountsdk` 之后）：缺它返回 `error_code 11`，带上后返回 `error_code 0` 与真实二维码载荷；10 个候选字段中仅此字段改变结果。`version_code` 为点分串（注册体仍用整数版本元组）。头仅 `Content-Type`、`x-ss-req-ticket`（13 位毫秒）、`x-tt-passport-csrf-token`、`sdk-version:2`，无 User-Agent/Accept。
 - `check_qrconnect` query 精确 9 项：`service=aweme.snssdk.com&scene=0&…&is_from_ttaccountsdk=1&token=…`；额外头 `Cookie`、`x-tt-dt`、`x-tt-env=api_sdk`、`x-tt-trace-id`。`x-tt-dt` 回显上一次响应的 `data.ds`。
 - `x-tt-trace-id` 形如 `01-01` + 13 位毫秒 ticket + 6 位序号 + `-` + ASCII 标记的小写 hex + `-01`；首轮标记 `GEDMOCRATION_1`，其后 `DMOCRATION_{n}`。
 - 这两个 Passport 接口上官方不发 `x-argus`/`x-gorgon`/`x-ladon`；passport 模式的实验签名只回 `x-ss-req-ticket`。
@@ -60,9 +60,9 @@ npm run protocol:login-diagnose
 
 手机端默认走短信验证码，桌面端以它为主流程（pad 端才使用扫码）。端点取自 APK 字符串表（classes19/classes26.dex）：
 
-- `POST/GET /passport/mobile/send_code/`：参数沿用已确证的 Passport 固定顺序 `service&account_sdk_source&aid&version_code&passport-sdk-version&request_from_account_sdk&is_from_ttaccountsdk&mix_mode`，再追加 `mobile`；响应 `data.token` 作为校验凭据、`data.ds` 供下一步回显。
-- `GET /passport/mobile/validate_code/`：在以上基础上追加 `mobile&code&token`，并回显 `x-tt-dt`。成功后以 `data.user`/`data.user_data` 的 `user_id`+`session_key` 建立会话，再走同一自我资料校验。
-- 这两条帧没有 mitmproxy 可信样本，参数与头集合仍标记为未验证；只有真实平台登录成功才确立其被接受。
+- `POST/GET /passport/mobile/send_code/`：参数沿用已确证的 Passport 固定顺序 `service&account_sdk_source&aid&version_code&passport-sdk-version&request_from_account_sdk&is_from_ttaccountsdk&device_platform&mix_mode`，再追加 `device_id&iid&mobile`；响应 `data.token` 作为校验凭据、`data.ds` 供下一步回显。实时探针：缺 `device_id`/`iid` 时返回业务码 `2156`，两者齐全后稳态为业务码 `7`（系统繁忙，请稍后再试）——逐字段与逐头矩阵（os_version/sdk_version/device_type/verify_type/last_send_time/need_logo/tt_data、mix_mode 取值、phone/mobile、service 形态、GET/POST、UA、x-tt-env/x-tt-trace-id、x-tt-dt 各种回显值、warm CSRF cookie）下均为 `7`；`/v1/` 后缀返回 `4044`。
+- `GET /passport/mobile/validate_code/`：在以上基础上追加 `mobile&code&token`，并回显 `x-tt-dt`。成功后以 `data.user`/`data.user_data` 的 `user_id`+`session_key` 建立会话，再走同一自我资料校验。过期 token 返回业务码 `1`（会话过期）。
+- 这两条帧仍没有 mitmproxy 可信样本；`7` 是本轮在线可复现的稳态响应，只有真实手机收到验证码并完成一次平台登录成功才确立其被接受。
 
 authentication=failed（扫码会话交换未成功）；signature=unverified；details=not_tested；sessionSaved=false。
 只有设备参数已加密保存；未把二维码令牌、HTTP 200 或手机确认当作可用会话。没有发起真实福袋参与请求。

@@ -25,9 +25,11 @@ const USER_AGENT = DEFAULT_ANDROID_USER_AGENT
 // The dotted version string is what the official SDK puts on the wire here, while
 // the registration body keeps the integer version tuple from the manifest.
 const PASSPORT_VERSION_CODE = '40.7.0'
+// Live probe (2026-10-16): the nine trusted parameters alone return error_code 11;
+// appending device_platform=android yields error_code 0 with the real payload.
 const QR_PARAMS = Object.freeze({ service: AUTH_ORIGIN, account_sdk_source: 'app', aid: APP.aid,
   version_code: PASSPORT_VERSION_CODE, 'passport-sdk-version': '60759', request_from_account_sdk: '1',
-  is_from_ttaccountsdk: '1', need_logo: '1', source: 'pad' })
+  is_from_ttaccountsdk: '1', device_platform: 'android', need_logo: '1', source: 'pad' })
 const CHECK_PARAMS = Object.freeze({ service: 'aweme.snssdk.com', scene: '0', account_sdk_source: 'app',
   aid: APP.aid, version_code: PASSPORT_VERSION_CODE, 'passport-sdk-version': '60759',
   request_from_account_sdk: '1', is_from_ttaccountsdk: '1' })
@@ -35,9 +37,14 @@ const ACCOUNT_PARAMS = Object.freeze({ ...CHECK_PARAMS })
 // Phone SMS login (the phone-end default). No mitmproxy capture exists for these
 // two frames yet, so they reuse the trusted Passport parameter style and order;
 // the shape stays unverified until one real platform login succeeds.
+// Live probe (2026-10-16): device_id+iid must be present — without them send_code
+// returns 2156, with them the steady response is 7.
 const SMS_BASE_PARAMS = Object.freeze({ service: AUTH_ORIGIN, account_sdk_source: 'app', aid: APP.aid,
   version_code: PASSPORT_VERSION_CODE, 'passport-sdk-version': '60759', request_from_account_sdk: '1',
-  is_from_ttaccountsdk: '1', mix_mode: '1' })
+  is_from_ttaccountsdk: '1', device_platform: 'android', mix_mode: '1' })
+function smsParams(base, profile, extra = {}) {
+  return { ...base, device_id: profile.deviceInfo.device_id, iid: profile.deviceInfo.iid, ...extra }
+}
 function fail(code, extra = {}) { return Object.assign(new Error(code), { code, ...extra }) }
 function normalizeMobile(value) {
   const text = String(value ?? '').trim().replace(/[\s-]/g, '')
@@ -255,7 +262,7 @@ class NativeLoginProvider {
     if (!validProfile(this.profile)) throw fail('LOGIN_DEVICE_INVALID')
     this.smsMobile = normalizeMobile(mobile)
     const data = passportData(await this.request(AUTH_ORIGIN, SEND_CODE_PATH, {
-      params: { ...SMS_BASE_PARAMS, mobile: this.smsMobile }, responseMode: 'passport', signal
+      params: smsParams(SMS_BASE_PARAMS, this.profile, { mobile: this.smsMobile }), responseMode: 'passport', signal
     }))
     if (data.ds !== undefined && data.ds !== null) this.passportDs = String(data.ds).slice(0, 256)
     const token = typeof data.token === 'string' && data.token ? data.token.slice(0, 4096) : ''
@@ -269,7 +276,7 @@ class NativeLoginProvider {
     const value = normalizeCode(code)
     const headers = this.passportDs ? { 'x-tt-dt': this.passportDs } : {}
     const data = passportData(await this.request(AUTH_ORIGIN, VALIDATE_CODE_PATH, {
-      params: { ...SMS_BASE_PARAMS, mobile: this.smsMobile, code: value, token: this.smsToken },
+      params: smsParams(SMS_BASE_PARAMS, this.profile, { mobile: this.smsMobile, code: value, token: this.smsToken }),
       responseMode: 'passport', headers, signal
     }))
     // The official validate frames expose the account either as data.user or as

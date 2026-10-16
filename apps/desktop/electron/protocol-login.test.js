@@ -240,11 +240,14 @@ describe('Android Passport adapter', () => {
       // Passport frames carry the exact trusted-capture parameter sets and order.
       const qrRequest = requests.find(item => item.pathname === QR_PATH)
       const checkRequest = requests.find(item => item.pathname === CHECK_PATH)
+      // The trusted capture's nine parameters plus the live-probe addition:
+      // device_platform=android is what flips get_qrcode from error_code 11 to 0.
       expect([...qrRequest.query.keys()]).toEqual([
         'service', 'account_sdk_source', 'aid', 'version_code', 'passport-sdk-version',
-        'request_from_account_sdk', 'is_from_ttaccountsdk', 'need_logo', 'source'
+        'request_from_account_sdk', 'is_from_ttaccountsdk', 'device_platform', 'need_logo', 'source'
       ])
       expect(qrRequest.query.get('version_code')).toBe('40.7.0')
+      expect(qrRequest.query.get('device_platform')).toBe('android')
       expect([...checkRequest.query.keys()]).toEqual([
         'service', 'scene', 'account_sdk_source', 'aid', 'version_code', 'passport-sdk-version',
         'request_from_account_sdk', 'is_from_ttaccountsdk', 'token'
