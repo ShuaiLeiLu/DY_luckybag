@@ -97,7 +97,7 @@ function formatLocalDateParts(ms) {
 
 function mergeSettings(base, patch = {}) {
   const next = asPlainObject(patch, {})
-  const { noticeMarkdown: _legacyNoticeMarkdown, ...sanitizedNext } = next
+  const { noticeMarkdown: _legacyNoticeMarkdown, androidBridge: _legacyBridge, ...sanitizedNext } = next
   return {
     ...base,
     ...sanitizedNext,
@@ -111,54 +111,15 @@ function mergeSettings(base, patch = {}) {
     participationCount: { ...base.participationCount, ...asPlainObject(sanitizedNext.participationCount) },
     singleAccountDuration: { ...base.singleAccountDuration, ...asPlainObject(sanitizedNext.singleAccountDuration) },
     scanConfig: { ...base.scanConfig, ...asPlainObject(sanitizedNext.scanConfig) },
-    androidBridge: { ...base.androidBridge, ...asPlainObject(sanitizedNext.androidBridge) }
+    requestBackend: 'android',
+    enableRedPacket: false,
+    randomInteraction: false,
+    onlyRedPacketMode: { enabled: false }
   }
 }
 
 function normalizeServerUrl(raw) {
   return String(raw || '').trim().replace(/\/+$/, '')
-}
-
-function migrateFudaiUrlToHttp9090(raw, fallback = '') {
-  const normalized = normalizeServerUrl(raw)
-  if (!normalized) return normalized
-  try {
-    const parsed = new URL(/^https?:\/\//i.test(normalized) ? normalized : `http://${normalized}`)
-    const host = String(parsed.hostname || '').trim().toLowerCase()
-    if (host !== 'fudai.shuai.help') return normalized
-    const next = new URL(parsed.toString())
-    next.protocol = 'http:'
-    next.port = '9090'
-    return normalizeServerUrl(next.toString())
-  } catch (_) {
-    return fallback || normalized
-  }
-}
-
-function isLegacyLoopbackPoolServerUrl(raw) {
-  const normalized = normalizeServerUrl(raw)
-  if (!normalized) return false
-
-  try {
-    const resolved = /^https?:\/\//i.test(normalized) ? normalized : `http://${normalized}`
-    const parsed = new URL(resolved)
-    const host = String(parsed.hostname || '').trim().toLowerCase()
-    const port = String(parsed.port || (parsed.protocol === 'https:' ? '443' : '80'))
-    if (port !== '9090') return false
-    if (host === 'localhost') return true
-
-    const octets = host.split('.')
-    return (
-      octets.length === 4 &&
-      octets.every((part) => /^\d+$/.test(part) && Number(part) >= 0 && Number(part) <= 255) &&
-      Number(octets[0]) === 127 &&
-      Number(octets[1]) === 0 &&
-      Number(octets[2]) === 0 &&
-      Number(octets[3]) === 1
-    )
-  } catch (_) {
-    return false
-  }
 }
 
 function loadDesktopConfigDefaults() {
@@ -177,34 +138,8 @@ const DEFAULT_SETTINGS = Object.freeze(mergeSettings(BUILTIN_DEFAULT_SETTINGS, l
 
 function normalizeSettings(raw = {}) {
   const merged = mergeSettings(DEFAULT_SETTINGS, raw)
-  merged.poolServerUrl = migrateFudaiUrlToHttp9090(merged.poolServerUrl, DEFAULT_SETTINGS.poolServerUrl)
-  merged.hotUpdateManifestUrl = migrateFudaiUrlToHttp9090(merged.hotUpdateManifestUrl, DEFAULT_SETTINGS.hotUpdateManifestUrl)
-
-  const mergedPoolServerUrl = normalizeServerUrl(merged.poolServerUrl)
-  const defaultPoolServerUrl = normalizeServerUrl(DEFAULT_SETTINGS.poolServerUrl)
-  const mergedHotUpdateManifestUrl = normalizeServerUrl(merged.hotUpdateManifestUrl)
-  const defaultHotUpdateManifestUrl = normalizeServerUrl(DEFAULT_SETTINGS.hotUpdateManifestUrl)
-  if (
-    isLegacyLoopbackPoolServerUrl(mergedPoolServerUrl) &&
-    defaultPoolServerUrl &&
-    !isLegacyLoopbackPoolServerUrl(defaultPoolServerUrl)
-  ) {
-    merged.poolServerUrl = DEFAULT_SETTINGS.poolServerUrl
-  }
-
-  // Older packaged builds persisted hot-update as disabled because main-process defaults
-  // did not include the manifest URL. Adopt the project/default hot-update settings when
-  // the stored value is still the legacy empty+disabled combination.
-  if (
-    merged.hotUpdateEnabled !== true &&
-    !mergedHotUpdateManifestUrl &&
-    DEFAULT_SETTINGS.hotUpdateEnabled === true &&
-    defaultHotUpdateManifestUrl
-  ) {
-    merged.hotUpdateEnabled = true
-    merged.hotUpdateManifestUrl = DEFAULT_SETTINGS.hotUpdateManifestUrl
-  }
-
+  merged.poolServerUrl = normalizeServerUrl(merged.poolServerUrl)
+  merged.hotUpdateManifestUrl = normalizeServerUrl(merged.hotUpdateManifestUrl)
   return merged
 }
 
@@ -282,7 +217,13 @@ function readJsonObjectFile(filePath, fallback = {}) {
 function writeJsonObjectFile(filePath, payload) {
   const dir = path.dirname(filePath)
   ensureDir(dir)
-  fs.writeFileSync(filePath, `${JSON.stringify(asPlainObject(payload, {}), null, 2)}\n`, 'utf8')
+  const temporaryPath = filePath + '.tmp'
+  const fd = fs.openSync(temporaryPath, 'w', 0o600)
+  try {
+    fs.writeFileSync(fd, `${JSON.stringify(asPlainObject(payload, {}), null, 2)}\n`, 'utf8')
+    fs.fsyncSync(fd)
+  } finally { fs.closeSync(fd) }
+  fs.renameSync(temporaryPath, filePath)
 }
 
 function readJsonLines(filePath) {
@@ -378,6 +319,8 @@ function createStateStore(baseDir) {
   const winRecordsPath = path.join(stateDir, WIN_RECORDS_FILE_NAME)
   const timelineLogsPath = path.join(runtimeLogsDir, TIMELINE_LOGS_FILE_NAME)
   bootstrapHistoryAllFile(historyAllPath, [joinRecordsPath, winRecordsPath])
+  const runtimePath = path.join(stateDir, 'account-runtime.json')
+  let runtimes = readJsonObjectFile(runtimePath, {})
   let cachedSettings = null
   let historySeq = readJsonLines(historyAllPath)
     .reduce((maxId, item) => Math.max(maxId, Math.max(0, toSafeNumber(item?.id, 0))), 0)
@@ -427,7 +370,8 @@ function createStateStore(baseDir) {
   }
 
   function appendHistoryRecord(record = {}) {
-    const payload = normalizeHistoryRecord(record)
+    const previous = listHistoryRecords(1000).find(item => item.accountId === record.accountId && item.lotteryId === record.lotteryId)
+    const payload = normalizeHistoryRecord({ ...previous, ...record, id: previous?.id || record.id })
     if (payload.id > 0) {
       historySeq = Math.max(historySeq, payload.id)
     } else {
@@ -473,7 +417,9 @@ function createStateStore(baseDir) {
   function listHistoryRecords(limit = 200, options = {}) {
     const normalizedType = String(options?.recordType || 'all').trim().toLowerCase()
     const safeLimit = clampLimit(limit, 200, 1000)
-    const all = readJsonLines(historyAllPath)
+    const latest = new Map()
+    for (const item of readJsonLines(historyAllPath)) latest.set(String(item.accountId) + ':' + String(item.lotteryId || item.id), item)
+    const all = [...latest.values()]
       .map((item) => normalizeHistoryRecord(item))
       .filter((item) => item.recordType === 'join' || item.recordType === 'win')
 
@@ -497,6 +443,8 @@ function createStateStore(baseDir) {
       return { success: false, error: 'account_id_required' }
     }
 
+    delete runtimes[targetId]
+    writeJsonObjectFile(runtimePath,runtimes)
     const historyAllPurge = purgeJsonlByAccount(historyAllPath, targetId)
 
     const accountLogDir = path.join(accountLogsDir, sanitizeFileSegment(targetId))
@@ -545,6 +493,16 @@ function createStateStore(baseDir) {
       win: winRecordsPath
     },
     getSettings,
+    saveRuntime(record) {
+      const accountId = String(record.accountId || '')
+      if (!accountId) throw new Error('account_id_required')
+      const pending = record.pendingDraw || null
+      runtimes[accountId] = { accountId, intent: record.intent === 'running' ? 'running' : 'paused',
+        pendingDraw: pending ? { lottery: pending.lottery, record: pending.record } : null, updatedAt: Date.now() }
+      writeJsonObjectFile(runtimePath,runtimes)
+      return runtimes[accountId]
+    },
+    listRuntimes() { return clonePlainObject(runtimes) },
     saveSettings,
     clearRuntimeEvents,
     appendEvent,

@@ -63,7 +63,7 @@ export function AccountListPanel({
           <Empty
             description={
               <span className="text-xs text-slate-400">
-                暂无账号，点击右上角或左下角“添加账号”扫码接入
+                暂无账号，点击“添加账号”扫码登录并自动保存会话
               </span>
             }
           >

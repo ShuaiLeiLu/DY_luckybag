@@ -122,27 +122,13 @@ export interface LotteryHistoryRecord {
   createdAt: number
 }
 
-export type RequestBackendType = 'web' | 'android' | 'auto'
-
-export interface AndroidBridgeConfig {
-  enabled: boolean
-  serverUrl: string
-  token: string
-}
-
-export interface AndroidBridgeStatus {
-  available: boolean
-  connected: boolean
-  ticketGuardReady: boolean
-  authenticated: boolean
-  accountId?: string
-  capabilities?: string[]
-  error?: string
-  lastCheckedAt?: number
-}
+export type RequestBackendType = 'android'
 
 export interface DesktopSettings {
   poolServerUrl: string
+  poolServerToken: string
+  resumeOnStartup: boolean
+  hotUpdatePublicKey: string
   updateFeedUrl: string
   hotUpdateEnabled: boolean
   hotUpdateManifestUrl: string
@@ -161,11 +147,12 @@ export interface DesktopSettings {
   singleAccountDuration: { enabled: boolean; value: number }
   scanConfig: { countPerPage: number; pagesPerCategory: number; allCount: number }
   requestBackend: RequestBackendType
-  androidBridge: AndroidBridgeConfig
 }
 
 export interface BootstrapSnapshot {
   appVersion: string
+  runtimeStates?: Record<string, any>
+  feedbackPending?: number
   settings: DesktopSettings
   update: UpdateSnapshot
   events: RecoveryEvent[]

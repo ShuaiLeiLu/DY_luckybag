@@ -9,7 +9,7 @@ import type { DesktopSettings, RequestBackendType } from './models'
  */
 export const DEFAULT_DESKTOP_SETTINGS: Readonly<DesktopSettings> = Object.freeze({
   ...rawDefaults,
-  requestBackend: (rawDefaults.requestBackend as RequestBackendType) || 'web',
+  requestBackend: 'android' as RequestBackendType,
   hitRate: Object.freeze({ ...rawDefaults.hitRate }),
   secondInspect: Object.freeze({ ...rawDefaults.secondInspect }),
   filterFanClub: Object.freeze({ ...rawDefaults.filterFanClub }),
@@ -19,8 +19,7 @@ export const DEFAULT_DESKTOP_SETTINGS: Readonly<DesktopSettings> = Object.freeze
   filterOnline: Object.freeze({ ...rawDefaults.filterOnline }),
   participationCount: Object.freeze({ ...rawDefaults.participationCount }),
   singleAccountDuration: Object.freeze({ ...rawDefaults.singleAccountDuration }),
-  scanConfig: Object.freeze({ ...rawDefaults.scanConfig }),
-  androidBridge: Object.freeze({ ...rawDefaults.androidBridge })
+  scanConfig: Object.freeze({ ...rawDefaults.scanConfig })
 })
 
 export type DesktopSettingsDefaults = typeof DEFAULT_DESKTOP_SETTINGS

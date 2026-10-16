@@ -8,6 +8,8 @@
     "jsx": "react-jsx",
     "strict": true,
     "noEmit": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "allowJs": true,
     "checkJs": false,
     "skipLibCheck": true,

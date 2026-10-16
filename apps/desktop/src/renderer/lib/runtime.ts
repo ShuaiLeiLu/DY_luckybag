@@ -42,7 +42,8 @@ export function createAccountModel(base: Partial<AccountSession> & AnyRecord = {
     poolActiveCandidates: Number(base.poolActiveCandidates || 0),
     poolValidCandidates: Number(base.poolValidCandidates || 0),
     poolAvailableCandidates: Number(base.poolAvailableCandidates || 0),
-    poolSummaryAt: Number(base.poolSummaryAt || 0)
+    poolSummaryAt: Number(base.poolSummaryAt || 0),
+    requestBackend: 'android'
   }
 }
 

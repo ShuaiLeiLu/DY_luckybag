@@ -34,6 +34,7 @@ type fileConfig struct {
 		Host         string `json:"host"`
 		Port         int    `json:"port"`
 		MaxBodyBytes int64  `json:"maxBodyBytes"`
+		APIToken     string `json:"apiToken"`
 	} `json:"server"`
 	Pool struct {
 		TopCacheMax        int     `json:"topCacheMax"`
@@ -177,7 +178,7 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "content-type,x-pool-client-id")
+	w.Header().Set("Access-Control-Allow-Headers", "content-type,x-pool-client-id,authorization")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
 }
@@ -356,7 +357,7 @@ func main() {
 	}
 
 	sc := serverConfig{
-		Host:         "0.0.0.0",
+		Host:         "127.0.0.1",
 		Port:         9090,
 		MaxBodyBytes: 6 * 1024 * 1024,
 	}
@@ -1137,6 +1138,7 @@ func main() {
 		var req struct {
 			ClientID             string            `json:"clientId"`
 			AccountID            string            `json:"accountId"`
+			EventID              string            `json:"eventId"`
 			Event                string            `json:"event"`
 			CandidateKey         string            `json:"candidateKey"`
 			RoomID               string            `json:"roomId"`
@@ -1176,6 +1178,7 @@ func main() {
 				AccountID: req.AccountID,
 			},
 			Event:                req.Event,
+			EventID:              req.EventID,
 			CandidateKey:         req.CandidateKey,
 			RoomID:               req.RoomID,
 			LotteryID:            req.LotteryID,
@@ -1282,10 +1285,14 @@ func main() {
 		mux.ServeHTTP(w, r)
 	})
 
+	apiToken := strings.TrimSpace(getenvStr("POOL_API_TOKEN", fileCfg.Server.APIToken))
+	if sc.Host != "127.0.0.1" && sc.Host != "localhost" && sc.Host != "::1" && apiToken == "" {
+		log.Fatal("POOL_API_TOKEN is required when exposing the API beyond loopback")
+	}
 	addr := sc.Host + ":" + strconv.Itoa(sc.Port)
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           handler,
+		Handler:           protectAPI(handler, apiToken),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       20 * time.Second,
 		WriteTimeout:      20 * time.Second,

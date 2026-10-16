@@ -23,6 +23,8 @@ import { AccountListPanel } from './features/accounts/AccountListPanel'
 import { HistoryPanel } from './features/history/HistoryPanel'
 import { type UiLogEntry, useTimelineLogs } from './features/dashboard/useTimelineLogs'
 import { useAccountLifecycle } from './features/accounts/useAccountLifecycle'
+import { ProtocolValidationDialog } from './features/accounts/ProtocolValidationDialog'
+import { ProtocolLoginDialog } from './features/accounts/ProtocolLoginDialog'
 import { AppLayout } from './components/layout/AppLayout'
 import { AppSider, type MainView } from './components/layout/AppSider'
 import { AppHeader } from './components/layout/AppHeader'
@@ -106,7 +108,6 @@ function buildRuntimeLogDedupKey(message: string) {
 export default function App() {
   const manager = useMemo(() => new LotteryManager(), [])
   const runtimeAccountsRef = useRef<Map<string, AnyRecord>>(new Map())
-  const loginTimersRef = useRef<Map<string, number>>(new Map())
   const [bootstrap, setBootstrap] = useState<BootstrapSnapshot | null>(null)
   const [settings, setSettings] = useState<DesktopSettings>(defaultSettings)
   const [accounts, setAccounts] = useState<AccountSession[]>([])
@@ -181,13 +182,6 @@ export default function App() {
 
   const selectedAccount = accounts.find((item) => item.id === selectedAccountId) || accounts[0] || null
 
-  const syncRuntimeRef = (account: AccountSession) => {
-    runtimeAccountsRef.current.set(account.id, {
-      ...(runtimeAccountsRef.current.get(account.id) || {}),
-      ...account
-    })
-  }
-
   const persistHistoryRecord = useEffectEvent(async (record: Partial<LotteryHistoryRecord> & AnyRecord) => {
     const rewardAmount = Number(record.rewardAmount || 0)
     const recordType: LotteryHistoryRecord['recordType'] = record.recordType === 'win' || String(record.resultStatus || '').trim().toLowerCase() === 'won' || rewardAmount > 0
@@ -204,24 +198,27 @@ export default function App() {
       const saved = await window.electronAPI.desktop.appendHistoryRecord(normalizedRecord)
       const nextRecord = saved?.item || normalizedRecord
       startTransition(() => {
-        setHistoryRecords((current) => [nextRecord as LotteryHistoryRecord, ...current].slice(0, 240))
+        setHistoryRecords((current) => [nextRecord as LotteryHistoryRecord, ...current.filter(item => !(item.accountId === nextRecord.accountId && item.lotteryId === nextRecord.lotteryId))].slice(0, 240))
       })
     } catch (_) {
       startTransition(() => {
-        setHistoryRecords((current) => [normalizedRecord as LotteryHistoryRecord, ...current].slice(0, 240))
+        setHistoryRecords((current) => [normalizedRecord as LotteryHistoryRecord, ...current.filter(item => !(item.accountId === normalizedRecord.accountId && item.lotteryId === normalizedRecord.lotteryId))].slice(0, 240))
       })
     }
   })
 
   const {
-    patchAccount,
     upsertAccount,
     startAccountScanning,
     stopAccount,
-    startAccountWithLogin,
+    openProtocolValidation,
     addAccount,
     removeAccount,
-    stopLoginPolling
+    openLogin,
+    loginTarget,
+    closeLogin,
+    protocolAccountId,
+    closeProtocolValidation
   } = useAccountLifecycle({
     accounts,
     settings,
@@ -235,8 +232,7 @@ export default function App() {
     setLotteriesByAccount,
     setHistoryRecords,
     setDispatchSummary,
-    runtimeAccountsRef,
-    loginTimersRef
+    runtimeAccountsRef
   })
 
   const refreshDispatch = useEffectEvent(async () => {
@@ -276,11 +272,15 @@ export default function App() {
   })
 
   const bootstrapDesktop = useEffectEvent(async () => {
+    let shouldResume = false
     try {
       const snapshot = await window.electronAPI.desktop.getBootstrap()
       const snapshotPoolServerUrl = normalizePoolServerUrl(snapshot?.settings?.poolServerUrl) || FIXED_POOL_SERVER_URL
       const snapshotSettings = { ...(snapshot?.settings || {}) } as AnyRecord
+      manager.recoveryStates = snapshot.runtimeStates || {}
+      shouldResume = snapshotSettings.resumeOnStartup !== false
       delete snapshotSettings.noticeMarkdown
+      manager.setPoolServerConfig({url:snapshotPoolServerUrl,token:snapshotSettings.poolServerToken || ''},{silent:true})
       setBootstrap(snapshot)
       setSettings({
         ...defaultSettings,
@@ -301,17 +301,22 @@ export default function App() {
     }
 
     try {
-      const loaded = await window.electronAPI.invoke('load-all-tokens')
-      if (loaded?.success && loaded.tokens) {
-        Object.entries(loaded.tokens as Record<string, AnyRecord>).forEach(([accountId, info]) => {
+      const loaded = await window.electronAPI.invoke('protocol:list-sessions')
+      if (loaded?.success && loaded.accounts) {
+        loaded.accounts.forEach((info: AnyRecord) => {
+          const accountId = info.id
           upsertAccount({
             id: accountId,
             nickname: info.nickname || accountId,
             userId: info.userId || accountId,
-            token: info.sessionid || info.sessionid_ss || null,
+            token: info.hasSession ? 'session-present' : null,
+            requestBackend: 'android',
             state: 'waiting',
             actionActive: false
           })
+          if (shouldResume && manager.recoveryStates?.[accountId]?.intent === 'running') {
+            window.setTimeout(() => void startAccountScanning(accountId), 500)
+          }
         })
       }
     } catch (error) {
@@ -326,7 +331,7 @@ export default function App() {
     }
     setSettings(normalizedSettings)
     manager.setScanConfig(normalizedSettings.scanConfig)
-    manager.setPoolServerConfig({ url: normalizedSettings.poolServerUrl }, { silent: true })
+    manager.setPoolServerConfig({ url: normalizedSettings.poolServerUrl, token: normalizedSettings.poolServerToken }, { silent: true })
     try {
       await window.electronAPI.desktop.saveSettings(normalizedSettings)
     } catch (_) {
@@ -338,32 +343,13 @@ export default function App() {
     void bootstrapDesktop()
     manager.setScanConfig(defaultSettings.scanConfig)
 
-    const offBrowserClosed = window.electronAPI.on('browser-closed', ({ accountId }: { accountId: string }) => {
-      stopLoginPolling(accountId)
-      void (async () => {
-        await stopAccount(accountId).catch(() => {})
-        patchAccount(accountId, { state: 'paused', actionActive: false })
-        addLog(`账号 ${accountId} 的浏览器窗口已关闭，已停止该账号所有活动`, 'warning')
-      })()
-    })
-    const offDouyinResponse = window.electronAPI.on('douyin-response', ({ accountId, type, data }: AnyRecord) => {
-      if (type === 'lottery') {
-        manager.applyLiveLotteryUpdate(accountId, data)
-      }
-    })
-
     const handleBeforeUnload = () => {
-      accounts.forEach((account) => stopLoginPolling(account.id))
       manager.shutdownAllAccounts()
     }
     window.addEventListener('beforeunload', handleBeforeUnload)
 
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload)
-      offBrowserClosed()
-      offDouyinResponse()
-      loginTimersRef.current.forEach((timer) => window.clearTimeout(timer))
-      loginTimersRef.current.clear()
     }
   }, [])
 
@@ -471,7 +457,7 @@ export default function App() {
                         void startAccountScanning(account.id)
                       }
                     }}
-                    onReloginAccount={(account) => void startAccountWithLogin(account.id, true)}
+                    onReloginAccount={(account) => void openProtocolValidation(account.id)}
                     onDeleteAccount={(account) => void removeAccount(account.id)}
                     onAddAccount={addAccount}
                   />
@@ -497,7 +483,7 @@ export default function App() {
                         void startAccountScanning(account.id)
                       }
                     }}
-                    onReloginAccount={(account) => void startAccountWithLogin(account.id, true)}
+                    onReloginAccount={(account) => void openProtocolValidation(account.id)}
                   />
                 </div>
                 <div className="h-[48%] min-h-[220px] overflow-hidden">
@@ -525,7 +511,7 @@ export default function App() {
                       void startAccountScanning(account.id)
                     }
                   }}
-                  onReloginAccount={(account) => void startAccountWithLogin(account.id, true)}
+                  onReloginAccount={(account) => void openProtocolValidation(account.id)}
                   onDeleteAccount={(account) => void removeAccount(account.id)}
                   onAddAccount={addAccount}
                 />
@@ -541,7 +527,7 @@ export default function App() {
                       void startAccountScanning(account.id)
                     }
                   }}
-                  onReloginAccount={(account) => void startAccountWithLogin(account.id, true)}
+                  onReloginAccount={(account) => void openProtocolValidation(account.id)}
                 />
               </div>
             </div>
@@ -565,6 +551,8 @@ export default function App() {
         </div>
       </AppLayout>
 
+      <ProtocolValidationDialog accountId={protocolAccountId} onClose={closeProtocolValidation} onLogin={openLogin} />
+      {loginTarget && <ProtocolLoginDialog accountId={loginTarget.accountId} onClose={closeLogin} />}
       <SettingsDrawer
         open={settingsOpen}
         settings={settings}

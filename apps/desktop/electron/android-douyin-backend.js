@@ -1,16 +1,13 @@
 /**
  * Android 端原生抖音请求后端实现
- * 由 AndroidProtocolClient 与 AndroidSignatureProvider 驱动，全量承接福袋、红包、参与及直播间交互
+ * 由 AndroidProtocolClient 与 AndroidSignatureProvider 驱动；未验收能力明确返回不支持。
  */
 
 const { DouyinRequestBackend } = require('./douyin-backend')
 const {
   normalizeLotteryInfo,
   normalizeAttendResponse,
-  parseFeedResponse,
-  parsePartitionResponse,
-  resolveCategoryPartitionParams,
-  FIXED_CATEGORY_DEFAULT
+  parseFeedResponse
 } = require('./douyin-response-parser')
 const {
   ERROR_CODES,
@@ -42,7 +39,9 @@ class AndroidDouyinBackend extends DouyinRequestBackend {
   }
 
   async isAvailable() {
-    return true
+    const signer = this.client.getSigner?.()
+    if (typeof signer?.customSignerHook === 'function') return true
+    return !!signer
   }
 
   async _getHeaders(accountId) {
@@ -119,14 +118,13 @@ class AndroidDouyinBackend extends DouyinRequestBackend {
         success: false,
         error: error.message,
         code: error?.code || ERROR_CODES.UNKNOWN,
+        statusCode: Number(error?.statusCode || 0),
         source: 'android'
       }
     }
   }
 
-  async getRedpacketDetail(input) {
-    return this.getLotteryDetail({ ...input, isRedPacket: true })
-  }
+  async getRedpacketDetail() { return { success: false, code: 'NOT_IMPLEMENTED', retryable: false, source: 'android', error: '该安卓协议能力尚未验收' } }
 
   async attendLottery({ roomId, lotteryId, webRid = null, accountId = '' } = {}) {
     const safeRoomId = sanitizeRoomId(roomId)
@@ -160,6 +158,7 @@ class AndroidDouyinBackend extends DouyinRequestBackend {
         success: false,
         error: error.message,
         code: error?.code || ERROR_CODES.UNKNOWN,
+        statusCode: Number(error?.statusCode || 0),
         retryable: error?.retryable ?? false,
         source: 'android'
       }
@@ -190,48 +189,13 @@ class AndroidDouyinBackend extends DouyinRequestBackend {
         success: false,
         error: error.message,
         code: error?.code || ERROR_CODES.UNKNOWN,
+        statusCode: Number(error?.statusCode || 0),
         source: 'android'
       }
     }
   }
 
-  async searchLiveByCategory({
-    categoryId = FIXED_CATEGORY_DEFAULT.categoryId,
-    offset = 0,
-    count = 15,
-    accountId = '',
-    resolvedCategory = null
-  } = {}) {
-    try {
-      const targetCategory = resolvedCategory || resolveCategoryPartitionParams(categoryId)
-      const safeOffset = Math.max(0, Number(offset) || 0)
-      const safeCount = Math.max(1, Number(count) || 15)
-
-      const headers = await this._getHeaders(accountId)
-      const params = {
-        partition: targetCategory.partition,
-        partition_type: targetCategory.partitionType,
-        offset: safeOffset,
-        count: safeCount,
-        req_from: 2
-      }
-
-      const json = await this.client.get('/webcast/web/partition/detail/room/', params, headers)
-      const parsed = parsePartitionResponse(json, safeOffset, safeCount)
-
-      return {
-        ...parsed,
-        source: 'android'
-      }
-    } catch (error) {
-      return {
-        success: false,
-        error: error.message,
-        code: error?.code || ERROR_CODES.UNKNOWN,
-        source: 'android'
-      }
-    }
-  }
+  async searchLiveByCategory() { return { success: false, code: 'NOT_IMPLEMENTED', retryable: false, source: 'android', error: '该安卓协议能力尚未验收' } }
 
   async roomLike({ roomId, accountId = '', count = 1 } = {}) {
     const safeRoomId = sanitizeRoomId(roomId)
@@ -244,7 +208,7 @@ class AndroidDouyinBackend extends DouyinRequestBackend {
 
       const json = await this.client.post('/webcast/room/digg/', params, headers)
       return {
-        success: json?.data?.status === 0 || json?.status_code === 0,
+        ...normalizeAttendResponse(json),
         data: json?.data || null,
         source: 'android'
       }
@@ -253,6 +217,7 @@ class AndroidDouyinBackend extends DouyinRequestBackend {
         success: false,
         error: error.message,
         code: error?.code || ERROR_CODES.UNKNOWN,
+        statusCode: Number(error?.statusCode || 0),
         source: 'android'
       }
     }
@@ -269,7 +234,7 @@ class AndroidDouyinBackend extends DouyinRequestBackend {
 
       const json = await this.client.post('/webcast/room/chat/', params, headers)
       return {
-        success: json?.data?.status === 0 || json?.status_code === 0,
+        ...normalizeAttendResponse(json),
         data: json?.data || null,
         source: 'android'
       }
@@ -278,6 +243,7 @@ class AndroidDouyinBackend extends DouyinRequestBackend {
         success: false,
         error: error.message,
         code: error?.code || ERROR_CODES.UNKNOWN,
+        statusCode: Number(error?.statusCode || 0),
         source: 'android'
       }
     }

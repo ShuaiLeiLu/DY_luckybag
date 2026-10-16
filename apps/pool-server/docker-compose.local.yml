@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "${REDIS_PORT:-16379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-16379}:6379"
     volumes:
       - ./redis-data:/data
     healthcheck:
@@ -22,11 +22,16 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "${POOL_PORT:-9090}:9090"
+      - "127.0.0.1:${POOL_PORT:-9090}:9090"
     environment:
       POOL_CONFIG_FILE: /app/config.json
+      POOL_SERVER_HOST: 0.0.0.0
       POOL_REDIS_ENABLED: "true"
       REDIS_ADDR: redis:6379
       REDIS_DB: "0"
     volumes:
-      - ../../config.example.json:/app/config.json:ro
+      - ../../config.json:/app/config.json:ro
+      - pool-data:/app/data
+
+volumes:
+  pool-data:

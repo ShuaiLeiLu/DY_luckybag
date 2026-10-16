@@ -47,7 +47,7 @@ func DefaultConfig() Config {
 		MinHeapShards:      64,
 		LearningJoinWeight: 0,
 		LearningWinWeight:  0,
-		FeedbackLogPath:    "",
+		FeedbackLogPath:    "data/feedback.jsonl",
 	}
 }
 
@@ -356,12 +356,15 @@ type Service struct {
 	stats   Stats
 	statsMu sync.Mutex
 
-	leaseMu sync.Mutex
-	leases  map[string]*LeaseInfo
-	joined  map[string]int
+	leaseMu      sync.Mutex
+	leases       map[string]*LeaseInfo
+	joined       map[string]int
+	joinedExpiry map[string]int64
+	joinedOwners map[string]int64
 
-	learningMu sync.RWMutex
-	learning   map[string]*LearningBucket
+	learningMu   sync.RWMutex
+	learning     map[string]*LearningBucket
+	feedbackSeen map[string]bool
 
 	scanClientMu sync.Mutex
 	scanClients  map[string]scanClientState
@@ -399,10 +402,28 @@ func NewService(cfg Config) *Service {
 		store:          newStore(cfg.MinHeapShards),
 		leases:         make(map[string]*LeaseInfo),
 		joined:         make(map[string]int),
+		joinedExpiry:   make(map[string]int64),
+		joinedOwners:   make(map[string]int64),
 		learning:       make(map[string]*LearningBucket),
+		feedbackSeen:   make(map[string]bool),
 		scanClients:    make(map[string]scanClientState),
 		scanPermits:    make(map[string]scanPermitState),
 		allScanCursor:  defaultAllScanCursorState(time.Now().UnixMilli()),
+	}
+	for _, raw := range readFeedbackLog(cfg.FeedbackLogPath) {
+		f := normalizeTaskFeedback(raw)
+		if s.feedbackSeen[f.EventID] {
+			continue
+		}
+		s.feedbackSeen[f.EventID] = true
+		key := buildLearningBucketKey(f)
+		bucket := s.learning[key]
+		if bucket == nil {
+			next := newLearningBucketFromFeedback(f, key)
+			bucket = &next
+			s.learning[key] = bucket
+		}
+		applyTaskFeedback(bucket, f, time.Now().UnixMilli())
 	}
 	s.markDirty()
 	heap.Init(&s.exp)
@@ -803,6 +824,17 @@ func cloneLeaseInfo(src *LeaseInfo) *LeaseInfo {
 }
 
 func (s *Service) sweepExpiredLeasesLocked(nowMS int64) {
+	for key, end := range s.joinedExpiry {
+		if end <= nowMS {
+			delete(s.joined, key)
+			delete(s.joinedExpiry, key)
+		}
+	}
+	for key, end := range s.joinedOwners {
+		if end <= nowMS {
+			delete(s.joinedOwners, key)
+		}
+	}
 	for leaseID, lease := range s.leases {
 		if lease == nil || lease.ExpiresAtMS <= nowMS {
 			delete(s.leases, leaseID)
@@ -1016,7 +1048,7 @@ func (s *Service) TopAvailable(limit int, profile FilterProfile, owner ClaimOwne
 	s.SweepExpired(now)
 	all := s.store.snapshot()
 	learningSnapshot := s.learningSnapshot()
-	out, validCount, _ := selectTopCandidatesWithLease(all, profile, now, limit, nil, nil, normalizeClaimOwner(owner), includeClaimedSelf, learningSnapshot.lookup)
+	out, validCount, _ := selectTopCandidatesWithLease(all, profile, now, limit, s.activeLeaseGroups(now), s.activeJoinedCounts(now), normalizeClaimOwner(owner), includeClaimedSelf, learningSnapshot.lookup)
 	_, pv := s.Profile()
 	return out, TopMeta{
 		BuiltAtMS:   now,
@@ -1109,6 +1141,30 @@ func (s *Service) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 	profile := options.Profile
 	_, pv := s.Profile()
 	all := s.store.snapshot()
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	s.sweepExpiredLeasesLocked(now)
+	if owner.ClientID == "" || owner.AccountID == "" {
+		return ClaimResult{Reason: "invalid_owner"}, nil
+	}
+	for _, lease := range s.leases {
+		if ownerMatches(*lease, owner) {
+			for _, c := range all {
+				if c.Key == lease.CandidateKey {
+					items, _, _ := selectTopCandidatesWithLease([]Candidate{c}, profile, now, 1, nil, nil, owner, true, nil)
+					if len(items) == 0 {
+						return ClaimResult{Reason: "held_task_unavailable", ProfileVersion: pv, GeneratedAtMS: now}, nil
+					}
+					item := items[0]
+					return ClaimResult{Claimed: true, Item: &item, Lease: cloneLeaseInfo(lease), ProfileVersion: pv, GeneratedAtMS: now}, nil
+				}
+			}
+		}
+	}
+	groups := make(map[string][]LeaseInfo)
+	for _, lease := range s.leases {
+		groups[lease.CandidateKey] = append(groups[lease.CandidateKey], *lease)
+	}
 	profileAll := profile
 	learningSnapshot := s.learningSnapshot()
 	ordered, _ := buildOrderedTaskCandidates(
@@ -1116,8 +1172,8 @@ func (s *Service) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 		profileAll,
 		now,
 		s.cfg.TopCacheMax,
-		nil,
-		nil,
+		groups,
+		s.joined,
 		owner,
 		false,
 		learningSnapshot.lookup,
@@ -1152,6 +1208,13 @@ func (s *Service) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 				return false
 			}
 		}
+		if s.joinedOwners[buildOwnerCandidateLeaseKey(owner, key)] > now {
+			return false
+		}
+		count, ownerClaimed := s.countCandidateLeasesLocked(key, owner, now)
+		if ownerClaimed || count+s.joined[key] >= maxInt(item.MaxLeaseSlots, 1) {
+			return false
+		}
 		copyItem := item
 		selected = &copyItem
 		return true
@@ -1166,7 +1229,7 @@ func (s *Service) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 	if selected != nil {
 		key := scoredCandidateKey(*selected)
 		lease := &LeaseInfo{
-			LeaseID:      buildNoLockLeaseID(key, s.seq.Add(1)),
+			LeaseID:      newTaskLeaseID(),
 			CandidateKey: key,
 			RoomID:       selected.RoomID,
 			LotteryID:    selected.LotteryID,
@@ -1176,13 +1239,14 @@ func (s *Service) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 			ClaimedAtMS:  now,
 			UpdatedAtMS:  now,
 			ExpiresAtMS:  now + leaseSec*1000,
-			Reason:       "nolock",
+			Reason:       "active",
 		}
-		selected.Claimed = false
+		s.leases[lease.LeaseID] = cloneLeaseInfo(lease)
+		selected.Claimed = true
 		selected.Lease = cloneLeaseInfo(lease)
-		selected.LeaseCount = 0
-		selected.JoinedCount = 0
-		selected.AvailableSlots = maxInt(selected.MaxLeaseSlots, 1)
+		selected.LeaseCount, _ = s.countCandidateLeasesLocked(key, owner, now)
+		selected.JoinedCount = s.joined[key]
+		selected.AvailableSlots = maxInt(selected.MaxLeaseSlots-selected.LeaseCount-selected.JoinedCount, 0)
 		return ClaimResult{
 			Claimed:        true,
 			Item:           selected,
@@ -1271,50 +1335,56 @@ func (s *Service) ReviewTask(options ReviewOptions) (ReviewResult, error) {
 // RenewTaskLease 方法：续约当前任务租约，避免预热阶段被其他客户端抢占。
 func (s *Service) RenewTaskLease(owner ClaimOwner, leaseID string, leaseSec int64) (*LeaseInfo, bool, error) {
 	now := time.Now().UnixMilli()
-	owner = normalizeClaimOwner(owner)
-	leaseSec = normalizeLeaseSec(leaseSec)
-	candidateKey, ok := parseNoLockLeaseIDCandidateKey(leaseID)
-	if !ok {
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	s.sweepExpiredLeasesLocked(now)
+	lease := s.leases[leaseID]
+	if lease == nil || !ownerMatches(*lease, normalizeClaimOwner(owner)) {
 		return nil, false, nil
 	}
-	lease := &LeaseInfo{
-		LeaseID:      stringsTrim(leaseID),
-		CandidateKey: candidateKey,
-		ClientID:     owner.ClientID,
-		AccountID:    owner.AccountID,
-		ClaimedAtMS:  now,
-		UpdatedAtMS:  now,
-		ExpiresAtMS:  now + leaseSec*1000,
-		Reason:       "nolock",
-	}
-	return lease, true, nil
+	lease.UpdatedAtMS = now
+	lease.ExpiresAtMS = now + normalizeLeaseSec(leaseSec)*1000
+	return cloneLeaseInfo(lease), true, nil
 }
 
-// ReleaseTaskLease 方法：主动释放当前任务租约，使候选回到服务端池中。
-func (s *Service) ReleaseTaskLease(owner ClaimOwner, leaseID string, reason string) (bool, error) {
-	_ = normalizeClaimOwner(owner)
-	if stringsTrim(leaseID) == "" {
+func (s *Service) ReleaseTaskLease(owner ClaimOwner, leaseID, reason string) (bool, error) {
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	lease := s.leases[leaseID]
+	if lease == nil || !ownerMatches(*lease, normalizeClaimOwner(owner)) {
 		return false, nil
 	}
-	_ = reason
+	delete(s.leases, leaseID)
+	s.markDirty()
 	return true, nil
 }
 
-// FinishTaskLease 方法：标记任务已执行完成，并按需要从候选池移除。
-func (s *Service) FinishTaskLease(owner ClaimOwner, leaseID string, result string, removeCandidate bool) (bool, error) {
-	_ = normalizeClaimOwner(owner)
-	_ = result
-	candidateKey, ok := parseNoLockLeaseIDCandidateKey(leaseID)
-	if !ok {
+func (s *Service) FinishTaskLease(owner ClaimOwner, leaseID, result string, removeCandidate bool) (bool, error) {
+	now := time.Now().UnixMilli()
+	s.leaseMu.Lock()
+	defer s.leaseMu.Unlock()
+	s.sweepExpiredLeasesLocked(now)
+	lease := s.leases[leaseID]
+	if lease == nil || !ownerMatches(*lease, normalizeClaimOwner(owner)) {
 		return false, nil
 	}
-	if removeCandidate {
-		s.store.delete(candidateKey)
-		s.leaseMu.Lock()
-		delete(s.joined, candidateKey)
-		s.leaseMu.Unlock()
-		s.markDirty()
+	delete(s.leases, leaseID)
+	if result == "join_success" {
+		s.joined[lease.CandidateKey]++
+		end := now + 24*60*60*1000
+		for _, c := range s.store.snapshot() {
+			if c.Key == lease.CandidateKey {
+				end = c.EndTimeMS + s.cfg.TTLGraceSec*1000
+				break
+			}
+		}
+		s.joinedOwners[buildOwnerCandidateLeaseKey(owner, lease.CandidateKey)] = end
+		s.joinedExpiry[lease.CandidateKey] = end
 	}
+	if removeCandidate && s.joined[lease.CandidateKey] >= maxInt(lease.SlotLimit, 1) {
+		s.store.delete(lease.CandidateKey)
+	}
+	s.markDirty()
 	return true, nil
 }
 
@@ -1383,9 +1453,9 @@ func (s *Service) TaskDebug(profile FilterProfile, owner ClaimOwner, leaseLimit 
 	now := time.Now().UnixMilli()
 	s.SweepExpired(now)
 	all := s.store.snapshot()
-	leases := []LeaseInfo{}
-	leaseGroups := map[string][]LeaseInfo{}
-	joinedCounts := map[string]int{}
+	leases := s.activeLeases(now)
+	leaseGroups := buildLeaseGroupMap(leases)
+	joinedCounts := s.activeJoinedCounts(now)
 	learningSnapshot := s.learningSnapshot()
 	_, pv := s.Profile()
 	return buildTaskDebugSnapshot(all, profile, now, normalizeClaimOwner(owner), leaseGroups, joinedCounts, leases, learningSnapshot.lookup, leaseLimit), pv
@@ -1479,6 +1549,15 @@ func (s *Service) RecordTaskFeedback(feedback TaskFeedback) error {
 	now := time.Now().UnixMilli()
 
 	s.learningMu.Lock()
+	if s.feedbackSeen[normalized.EventID] {
+		s.learningMu.Unlock()
+		return nil
+	}
+	if err := appendFeedbackJSONL(s.cfg.FeedbackLogPath, normalized); err != nil {
+		s.learningMu.Unlock()
+		return err
+	}
+	s.feedbackSeen[normalized.EventID] = true
 	bucket, ok := s.learning[bucketKey]
 	if !ok || bucket == nil {
 		next := newLearningBucketFromFeedback(normalized, bucketKey)
@@ -1488,9 +1567,6 @@ func (s *Service) RecordTaskFeedback(feedback TaskFeedback) error {
 	applyTaskFeedback(bucket, normalized, now)
 	s.learningMu.Unlock()
 	s.markDirty()
-	if err := appendFeedbackJSONL(s.cfg.FeedbackLogPath, normalized); err != nil {
-		return err
-	}
 	return nil
 }
 

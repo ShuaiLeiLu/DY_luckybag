@@ -3,6 +3,8 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import { createRequire } from 'node:module'
+const {canonicalJSON}=createRequire(import.meta.url)('../apps/desktop/electron/hot-update-trust')
 import { fileURLToPath } from 'node:url'
 
 const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
@@ -130,6 +132,9 @@ async function main() {
     files
   }
 
+  const keyPath=process.env.HOT_UPDATE_PRIVATE_KEY_FILE
+  if (keyPath) manifest.signature=crypto.sign(null,Buffer.from(canonicalJSON(manifest)),fs.readFileSync(keyPath)).toString('base64')
+  else console.warn('[hot-manifest] 未配置签名私钥，此清单仅供本地构建，客户端会拒绝应用')
   await fsp.mkdir(path.dirname(args.out), { recursive: true })
   await fsp.writeFile(args.out, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
 

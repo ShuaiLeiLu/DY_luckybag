@@ -103,6 +103,9 @@ func normalizeTaskFeedback(feedback TaskFeedback) TaskFeedback {
 	out.RewardAmount = math.Max(feedback.RewardAmount, 0)
 	out.Conditions = cloneConditions(feedback.Conditions)
 	out.PrizeInfo = clonePrizeInfo(feedback.PrizeInfo)
+	if out.EventID == "" {
+		out.EventID = feedbackIdentity(out)
+	}
 	return out
 }
 

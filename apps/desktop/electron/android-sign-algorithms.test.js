@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 const s = require('./android-sign-algorithms')
 
 describe('android-sign-algorithms', () => {
@@ -78,5 +78,60 @@ describe('android-sign-algorithms', () => {
 
   it('leftRotate32 rotates within 32 bits', () => {
     expect(s.leftRotate32(0x80000001, 1)).toBe(0x00000003)
+  })
+})
+
+describe('experimental AES vectors (not evidence of official TicketGuard compatibility)', () => {
+  const TS = 1700000000
+
+  it('builds a sorted param string', () => {
+    expect(s.buildSortedParamString({ room_id: '12345', aid: '1128' })).toBe('aid=1128&room_id=12345')
+    expect(s.buildSortedParamString({})).toBe('')
+  })
+
+  it('produces the fixed x-argus vector for the sample params', () => {
+    expect(s.nativeXArgus({ aid: '1128', room_id: '12345' }, TS)).toBe(
+      'CDFC28AA88D41B2B6EED969789A5AAC820F499E7EE272A994F3AAFAAB72E34C69B3262B210817298FADBC8DC0026D19E'
+    )
+    expect(s.nativeXArgus({}, TS)).toBe(
+      '1D63B2C789D6EAC1C396C34BDA342631571997E5041C56975D6ABEF887ECF4C9'
+    )
+  })
+
+  it('produces x-security-argus with and without body', () => {
+    const p = { aid: '1128', room_id: '12345' }
+    expect(s.nativeXSecurityArgus(p, TS, '')).toBe(
+      'AC5CE9E9941D91A37CA46E2EED1A336066789D4A41B05C5B1400BE3C6AE7B8BD40348ECDE33032946A830FD2BA21A2162C00A93200DCC18B9C79F97B725350681BDFDCCDBFCE4A834783AEB117E79004'
+    )
+    expect(s.nativeXSecurityArgus(p, TS, 'room_id=12345&lottery_id=678')).toBe(
+      'AC5CE9E9941D91A37CA46E2EED1A336066789D4A41B05C5B1400BE3C6AE7B8BD40348ECDE33032946A830FD2BA21A2162C00A93200DCC18B9C79F97B725350688912BE397136738E3D1A90C858A69859'
+    )
+  })
+
+  it('emits the candidate signature with a millisecond ticket and no hybrid security context', () => {
+    const headers = s.signNativeAndroidHeaders({
+      params: { aid: '1128', room_id: '12345' },
+      timestamp: TS
+    })
+    expect(Object.keys(headers).sort()).toEqual(['x-argus', 'x-ss-req-ticket'])
+    expect(headers['x-argus']).toHaveLength(96)
+    expect(headers['x-ss-req-ticket']).toBe('1700000000000')
+  })
+  it('preserves millisecond precision and creates a fresh transport ticket per request', () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValueOnce(1700000000123).mockReturnValueOnce(1700000000456)
+    try {
+      expect(s.signNativeAndroidHeaders()['x-ss-req-ticket']).toBe('1700000000123')
+      expect(s.signNativeAndroidHeaders()['x-ss-req-ticket']).toBe('1700000000456')
+    } finally { clock.mockRestore() }
+  })
+
+  it('derives params from query when params not provided', () => {
+    const headers = s.signNativeAndroidHeaders({
+      query: 'aid=1128&room_id=12345',
+      timestamp: TS
+    })
+    expect(headers['x-argus']).toBe(
+      'CDFC28AA88D41B2B6EED969789A5AAC820F499E7EE272A994F3AAFAAB72E34C69B3262B210817298FADBC8DC0026D19E'
+    )
   })
 })

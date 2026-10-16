@@ -1,0 +1,31 @@
+{
+  "elf_sha256": "1fe03703b1f3a806b220271ba2ec1dbed049d8b5f0216b70c0c724d5c5bc027c",
+  "classes54_dex_sha256": "778e2caf2558eedb1c2cd02b972749f89f866af921fa7803c7ab7c09cce5f070",
+  "config_method": "ms.bd.c.u2.LIZ @ 0x424c44",
+  "config_array_items": 17,
+  "sdk_version": "v04.10.04.01-bugfix",
+  "sdk_version_slot": 4,
+  "native_decoder": "0x18dbd8",
+  "decoder_key_va": "0x6ed4c",
+  "decoder_key_hex": "716213145f7763413130",
+  "dex_string_index": "0x0ee2",
+  "dex_payload_va": "0x769104",
+  "dex_payload_hex": "3366140f5a7e7945362b75670d431e29311c7a",
+  "configuration_opcode": "0x04000001",
+  "handle_lookup_opcode": "0x04000002",
+  "http_signature_opcode": "0x03000001",
+  "readiness_path": {
+    "signature_object_constructor": "0x2905a8",
+    "constructor_clear_ready": "0x29065c: byte at object+0x30 = 0",
+    "context_attachment": "0x2e3f50..0x2e3f60 -> vtable+0x58 -> 0x2d1038 -> 0x1b7100",
+    "context_storage": "object+0x38",
+    "mark_ready_call": "0x2e3f70 -> 0x2e4a4c -> vtable+0x38 -> 0x2907fc",
+    "mark_ready_store": "0x290800: byte at object+0x30 = 1",
+    "signature_ready_check": "0x2e3b64..0x2e3b6c: handle+0x10 -> object+0x30",
+    "not_ready_behavior": "0x2e3c00..0x2e3c14: empty header map",
+    "context_initialization_reproduced": false
+  },
+  "scope": "constant decoding and static readiness path; native environment-dependent alternate branch and SDK context initialization not reproduced",
+  "official_signature_oracle": false,
+  "signature_verified": false
+}

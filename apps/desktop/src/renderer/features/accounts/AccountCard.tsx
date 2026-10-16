@@ -2,14 +2,12 @@ import { Avatar, Button, Card, Popconfirm, Tag, Tooltip } from 'antd'
 import {
   PlayCircleOutlined,
   PauseCircleOutlined,
-  QrcodeOutlined,
+  ApiOutlined,
   DeleteOutlined,
-  UserOutlined,
-  TrophyOutlined,
-  FieldTimeOutlined
+  UserOutlined
 } from '@ant-design/icons'
 import type { AccountSession } from '@shared/models'
-import { statusText, statusTone } from '../../lib/runtime'
+import { statusText } from '../../lib/runtime'
 
 export type AccountCardProps = {
   account: AccountSession
@@ -138,14 +136,14 @@ export function AccountCard({
           {isRunning ? '暂停' : '启动'}
         </Button>
 
-        <Tooltip title="重新打开浏览器扫码登录">
+        <Tooltip title="验证安卓会话和真实福袋详情">
           <Button
             size="small"
-            icon={<QrcodeOutlined />}
+            icon={<ApiOutlined />}
             className="flex-1 text-xs text-slate-300 bg-slate-800/60 border-slate-700 hover:bg-slate-700"
             onClick={onRelogin}
           >
-            重新扫码
+            验证协议
           </Button>
         </Tooltip>
 

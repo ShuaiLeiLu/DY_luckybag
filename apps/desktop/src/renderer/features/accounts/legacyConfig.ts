@@ -16,7 +16,6 @@ export function buildLegacyConfig(settings: DesktopSettings) {
     preferBigRedPacket: settings.preferBigRedPacket,
     filterOnline: settings.filterOnline,
     randomInteraction: { enabled: settings.randomInteraction },
-    closeLiveStream: { enabled: false },
     participationCount: settings.participationCount,
     singleAccountDuration: settings.singleAccountDuration,
     poolServer: { url: settings.poolServerUrl }

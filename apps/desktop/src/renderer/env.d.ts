@@ -8,9 +8,6 @@ declare global {
       desktop: {
         getBootstrap: () => Promise<BootstrapSnapshot>
         saveSettings: (settings: Partial<DesktopSettings>) => Promise<{ success: boolean; settings: DesktopSettings }>
-        showAccountWindow: (accountId: string) => Promise<{ success: boolean }>
-        hideAccountWindow: (accountId: string) => Promise<{ success: boolean }>
-        setAccountMonitoring: (accountId: string, enabled: boolean) => Promise<{ success: boolean }>
         getUpdateState: () => Promise<UpdateSnapshot>
         checkForUpdates: () => Promise<UpdateSnapshot>
         downloadUpdate: () => Promise<UpdateSnapshot>
@@ -58,7 +55,6 @@ declare global {
           }
           error?: string
         }>
-        checkAndroidBridgeStatus: (config?: Partial<import('@shared/models').AndroidBridgeConfig>) => Promise<import('@shared/models').AndroidBridgeStatus>
         onUpdateState: (handler: (snapshot: UpdateSnapshot) => void) => () => void
         onHotUpdateState: (handler: (snapshot: {
           status: string

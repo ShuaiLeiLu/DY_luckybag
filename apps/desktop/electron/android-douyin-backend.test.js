@@ -105,31 +105,11 @@ describe('AndroidDouyinBackend', () => {
     )
   })
 
-  it('executes searchLiveByCategory via /webcast/web/partition/detail/room/', async () => {
-    const mockClient = createMockClient()
-    mockClient.get.mockResolvedValueOnce({
-      status_code: 0,
-      data: {
-        data: [
-          {
-            room: {
-              id_str: 'room_202',
-              title: '分类直播间',
-              user_count: 30,
-              owner: { nickname: '主播B' }
-            }
-          }
-        ]
-      }
-    })
-
-    const backend = new AndroidDouyinBackend({ protocolClient: mockClient })
-    const res = await backend.searchLiveByCategory({ categoryId: '4_101', offset: 0, count: 15 })
-
-    expect(res.success).toBe(true)
-    expect(res.roomInfoList).toHaveLength(1)
-    expect(res.roomInfoList[0].roomId).toBe('room_202')
-    expect(res.source).toBe('android')
+  it('does not issue a webpage category request', async () => {
+    const client = createMockClient()
+    const backend = new AndroidDouyinBackend({ protocolClient: client })
+    expect((await backend.searchLiveByCategory({ categoryId: '4_101' })).code).toBe('NOT_IMPLEMENTED')
+    expect(client.get).not.toHaveBeenCalled()
   })
 
   it('handles roomLike and roomChat', async () => {

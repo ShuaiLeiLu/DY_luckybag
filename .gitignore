@@ -20,6 +20,8 @@ tokens.json
 *.session
 config.json
 config.local.json
+protocol-session.local.json
+*.protocol-session.json
 apps/desktop/config.json
 
 # Logs
@@ -30,10 +32,12 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# Editors
+# Editors and AI tools
 .vscode/*
 !.vscode/extensions.json
 .idea/
+.claude/
+.mcp.json
 .DS_Store
 *.suo
 *.ntvs*
@@ -66,13 +70,6 @@ Desktop.ini
 *.bak
 *.old
 
-# Legacy reference assets
-超人福袋助手/
-超人福袋助手_1.0.10/
-
-# Keep example configs
-!apps/desktop/tokens.example.json
-
 # Local backend container data
 apps/pool-server/redis-data/
 
@@ -80,10 +77,13 @@ apps/pool-server/redis-data/
 .tools/
 .go-build-cache/
 .go-workspace/
-
-# Local extracted reference copies
-dy_fudai-main/
-
+android/.gradle/
+android/.kotlin/
+android/**/build/
+android/local.properties
 # Local desktop runtime profile and logs
 dy-fudai-desktop/
 runtime-logs/
+
+# Local feedback journal
+apps/pool-server/data/

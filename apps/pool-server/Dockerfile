@@ -35,6 +35,7 @@ RUN addgroup -S app && adduser -S -G app app \
     && apk add --no-cache ca-certificates tzdata
 
 WORKDIR /app
+RUN mkdir -p /app/data && chown app:app /app/data
 
 COPY --from=builder /out/poolserver /app/poolserver
 COPY static /app/static

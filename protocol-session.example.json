@@ -1,0 +1,16 @@
+{
+  "accountId": "account_1",
+  "nickname": "我的安卓账号",
+  "userId": "",
+  "cookie": "",
+  "userAgent": "",
+  "deviceInfo": {
+    "aid": "1128",
+    "app_name": "aweme",
+    "device_platform": "android",
+    "device_id": "",
+    "iid": "",
+    "version_code": "",
+    "version_name": ""
+  }
+}

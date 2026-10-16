@@ -7,6 +7,7 @@ const ERROR_CODES = Object.freeze({
   AUTHENTICATION_REQUIRED: 'AUTHENTICATION_REQUIRED',
   RATE_LIMITED_OR_RISK: 'RATE_LIMITED_OR_RISK',
   NETWORK_ERROR: 'NETWORK_ERROR',
+  NON_JSON_RESPONSE: 'NON_JSON_RESPONSE',
   BUSINESS_ERROR: 'BUSINESS_ERROR',
   INVALID_PARAMS: 'INVALID_PARAMS',
   NOT_IMPLEMENTED: 'NOT_IMPLEMENTED',
@@ -26,11 +27,13 @@ class DouyinBackendError extends Error {
 }
 
 function sanitizeRoomId(roomId) {
-  return String(roomId || '').trim()
+  const value = String(roomId || '').trim()
+  return /^[0-9]{1,32}$/.test(value) ? value : ''
 }
 
 function sanitizeLotteryId(lotteryId) {
-  return String(lotteryId || '').trim()
+  const value = String(lotteryId || '').trim()
+  return /^[0-9]{1,40}$/.test(value) ? value : ''
 }
 
 module.exports = {

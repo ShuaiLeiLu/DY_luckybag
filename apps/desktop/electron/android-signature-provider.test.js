@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 const { AndroidSignatureProvider } = require('./android-signature-provider')
 
 describe('AndroidSignatureProvider', () => {
-  it('returns default headers including x-ss-req-ticket when no hook is set', async () => {
+  it('produces experimental x-argus plus a millisecond transport ticket, without hybrid bridge headers', async () => {
     const provider = new AndroidSignatureProvider()
     const context = {
       method: 'GET',
@@ -15,9 +15,11 @@ describe('AndroidSignatureProvider', () => {
     }
 
     const signed = await provider.signRequest(context)
-    expect(signed.headers).toBeDefined()
-    expect(signed.headers['Accept']).toBe('application/json')
-    expect(signed.headers['x-ss-req-ticket']).toBeDefined()
+    expect(typeof signed.headers['x-argus']).toBe('string')
+    expect(signed.headers['x-argus']).toHaveLength(64)
+    expect(signed.headers['x-security-argus']).toBeUndefined()
+    expect(typeof signed.headers['x-ss-req-ticket']).toBe('string')
+    expect(signed.headers['x-ss-req-ticket']).toMatch(/^\d{13}$/)
   })
 
   it('invokes custom signer hook and uses its returned headers', async () => {
@@ -59,5 +61,20 @@ describe('AndroidSignatureProvider', () => {
     const signed = await provider.signRequest({ headers: {} })
     expect(hook).toHaveBeenCalled()
     expect(signed.headers['x-argus']).toBe('dynamic_argus')
+  })
+
+  it.each([null, undefined, {}, { headers: {} }, { headers: [] }])('does not hide an invalid custom adapter result behind candidate AES', async value => {
+    const provider = new AndroidSignatureProvider({ signerHook: async () => value })
+    await expect(provider.signRequest({ headers: {} })).rejects.toMatchObject({ code: 'ANDROID_TICKET_GUARD_UNAVAILABLE' })
+  })
+
+  it('uses the request ticket that was supplied to signing, without reading a new clock value', async () => {
+    const provider = new AndroidSignatureProvider()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1700000010999)
+    try {
+      const signed = await provider.signRequest({ timestampMs: 1700000000123, params: { aid: 1128 } })
+      expect(signed.headers['x-ss-req-ticket']).toBe('1700000000123')
+      expect(clock).not.toHaveBeenCalled()
+    } finally { clock.mockRestore() }
   })
 })

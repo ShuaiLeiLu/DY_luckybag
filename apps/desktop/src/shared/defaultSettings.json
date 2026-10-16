@@ -1,15 +1,15 @@
 {
-  "poolServerUrl": "http://fudai.shuai.help:9090",
+  "poolServerUrl": "http://127.0.0.1:9090",
   "updateFeedUrl": "",
-  "hotUpdateEnabled": true,
-  "hotUpdateManifestUrl": "http://fudai.shuai.help:9090/desktop/hot-manifest.json",
+  "hotUpdateEnabled": false,
+  "hotUpdateManifestUrl": "",
   "hotUpdateReloadOnApply": false,
   "stayDuration": 18,
-  "enableRedPacket": true,
+  "enableRedPacket": false,
   "onlyRedPacketMode": {
     "enabled": false
   },
-  "randomInteraction": true,
+  "randomInteraction": false,
   "hitRate": {
     "enabled": true,
     "value": 0.08
@@ -45,10 +45,8 @@
     "pagesPerCategory": 12,
     "allCount": 24
   },
-  "requestBackend": "web",
-  "androidBridge": {
-    "enabled": false,
-    "serverUrl": "http://127.0.0.1:8765",
-    "token": ""
-  }
+  "requestBackend": "android",
+  "poolServerToken": "",
+  "resumeOnStartup": true,
+  "hotUpdatePublicKey": ""
 }

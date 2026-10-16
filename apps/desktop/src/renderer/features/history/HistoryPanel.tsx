@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react'
-import { Card, Segmented, Table, Tag, Typography } from 'antd'
+import { Card, Segmented, Table, Tag } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { HistoryOutlined, TrophyOutlined } from '@ant-design/icons'
+import { HistoryOutlined } from '@ant-design/icons'
 import type { LotteryHistoryRecord } from '@shared/models'
 
 export type HistoryPanelProps = {

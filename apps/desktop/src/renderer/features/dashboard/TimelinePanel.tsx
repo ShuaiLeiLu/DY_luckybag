@@ -1,5 +1,5 @@
 import { useState, type RefObject } from 'react'
-import { Card, Empty, Radio, Tag, Typography } from 'antd'
+import { Card, Empty, Radio, Tag } from 'antd'
 import { FileTextOutlined } from '@ant-design/icons'
 
 export type TimelineLogEntry = {

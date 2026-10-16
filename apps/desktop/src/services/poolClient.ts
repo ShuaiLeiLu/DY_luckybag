@@ -1,5 +1,7 @@
-export const FIXED_POOL_SERVER_URL = 'http://fudai.shuai.help:9090'
+export const FIXED_POOL_SERVER_URL = 'http://127.0.0.1:9090'
 let configuredPoolServerUrl = FIXED_POOL_SERVER_URL
+let configuredPoolToken = ''
+export function persistPoolServerToken(token: string) { configuredPoolToken = String(token || '').trim() }
 const DEFAULT_TIMEOUT_MS = 3200
 const CLIENT_ID_STORAGE_KEY = 'DY_POOL_CLIENT_ID'
 
@@ -136,10 +138,6 @@ function ensureObjectRecord<T extends Record<string, unknown>>(value: unknown): 
   return null
 }
 
-function payloadError(payload: PoolPayload, fallback: string) {
-  return toStringValue(payload.error ?? fallback) || fallback
-}
-
 /**
  * 统一 JSON 请求封装（超时、错误格式归一）。
  * @param baseUrl 服务地址
@@ -158,6 +156,7 @@ async function requestJSON(
     const headers: Record<string, string> = { 'content-type': 'application/json' }
     const stableClientId = toStringValue(resolvePoolClientId())
     if (stableClientId) headers['x-pool-client-id'] = stableClientId
+    if (configuredPoolToken) headers['authorization'] = 'Bearer ' + configuredPoolToken
 
     const res = await fetch(`${normalizePoolServerUrl(baseUrl)}${path}`, {
       method,
@@ -344,38 +343,6 @@ export async function claimPoolTask(baseUrl: string, options: PoolOptions = {}):
 }
 
 /**
- * 请求服务端在 T-30/T-20 对当前预热任务重新排序并返回 keep/switch 建议。
- * @param {string} baseUrl 服务地址
- * @param {{clientId:string,accountId:string,currentCandidateKey?:string,currentRoomId?:string,filters?:object,excludeKeys?:string[],stage?:string,limit?:number,timeoutMs?:number}} options 参数
- * @returns {Promise<object>}
- */
-export async function reviewPoolTask(baseUrl: string, options: PoolOptions = {}): Promise<PoolClientResponse> {
-  const accessor = createOptionAccessor(options)
-  const body = {
-    clientId: accessor.str('clientId'),
-    accountId: accessor.str('accountId'),
-    currentCandidateKey: accessor.str('currentCandidateKey'),
-    currentRoomId: accessor.str('currentRoomId'),
-    filters: accessor.record('filters') ?? {},
-    excludeKeys: accessor.arr<string>('excludeKeys'),
-    stage: accessor.str('stage'),
-    limit: clampInt(accessor.num('limit', 5), 1, 12)
-  }
-  const res = await requestJSON(baseUrl, '/task/review', {
-    method: 'POST',
-    body,
-    timeoutMs: accessor.num('timeoutMs', DEFAULT_TIMEOUT_MS)
-  })
-  if (!res.ok) return res
-  const payload = isObject(res.data) ? res.data : {}
-  if (payload.ok !== true) {
-    const errorMessage = notifyPayloadError(payload, 'task_review_failed')
-    return { ok: false, status: res.status, data: payload, error: errorMessage }
-  }
-  return { ok: true, status: res.status, data: payload }
-}
-
-/**
  * 续租已领取任务。
  * @param {string} baseUrl 服务地址
  * @param {{clientId:string,accountId:string,leaseId:string,leaseSec?:number,timeoutMs?:number}} options 参数
@@ -468,6 +435,7 @@ export async function reportPoolTaskFeedback(baseUrl: string, options: PoolOptio
   const res = await requestJSON(baseUrl, '/task/feedback', {
     method: 'POST',
     body: {
+      eventId: accessor.str('eventId'),
       clientId: accessor.str('clientId'),
       accountId: accessor.str('accountId'),
       event: accessor.str('event'),
@@ -485,10 +453,10 @@ export async function reportPoolTaskFeedback(baseUrl: string, options: PoolOptio
       prizeInfo: accessor.record('prizeInfo') ?? {},
       predictedProbability: accessor.num('predictedProbability', 0),
       predictedJoinTotal: accessor.num('predictedJoinTotal', 0),
-      remainingSec: Math.max(0, accessor.num('remainingSec', 0)),
-      endTime: accessor.num('endTime', 0),
-      startTime: accessor.num('startTime', 0),
-      joinedAt: accessor.num('joinedAt', 0),
+      remainingSec: Math.max(0, Math.floor(accessor.num('remainingSec', 0))),
+      endTime: Math.floor(accessor.num('endTime', 0)),
+      startTime: Math.floor(accessor.num('startTime', 0)),
+      joinedAt: Math.floor(accessor.num('joinedAt', 0)),
       rewardAmount: accessor.num('rewardAmount', 0),
       joinMode: accessor.str('joinMode'),
       reason: accessor.str('reason'),
@@ -651,34 +619,6 @@ export async function reportPoolAllScanCursor(baseUrl: string, options: PoolOpti
   const payload = isObject(res.data) ? res.data : {}
   if (payload.ok !== true) {
     const errorMessage = notifyPayloadError(payload, 'all_scan_report_failed')
-    return { ok: false, status: res.status, data: payload, error: errorMessage }
-  }
-  return { ok: true, status: res.status, data: payload }
-}
-
-/**
- * 拉取当前服务端租约列表。
- * @param {string} baseUrl 服务地址
- * @param {{clientId?:string,accountId?:string,filters?:object,limit?:number,timeoutMs?:number}} options 参数
- * @returns {Promise<object>}
- */
-export async function fetchPoolTaskLeases(baseUrl: string, options: PoolOptions = {}): Promise<PoolClientResponse> {
-  const accessor = createOptionAccessor(options)
-  const params = new URLSearchParams()
-  params.set('limit', String(clampInt(accessor.num('limit', 200), 1, 1000)))
-  appendFilters(params, accessor.record('filters'))
-  const clientId = accessor.str('clientId')
-  const accountId = accessor.str('accountId')
-  if (clientId) params.set('clientId', clientId)
-  if (accountId) params.set('accountId', accountId)
-
-  const res = await requestJSON(baseUrl, `/task/leases?${params.toString()}`, {
-    timeoutMs: accessor.num('timeoutMs', DEFAULT_TIMEOUT_MS)
-  })
-  if (!res.ok) return res
-  const payload = isObject(res.data) ? res.data : {}
-  if (payload.ok !== true) {
-    const errorMessage = notifyPayloadError(payload, 'task_leases_failed')
     return { ok: false, status: res.status, data: payload, error: errorMessage }
   }
   return { ok: true, status: res.status, data: payload }

@@ -25,7 +25,7 @@ function extractErrorMessage(json) {
  * 判断参与请求是否成功
  */
 function isAttendSuccess(status, statusCode) {
-  return status === 0 || (status === undefined && statusCode === 0)
+  return statusCode === 0 && (status === 0 || status === undefined)
 }
 
 /**
@@ -45,6 +45,9 @@ function normalizeLotteryInfo(lotteryInfo, options = {}) {
   const isRedPacket = Boolean(options.isRedPacket)
   const fallbackName = isRedPacket ? '未知红包' : '未知奖品'
   const conditions = Array.isArray(lotteryInfo.conditions) ? lotteryInfo.conditions : []
+  if (!lotteryInfo.lottery_id_str && typeof lotteryInfo.lottery_id === 'number' && !Number.isSafeInteger(lotteryInfo.lottery_id)) {
+    throw new DouyinBackendError('福袋 ID 数字精度不足，需要字符串标识', { code: ERROR_CODES.INVALID_PARAMS })
+  }
   const lotteryId = String(lotteryInfo.lottery_id_str || lotteryInfo.lottery_id || '').trim()
 
   const normalized = {
@@ -68,7 +71,7 @@ function normalizeLotteryInfo(lotteryInfo, options = {}) {
       Number(lotteryInfo.prize_info?.total_amount) ||
       0,
     start_time: Number(lotteryInfo.start_time) || 0,
-    end_time: Number(lotteryInfo.draw_time) || 0,
+    end_time: Number(lotteryInfo.draw_time || lotteryInfo.end_time) || 0,
     conditions
   }
 
@@ -198,66 +201,6 @@ function extractRoomBenefitHints(rawBenefitData) {
   }
 }
 
-const FIXED_CATEGORY_DEFAULT = Object.freeze({
-  categoryId: '4_103',
-  partition: '103',
-  partitionType: 4
-})
-
-const FIXED_CATEGORY_CATALOG = Object.freeze({
-  '4_101': Object.freeze({ categoryId: '4_101', partition: '101', partitionType: 4 }),
-  '4_102': Object.freeze({ categoryId: '4_102', partition: '102', partitionType: 4 }),
-  '4_103': Object.freeze({ categoryId: '4_103', partition: '103', partitionType: 4 }),
-  '4_104': Object.freeze({ categoryId: '4_104', partition: '104', partitionType: 4 }),
-  '4_105': Object.freeze({ categoryId: '4_105', partition: '105', partitionType: 4 }),
-  '4_106': Object.freeze({ categoryId: '4_106', partition: '106', partitionType: 4 }),
-  '4_107': Object.freeze({ categoryId: '4_107', partition: '107', partitionType: 4 }),
-  '4_108': Object.freeze({ categoryId: '4_108', partition: '108', partitionType: 4 })
-})
-
-const LEGACY_CATEGORY_ALIAS_MAP = Object.freeze({
-  '1_720': '4_103',
-  '3_10000': '4_101',
-  '3_10001': '4_106',
-  '0': '4_103',
-  '1': '4_103',
-  '2': '4_101',
-  '3': '4_101',
-  '4': '4_106',
-  '5': '4_101'
-})
-
-function resolveCategoryPartitionParams(rawCategoryId = '') {
-  const text = String(rawCategoryId || '').trim()
-  if (!text) {
-    return { ...FIXED_CATEGORY_DEFAULT }
-  }
-
-  const normalized = LEGACY_CATEGORY_ALIAS_MAP[text] || text
-
-  if (Object.prototype.hasOwnProperty.call(FIXED_CATEGORY_CATALOG, normalized)) {
-    return { ...FIXED_CATEGORY_CATALOG[normalized] }
-  }
-
-  const parts = normalized.split('_').map((item) => String(item || '').trim()).filter(Boolean)
-  if (parts.length >= 2 && /^[0-9]+$/.test(parts[0]) && /^[0-9]+$/.test(parts[1])) {
-    return {
-      categoryId: normalized,
-      partition: parts.slice(1).join('_'),
-      partitionType: Number(parts[0]) || 1
-    }
-  }
-
-  if (/^[0-9]+$/.test(normalized)) {
-    const topCategory = `4_${normalized}`
-    if (Object.prototype.hasOwnProperty.call(FIXED_CATEGORY_CATALOG, topCategory)) {
-      return { ...FIXED_CATEGORY_CATALOG[topCategory] }
-    }
-  }
-
-  return { ...FIXED_CATEGORY_DEFAULT }
-}
-
 /**
  * 解析推荐流数据 (/webcast/feed/)
  */
@@ -317,79 +260,6 @@ function parseFeedResponse(json) {
   }
 }
 
-/**
- * 解析分区直播间数据 (/webcast/web/partition/detail/room/ 或 /webcast/partition/feed/)
- */
-function parsePartitionResponse(json, safeOffset = 0, safeCount = 15) {
-  if (!json || typeof json !== 'object') {
-    return { success: false, error: '响应为空', code: ERROR_CODES.INVALID_PARAMS }
-  }
-
-  if (json.status_code !== undefined && json.status_code !== 0) {
-    const errorMsg = extractErrorMessage(json) || '未知接口错误'
-    return {
-      success: false,
-      error: `API错误(${json.status_code}): ${errorMsg}`,
-      code: ERROR_CODES.BUSINESS_ERROR,
-      statusCode: json.status_code
-    }
-  }
-
-  const rawList = Array.isArray(json.data?.data)
-    ? json.data.data
-    : Array.isArray(json.data?.room_list)
-      ? json.data.room_list
-      : Array.isArray(json.data?.list)
-        ? json.data.list
-        : []
-
-  if (rawList.length === 0) {
-    return {
-      success: true,
-      roomInfoList: [],
-      rawCount: 0,
-      hasMore: false,
-      nextOffset: safeOffset + safeCount
-    }
-  }
-
-  const roomInfoList = rawList
-    .map((item) => {
-      const room = item?.room || item?.data || item
-      const roomId = String(room?.id_str || room?.id || '')
-      if (!roomId) return null
-      const benefitData = room?.others?.web_enter_benefit_point_data || item?.others?.web_enter_benefit_point_data
-      const benefitHints = extractRoomBenefitHints(benefitData)
-      return {
-        webRid: item?.web_rid || item?.webRid || room?.web_rid || roomId,
-        roomId,
-        roomTitle: room.title || '',
-        authorNickname: room?.owner?.nickname || '',
-        authorSecUid: room?.owner?.sec_uid || '',
-        onlineTotal: room?.user_count || 0,
-        hasLotteryHint: Boolean(
-          room?.others?.web_enter_benefit_point_data?.has_ongoing_lottery ||
-          item?.others?.web_enter_benefit_point_data?.has_ongoing_lottery
-        ),
-        ...benefitHints
-      }
-    })
-    .filter(Boolean)
-
-  const hasMore = Boolean(json.extra?.has_more ?? (rawList.length >= safeCount))
-
-  return {
-    success: true,
-    roomInfoList,
-    rawCount: rawList.length,
-    hasMore,
-    nextOffset: safeOffset + safeCount,
-    data: rawList,
-    rawData: json.data,
-    extra: json.extra || null
-  }
-}
-
 module.exports = {
   extractErrorMessage,
   isAttendSuccess,
@@ -398,10 +268,5 @@ module.exports = {
   normalizeRoomBenefitData,
   flattenRoomBenefitValue,
   extractRoomBenefitHints,
-  FIXED_CATEGORY_DEFAULT,
-  FIXED_CATEGORY_CATALOG,
-  LEGACY_CATEGORY_ALIAS_MAP,
-  resolveCategoryPartitionParams,
-  parseFeedResponse,
-  parsePartitionResponse
+  parseFeedResponse
 }

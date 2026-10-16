@@ -1,206 +1,179 @@
-/**
- * Android 原生协议网络客户端
- * 负责组装 Android 设备参数、请求头，并经由 AndroidSignatureProvider 注入签名后发送原生 HTTP 请求
- */
-
-const http = require('http')
-const https = require('https')
-const querystring = require('querystring')
-const { URL } = require('url')
+const http = require('node:http')
+const https = require('node:https')
+const querystring = require('node:querystring')
 const { AndroidSignatureProvider } = require('./android-signature-provider')
-const { ERROR_CODES, DouyinBackendError } = require('./douyin-request-models')
+const { getXSsStub } = require('./android-sign-algorithms')
+const { DouyinBackendError, ERROR_CODES } = require('./douyin-request-models')
+const { DEFAULT_ANDROID_USER_AGENT } = require('./android-client-profile')
 
-const DEFAULT_ANDROID_DEVICE = Object.freeze({
-  aid: 1128,
-  app_name: 'aweme',
-  version_code: 300800,
-  version_name: '30.8.0',
-  device_platform: 'android',
-  os_version: '12',
-  os_api: 31,
-  channel: 'douyin_webcast',
-  device_type: 'Pixel 6',
-  device_brand: 'Google',
-  language: 'zh',
-  app_type: 'normal',
-  manifest_version_code: 300800,
-  update_version_code: 300800
-})
-
-const DEFAULT_ANDROID_USER_AGENT =
-  'com.ss.android.ugc.aweme/300800 (Linux; U; Android 12; zh_CN; Pixel 6; Build/SQ3A.220705.004; Cronet/TTNetVersion:5f939e60 2024-03-01 QuicVersion:42b109e4 2024-03-01)'
-
+// Server device IDs come from registration or an existing session.
+const DEFAULT_ANDROID_DEVICE = Object.freeze({ aid: 1128, app_name: 'aweme', device_platform: 'android' })
+const HOSTS = new Set(['webcast.amemv.com', 'aweme.snssdk.com', 'log.snssdk.com'])
+function headerKey(headers, name) { return Object.keys(headers).find(key => key.toLowerCase() === name.toLowerCase()) }
+function mergeHeaders(...sources) {
+  const result = {}
+  for (const source of sources) for (const [name, value] of Object.entries(source || {})) {
+    result[headerKey(result, name) || name] = value
+  }
+  return result
+}
+function setComputedHeader(headers, name, value) {
+  const previous = headerKey(headers, name)
+  if (previous) delete headers[previous]
+  if (value !== null) headers[name] = value
+}
+function signingMismatch(message) { return new DouyinBackendError(message, { code: ERROR_CODES.INVALID_PARAMS }) }
+function classifyHTTP(status) {
+  return status === 401 ? ERROR_CODES.AUTHENTICATION_REQUIRED : [403, 429, 444].includes(status)
+    ? ERROR_CODES.RATE_LIMITED_OR_RISK : ERROR_CODES.NETWORK_ERROR
+}
+function parseProtocolJSON(raw) {
+  const ids = new Set(['device_id', 'install_id', 'iid', 'uid', 'user_id', 'room_id', 'lottery_id'])
+  return JSON.parse(raw, (key, value, context) => {
+    // Node 22+/Electron preserve the original numeric token via reviver context.
+    // Never stringify an already rounded identifier.
+    return ids.has(key) && typeof value === 'number' && !Number.isSafeInteger(value) &&
+      /^[0-9]+$/.test(context?.source || '') ? context.source : value
+  })
+}
 class AndroidProtocolClient {
-  constructor({
-    baseUrl = 'https://webcast.amemv.com',
-    signer = null,
-    deviceInfo = {},
-    userAgent = DEFAULT_ANDROID_USER_AGENT,
-    timeoutMs = 10000,
-    transport = null,
-    logger
-  } = {}) {
-    this.baseUrl = baseUrl.replace(/\/+$/, '')
+  constructor({ baseUrl = 'https://webcast.amemv.com', signer, deviceInfo = {},
+    userAgent = DEFAULT_ANDROID_USER_AGENT, timeoutMs = 10000, transport, maxResponseBytes = 2097152, authHeaders = {} } = {}) {
+    const base = new URL(baseUrl)
+    const local = ['127.0.0.1', 'localhost', '[::1]'].includes(base.hostname)
+    if (!['http:', 'https:'].includes(base.protocol) || (!local && (base.protocol !== 'https:' || !HOSTS.has(base.hostname))) || base.username || base.password || base.pathname !== '/' || base.search || base.hash) throw new Error('Invalid protocol origin')
+    this.baseUrl = base.origin
     this.signer = signer || new AndroidSignatureProvider()
-    this.deviceInfo = { ...DEFAULT_ANDROID_DEVICE, ...(deviceInfo || {}) }
+    this.deviceInfo = { ...DEFAULT_ANDROID_DEVICE, ...deviceInfo }
     this.userAgent = userAgent
-    this.timeoutMs = Math.max(1000, Number(timeoutMs) || 10000)
+    this.authHeaders = authHeaders
+    this.timeoutMs = Math.max(100, Math.min(30000, Number(timeoutMs) || 10000))
+    this.maxResponseBytes = maxResponseBytes
     this.transport = transport
-    this.logger = logger || console
   }
-
-  getSigner() {
-    return this.signer
-  }
-
-  setSigner(signer) {
-    if (signer) {
-      this.signer = signer
+  getSigner() { return this.signer }
+  setSigner(signer) { if (signer) this.signer = signer }
+  async execute(pathname, { method = 'GET', params = {}, headers = {}, body = null, isForm = true,
+    responseMode = 'business', includeResponse = false, signal } = {}) {
+    if ((!/^\/(webcast|aweme|passport)\/[a-zA-Z0-9_/-]+\/$/.test(pathname) && pathname !== '/service/2/device_register/') || pathname.includes('..')) throw new DouyinBackendError('Invalid protocol path', { code: ERROR_CODES.INVALID_PARAMS })
+    if (!['business', 'passport', 'registration'].includes(responseMode) ||
+      (responseMode === 'passport' && !pathname.startsWith('/passport/mobile/')) ||
+      (responseMode === 'registration' && pathname !== '/service/2/device_register/')) throw new DouyinBackendError('Invalid response mode', { code: ERROR_CODES.INVALID_PARAMS })
+    signal?.throwIfAborted()
+    method = String(method).toUpperCase()
+    if (!['GET', 'POST'].includes(method)) throw new DouyinBackendError('Invalid protocol method', { code: ERROR_CODES.INVALID_PARAMS })
+    const queryParams = method === 'GET' ? { ...this.deviceInfo, ...params } : { ...this.deviceInfo }
+    const query = querystring.stringify(queryParams)
+    const url = new URL(`${this.baseUrl}${pathname}${query ? '?' + query : ''}`)
+    let requestBody = body === null ? null : Buffer.from(body)
+    const requestHeaders = mergeHeaders({ 'User-Agent': this.userAgent, Accept: 'application/json', 'sdk-version': '2' }, this.authHeaders, headers)
+    if (method === 'POST' && requestBody === null && isForm) {
+      requestBody = Buffer.from(querystring.stringify(params), 'utf8')
+      setComputedHeader(requestHeaders, 'Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8')
     }
-  }
-
-  /**
-   * 发送 Android 原生请求核心方法
-   */
-  async execute(pathname, {
-    method = 'GET',
-    params = {},
-    headers = {},
-    body = null,
-    isForm = true
-  } = {}) {
-    const cleanPath = pathname.startsWith('/') ? pathname : `/${pathname}`
-
-    // 1. 合并 Android 设备基础参数与业务参数
-    const mergedParams = {
-      ...this.deviceInfo,
-      ...(params || {})
-    }
-
-    // 2. 构造基础 URL 与 Query
-    let targetUrlString
-    let requestBody = null
-    const requestHeaders = {
-      'User-Agent': this.userAgent,
-      'Accept': 'application/json',
-      'sdk-version': '2',
-      ...(headers || {})
-    }
-
-    if (method.toUpperCase() === 'GET') {
-      const qs = querystring.stringify(mergedParams)
-      targetUrlString = `${this.baseUrl}${cleanPath}${qs ? `?${qs}` : ''}`
-    } else {
-      // POST 请求：Query 挂设备公共参数，Body 挂业务表单或 payload
-      const qs = querystring.stringify(this.deviceInfo)
-      targetUrlString = `${this.baseUrl}${cleanPath}${qs ? `?${qs}` : ''}`
-
-      if (body) {
-        requestBody = typeof body === 'string' ? body : Buffer.from(body)
-      } else if (isForm) {
-        const formString = querystring.stringify(params)
-        requestHeaders['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
-        requestBody = Buffer.from(formString, 'utf8')
+    // Official TypedByteArray.md5Stub and Cronet's request construction add the
+    // body digest before the security callback (classes42.dex: 0x3d4ab0,
+    // 0x6216ca). This client does not compress/encrypt after this boundary.
+    setComputedHeader(requestHeaders, 'x-ss-stub', requestBody === null ? null : getXSsStub(requestBody))
+    setComputedHeader(requestHeaders, 'Content-Length', requestBody === null ? null : String(requestBody.byteLength))
+    const timestampMs = Date.now()
+    setComputedHeader(requestHeaders, 'x-ss-req-ticket', String(timestampMs))
+    for (const name of ['x-argus', 'x-gorgon', 'x-ladon', 'x-khronos']) setComputedHeader(requestHeaders, name, null)
+    const context = Object.freeze({ method, url: url.href, pathname, query: url.search.slice(1),
+      params: Object.freeze({ ...queryParams }), timestampMs,
+      headers: Object.freeze({ ...requestHeaders }), body: requestBody === null ? null : Buffer.from(requestBody),
+      deviceInfo: Object.freeze({ ...this.deviceInfo }) })
+    const signed = await this.signer.signRequest(context)
+    signal?.throwIfAborted()
+    if (signed?.params && querystring.stringify(signed.params) !== query) throw signingMismatch('Signer changed query after signing')
+    if (signed?.url !== undefined && signed.url !== url.href) throw signingMismatch('Signer changed URL after signing')
+    if (requestBody !== null && !context.body.equals(requestBody)) throw signingMismatch('Signer mutated body while signing')
+    if (signed && Object.hasOwn(signed, 'body')) {
+      const returnedBody = signed.body == null ? null : Buffer.from(signed.body)
+      if (requestBody === null ? returnedBody !== null : returnedBody === null || !requestBody.equals(returnedBody)) {
+        throw signingMismatch('Signer changed body after signing')
       }
     }
-
-    // 3. 调用 AndroidSignatureProvider 进行请求签名（用户自定义代码处）
-    const signContext = {
-      method: method.toUpperCase(),
-      url: targetUrlString,
-      pathname: cleanPath,
-      params: mergedParams,
-      headers: requestHeaders,
-      body: requestBody,
-      deviceInfo: this.deviceInfo
+    for (const [name, value] of Object.entries(signed?.headers || {})) {
+      const original = headerKey(requestHeaders, name)
+      if (original && String(requestHeaders[original]) !== String(value)) throw signingMismatch('Signer changed input header after signing')
+      if (!original && ['x-ss-stub', 'content-length'].includes(name.toLowerCase())) throw signingMismatch('Signer added body metadata without a body')
     }
-
-    const signed = await this.signer.signRequest(signContext)
-    const finalHeaders = { ...requestHeaders, ...(signed?.headers || {}) }
-
-    if (signed?.body) {
-      requestBody = typeof signed.body === 'string' ? Buffer.from(signed.body, 'utf8') : signed.body
-    }
-    if (requestBody && !finalHeaders['Content-Length']) {
-      finalHeaders['Content-Length'] = Buffer.byteLength(requestBody)
-    }
-
-    // 4. 发送 HTTP 请求
-    const targetUrl = new URL(targetUrlString)
-    const isHttps = targetUrl.protocol === 'https:'
-    const transport = this.transport || (isHttps ? https : http)
-
+    const finalHeaders = mergeHeaders(requestHeaders, signed?.headers)
+    // x-security-argus belongs to the official hybrid bridge's context headers;
+    // it is not a second mandatory cryptographic signature for native requests.
+    if (!signed?.headers?.[headerKey(signed.headers, 'x-argus')]) throw new DouyinBackendError('Signer did not produce required headers', { code: ERROR_CODES.ANDROID_TICKET_GUARD_UNAVAILABLE })
+    const transport = this.transport || (url.protocol === 'https:' ? https : http)
     return new Promise((resolve, reject) => {
-      const req = transport.request(targetUrl, {
-        method: method.toUpperCase(),
-        headers: finalHeaders,
-        timeout: this.timeoutMs
-      }, (res) => {
-        let rawData = ''
-        res.setEncoding('utf8')
-        res.on('data', (chunk) => {
-          rawData += chunk
-        })
-        res.on('end', () => {
-          let json = null
-          try {
-            json = rawData ? JSON.parse(rawData) : {}
-          } catch (_) {
-            return reject(new DouyinBackendError(`Android 接口返回非 JSON 数据 (${res.statusCode})`, {
-              code: ERROR_CODES.NETWORK_ERROR,
-              statusCode: res.statusCode,
-              details: rawData
-            }))
-          }
-
-          if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 400)) {
-            const errCode = res.statusCode === 403
-              ? ERROR_CODES.RATE_LIMITED_OR_RISK
-              : (res.statusCode === 401 ? ERROR_CODES.AUTHENTICATION_REQUIRED : ERROR_CODES.BUSINESS_ERROR)
-            return reject(new DouyinBackendError(`Android 接口 HTTP 错误 (${res.statusCode})`, {
-              code: errCode,
-              statusCode: res.statusCode,
-              details: json
-            }))
-          }
-
-          resolve(json)
-        })
-      })
-
-      req.on('timeout', () => {
-        req.destroy()
-        reject(new DouyinBackendError(`Android 接口请求超时 (${this.timeoutMs}ms)`, {
-          code: ERROR_CODES.NETWORK_ERROR,
-          retryable: true
-        }))
-      })
-
-      req.on('error', (err) => {
-        reject(new DouyinBackendError(`Android 接口网络错误: ${err.message}`, {
-          code: ERROR_CODES.NETWORK_ERROR,
-          retryable: true
-        }))
-      })
-
-      if (requestBody) {
-        req.write(requestBody)
+      let timer
+      let settled = false
+      let abort
+      const finish = (error, value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', abort)
+        if (error) reject(error); else resolve(value)
       }
+      const req = transport.request(url, { method, headers: finalHeaders }, res => {
+        const chunks = []
+        let bytes = 0
+        res.on('data', chunk => {
+          const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+          bytes += data.length
+          if (bytes > this.maxResponseBytes) {
+            finish(new DouyinBackendError('Response too large', { code: ERROR_CODES.INVALID_PARAMS }))
+            req.destroy?.()
+          } else chunks.push(data)
+        })
+        res.on('aborted', () => finish(new DouyinBackendError('Response aborted', { code: ERROR_CODES.NETWORK_ERROR, retryable: true })))
+        res.on('error', () => finish(new DouyinBackendError('Response interrupted', { code: ERROR_CODES.NETWORK_ERROR, retryable: true })))
+        res.on('end', () => {
+          if (settled) return
+          const status = Number(res.statusCode || 0)
+          if (status < 200 || status >= 300) return finish(new DouyinBackendError('HTTP request rejected', {
+            statusCode: status, code: classifyHTTP(status), retryable: status >= 500
+          }))
+          try {
+            const json = parseProtocolJSON(Buffer.concat(chunks).toString('utf8'))
+            if (!json || typeof json !== 'object' || Array.isArray(json)) throw new Error('Invalid JSON shape')
+            // Passport and device registration have different envelopes from Aweme.
+            // Their callers validate the envelope before using any returned credentials.
+            if (responseMode === 'business' && json.status_code !== 0) {
+              const { normalizeAttendResponse } = require('./douyin-response-parser')
+              const normalized = normalizeAttendResponse(json)
+              const error = new DouyinBackendError('Upstream business request rejected', {
+                code: [8, 9, 1001, 1003, 1004].includes(Number(json.status_code)) ? ERROR_CODES.AUTHENTICATION_REQUIRED : normalized.code,
+                statusCode: status, retryable: false
+              })
+              error.businessCode = Number.isFinite(Number(json.status_code)) ? Number(json.status_code) : null
+              return finish(error)
+            }
+            finish(null, includeResponse ? { json, statusCode: status, headers: {
+              'set-cookie': res.headers?.['set-cookie'] || [], 'x-tt-token': res.headers?.['x-tt-token'] || ''
+            } } : json)
+          } catch { finish(new DouyinBackendError('Non-JSON or invalid response', { code: ERROR_CODES.NON_JSON_RESPONSE, statusCode: status })) }
+        })
+      })
+      timer = setTimeout(() => {
+        finish(Object.assign(new DouyinBackendError('Protocol request timed out', { code: ERROR_CODES.NETWORK_ERROR, retryable: true }), { transportCode: 'ETIMEDOUT' }))
+        req.destroy?.()
+      }, this.timeoutMs)
+      req.on('error', original => {
+        const allowed = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENETUNREACH',
+          'EHOSTUNREACH', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'ERR_TLS_CERT_ALTNAME_INVALID'])
+        const error = new DouyinBackendError('Protocol connection failed', { code: ERROR_CODES.NETWORK_ERROR, retryable: true })
+        error.transportCode = allowed.has(original?.code) ? original.code : 'CONNECTION_FAILED'
+        finish(error)
+      })
+      abort = () => { finish(Object.assign(new Error('Request canceled'), { code: 'LOGIN_CANCELED' })); req.destroy?.() }
+      signal?.addEventListener('abort', abort, { once: true })
+      if (signal?.aborted) { abort(); return }
+      if (requestBody !== null) req.write(requestBody)
       req.end()
     })
   }
-
-  async get(pathname, params = {}, headers = {}) {
-    return this.execute(pathname, { method: 'GET', params, headers })
-  }
-
-  async post(pathname, params = {}, headers = {}) {
-    return this.execute(pathname, { method: 'POST', params, headers, isForm: true })
-  }
+  get(pathname, params = {}, headers = {}) { return this.execute(pathname, { method: 'GET', params, headers }) }
+  post(pathname, params = {}, headers = {}) { return this.execute(pathname, { method: 'POST', params, headers }) }
 }
-
-module.exports = {
-  AndroidProtocolClient,
-  DEFAULT_ANDROID_DEVICE,
-  DEFAULT_ANDROID_USER_AGENT
-}
+module.exports = { AndroidProtocolClient, DEFAULT_ANDROID_DEVICE, DEFAULT_ANDROID_USER_AGENT, classifyHTTP, parseProtocolJSON }

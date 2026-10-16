@@ -7,6 +7,7 @@ services:
       - "${POOL_PORT:-9090}:9090"
     environment:
       POOL_CONFIG_FILE: /app/config.json
+      POOL_SERVER_HOST: 0.0.0.0
       POOL_REDIS_ENABLED: "true"
       # Redis 地址可在 config.json 中配置，或在此通过环境变量覆盖：
       # REDIS_ADDR: "redis:6379"
@@ -14,3 +15,7 @@ services:
       # REDIS_DB: "0"
     volumes:
       - ../../config.json:/app/config.json:ro
+      - pool-data:/app/data
+
+volumes:
+  pool-data:

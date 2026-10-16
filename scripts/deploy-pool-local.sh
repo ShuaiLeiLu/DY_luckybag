@@ -109,7 +109,11 @@ if [[ ! -d "${POOL_DIR}" ]]; then
   exit 1
 fi
 
-if [[ "${USE_LOCAL_STACK}" != "1" && ! -f "${PROJECT_CONFIG}" ]]; then
+if [[ "${USE_LOCAL_STACK}" == "1" && ! -f "${PROJECT_CONFIG}" ]]; then
+  node "${ROOT_DIR}/scripts/setup-local.mjs"
+fi
+
+if [[ ! -f "${PROJECT_CONFIG}" ]]; then
   echo "缺少配置文件: ${PROJECT_CONFIG}"
   exit 1
 fi

@@ -2,11 +2,12 @@
  * Android 协议签名提供者接口与基础实现
  *
  * 【签名代码扩展入口】
- * 用户可在此处实现自己的 Android 签名算法（如 x-argus、x-ladon、x-gorgon、x-khronos、x-ss-stub、TicketGuard 等），
- * 或者在此调用本地/远程的 Android 签名服务（RPC / Unidbg / Frida / 签名服务器）。
+ * 可通过 signerHook 接入经过真实请求验证的纯协议签名实现。
+ * 默认 experimental-aes-v2 只供诊断，不代表已实现官方签名或设备证明。
  */
 
-const { signAndroidHeaders } = require('./android-sign-algorithms')
+const { DouyinBackendError, ERROR_CODES } = require('./douyin-request-models')
+const { signNativeAndroidHeaders } = require('./android-sign-algorithms')
 
 class AndroidSignatureProvider {
   constructor(options = {}) {
@@ -37,35 +38,34 @@ class AndroidSignatureProvider {
    * @param {string|Buffer|null} context.body - POST 请求体（如有）
    * @param {object} context.deviceInfo - Android 设备与应用版本信息
    * @returns {Promise<{ headers: Record<string, string>, params?: Record<string, string>, body?: any }>}
+   * A hook may add security headers. Echoed params/body must match the signed
+   * input; encoding/encryption must finish before this boundary.
    */
   async signRequest(context) {
     // 1. 如果通过 options 或外部注册了自定义 hook，优先调用该 hook
     if (this.customSignerHook) {
       const hookResult = await this.customSignerHook(context)
-      if (hookResult && typeof hookResult === 'object') {
+      if (hookResult && typeof hookResult === 'object' && !Array.isArray(hookResult) &&
+        hookResult.headers && typeof hookResult.headers === 'object' && !Array.isArray(hookResult.headers) &&
+        Object.keys(hookResult.headers).some(key => key.toLowerCase() === 'x-argus' && hookResult.headers[key])) {
         return hookResult
       }
+      // A failed adapter must not silently switch back to the experimental AES
+      // candidate: that would conceal which implementation was actually used.
+      throw new DouyinBackendError('Signature adapter returned no signature', { code: ERROR_CODES.ANDROID_TICKET_GUARD_UNAVAILABLE })
     }
 
-    // 2. 默认实现：Android 原生四件套签名（x-argus / x-ladon / x-gorgon / x-khronos，POST 附带 x-ss-stub）
-    const urlText = String(context.url || '')
-    const qIdx = urlText.indexOf('?')
-    const queryString = qIdx === -1 ? '' : urlText.slice(qIdx + 1)
-
-    const signedHeaders = signAndroidHeaders({
-      query: queryString,
-      body: context.body,
-      params: context.params
+    // Experimental local implementation: fixed vectors test reproducibility,
+    // not platform acceptance or device-bound TicketGuard readiness.
+    const nativeHeaders = signNativeAndroidHeaders({
+      query: context.query || '',
+      params: context.params || null,
+      body: context.body || '',
+      requestTicketMs: context.timestampMs
     })
 
-    const defaultHeaders = {
-      ...(context.headers || {}),
-      ...signedHeaders,
-      'x-ss-req-ticket': String(Date.now())
-    }
-
     return {
-      headers: defaultHeaders,
+      headers: { ...(context.headers || {}), ...nativeHeaders },
       params: context.params,
       body: context.body
     }

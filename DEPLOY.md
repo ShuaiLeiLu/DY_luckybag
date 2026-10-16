@@ -1,51 +1,40 @@
-# 抖娃福袋部署指南
+# 部署与本地运行
 
-## 配置
+先执行 npm ci 和 npm run setup:local，生成根目录 config.json。
 
-将根目录 `config.example.json` 复制为 `config.json`，设置：
+- desktop.poolServerUrl：桌面端访问的任务池地址。
+- desktop.poolServerToken 与 poolServer.server.apiToken：同一访问令牌。
+- poolServer.server：监听地址、端口和请求大小限制。
+- poolServer.redis：可选 Redis；本机内存模式关闭 enabled 即可。
 
-- `desktop.poolServerUrl`：桌面端访问的业务服务地址。
-- `poolServer.server`：服务端监听地址、端口和请求体限制。
-- `poolServer.redis`：共享候选池的 Redis 地址及连接参数；关闭 `enabled` 可使用内存模式。
-- `poolServer.desktopNoticeMarkdown`：可选的桌面端系统公告。
-- `desktop.updateFeedUrl` 和热更新配置：客户端更新资源地址。
+默认端口 9090；若被占用，修改 poolServer.server.port，并同步 desktop.poolServerUrl。
+健康检查 GET /health；业务接口使用 Bearer 令牌。
 
-桌面端和服务端均可直接读取根配置。需要同步桌面端内置地址及生成服务端独立配置时，执行 `node deploy-setup.js`。
+~~~powershell
+npm run server:run
+npm run desktop:electron:dev
+~~~
 
-## 服务端
+桌面点击“添加账号”扫码登录并在手机抖音确认，然后“验证协议”。不需要部署手机服务或模拟器。
+当前真实扫码确认仍被平台以 1049 拒绝；部署成功并不代表账号登录可用。具体阻塞见 [验证边界](docs/AUTOMATION_VALIDATION.md)。
+会话及协议设备参数由 Electron safeStorage 加密保存；系统加密不可用时停止登录。会话失效后可重新扫码。
 
-在仓库根目录执行：
+## Docker 与发布
 
-```bash
-npm ci
+~~~bash
 npm run server:docker:build
 npm run server:docker:up
-```
-
-默认部署使用 `config.json` 中配置的外部 Redis。需要同时部署 Redis 时，执行：
-
-```bash
-bash ./scripts/deploy-pool-local.sh --redis
-```
-
-本地开发环境使用示例配置和内置 Redis：
-
-```bash
+# 包含本地 Redis
 npm run server:docker:up:local
-# 修改源码后自动构建、重启
-npm run server:docker:watch:local
-```
+~~~
 
-业务服务默认监听 `9090` 端口，可将域名反向代理到此端口。
-健康检查地址：`http://127.0.0.1:9090/health`。
-镜像构建会同时生成桌面前端热更新资源，通过 `/desktop/hot-manifest.json` 和 `/desktop/<version>/` 提供访问。
+Docker pool-server 使用根配置，反馈日志保存在 pool-data 卷。桌面端反馈先写本地持久队列，再发送到服务端。
+Go 候选池、租约、扫描许可和学习反馈接口保持不变。
 
-## Windows 桌面端
+Windows 安装包：npm run desktop:electron:build:win，输出 apps/desktop/dist-electron。
+打包清单包含主进程使用的 src/shared/defaultSettings.json。
+安装版账号和历史保存在用户数据目录；开发版在仓库 dy-fudai-desktop。
 
-```bash
-npm ci
-npm run desktop:electron:build:win
-```
-
-安装包输出到 `apps/desktop/dist-electron`；单独的前端构建产物位于 `apps/desktop/dist`。
-打开客户端后直接进入工作台，添加抖音账号、扫码登录并启动任务。
+前端热更新默认关闭，仍要求 Ed25519 签名、同源 HTTPS 和文件 SHA256。
+原网页执行版本的缓存前端不会被新主进程载入；新入口包含 native-protocol-runtime-v1 标识。
+签名私钥不应放入配置或镜像。Go Docker 静态前端仅用于更新资源，不负责抖音网页执行。

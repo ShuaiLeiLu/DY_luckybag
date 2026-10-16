@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
-import { Card, Empty, Table, Tag, Tooltip } from 'antd'
+import { Card, Empty, Table, Tag } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { GiftOutlined, FieldTimeOutlined } from '@ant-design/icons'
+import { GiftOutlined } from '@ant-design/icons'
 
 export type LotteryListPanelProps = {
   lotteriesByAccount: Record<string, Record<string, any>[]>

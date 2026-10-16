@@ -12,7 +12,9 @@ npm run server:test
 ```
 
 也可在本目录执行 `go run ./cmd/poolserver` 或 `go test ./...`。
-默认监听 `0.0.0.0:9090`。
+默认监听 `127.0.0.1:9090`。首次运行先在仓库根目录执行 `npm run setup:local`。
+业务接口要求配置的 Bearer 令牌，健康检查与更新静态文件除外。
+绑定非回环地址必须设置 `server.apiToken` 或环境变量 `POOL_API_TOKEN`。
 
 ## 配置文件
 
@@ -20,7 +22,9 @@ npm run server:test
 可从 `config.example.json` 复制配置，使用 `redis.enabled` 选择 Redis 或内存模式。
 
 系统公告读取 `poolServer.desktopNoticeMarkdown`，也可通过 `POOL_DESKTOP_NOTICE_MARKDOWN` 覆盖。修改后重启服务，桌面端从 `GET /desktop/notice` 获取公告。
-参与历史保存在桌面端本地；服务端学习反馈继续使用 `POST /task/feedback` 和原有反馈日志。
+参与历史保存在桌面端本地；`POST /task/feedback` 按事件 ID 幂等处理，
+默认同步落盘到 `data/feedback.jsonl`；内存模式重启会重放日志。
+任务领取、续期、释放、完成均校验实际租约与账号所有者，Redis 修改通过 Lua 原子执行。
 
 ## Docker
 
@@ -29,7 +33,7 @@ npm run server:test
 ```bash
 npm run server:docker:build
 npm run server:docker:up
-# 本地 Redis + pool-server，使用 config.example.json
+# 本地 Redis + pool-server，使用 config.json
 npm run server:docker:up:local
 # 监听代码变化，自动构建并重启
 npm run server:docker:watch:local

@@ -1,3 +1,4 @@
+const { secureResourceURL, verifyManifest } = require('./hot-update-trust')
 const crypto = require('crypto')
 const fs = require('fs')
 const fsp = require('fs/promises')
@@ -67,40 +68,27 @@ async function writeJSONAtomic(filePath, payload) {
 }
 
 async function fetchJSON(url) {
-  const res = await fetch(url, { cache: 'no-store' })
+  const res = await fetch(secureResourceURL(url), { cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(15000) })
   if (!res.ok) {
     throw new Error(`request failed: ${res.status} ${res.statusText}`)
   }
-  return res.json()
+  const text = await res.text()
+  if (Buffer.byteLength(text)>1048576) throw new Error('更新清单过大')
+  return JSON.parse(text)
 }
 
 async function fetchBuffer(url) {
-  const res = await fetch(url, { cache: 'no-store' })
+  const res = await fetch(secureResourceURL(url), { cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(15000) })
   if (!res.ok) {
     throw new Error(`request failed: ${res.status} ${res.statusText}`)
   }
+  if (Number(res.headers.get('content-length') || 0)>32*1024*1024) throw new Error('更新文件过大')
   const ab = await res.arrayBuffer()
+  if (ab.byteLength>32*1024*1024) throw new Error('更新文件过大')
   return Buffer.from(ab)
 }
 
-function rewriteManifestBaseUrlIfNeeded(baseUrl, manifestUrl) {
-  const normalizedBaseUrl = String(baseUrl || '').trim()
-  if (!normalizedBaseUrl) return normalizedBaseUrl
-  try {
-    const parsedBase = new URL(normalizedBaseUrl)
-    const parsedManifest = new URL(String(manifestUrl || '').trim())
-    const sameHost = String(parsedBase.hostname || '').toLowerCase() === String(parsedManifest.hostname || '').toLowerCase()
-    const needsDowngrade = parsedBase.protocol === 'https:' && parsedManifest.protocol === 'http:'
-    if (!sameHost || !needsDowngrade) return parsedBase.toString()
-
-    const next = new URL(parsedBase.toString())
-    next.protocol = parsedManifest.protocol
-    next.port = parsedManifest.port
-    return next.toString()
-  } catch (_) {
-    return normalizedBaseUrl
-  }
-}
+function rewriteManifestBaseUrlIfNeeded(baseUrl, manifestUrl) { return secureResourceURL(baseUrl, manifestUrl) }
 
 function createHotUpdateService(options = {}) {
   const enabled = options.enabled === true
@@ -142,9 +130,19 @@ function createHotUpdateService(options = {}) {
 
   const getAppliedEntryFile = () => {
     try {
+      if (!enabled || !options.publicKey) return ''
       const currentVersion = String(persistedState.currentVersion || '').trim()
       const currentEntry = safeRelativeFilePath(persistedState.currentEntry || 'index.html')
       if (!currentVersion) return ''
+      const signed = verifyManifest(persistedState.trustedManifest, options.publicKey, manifestUrl)
+      if (signed.version !== currentVersion || safeRelativeFilePath(signed.entry || 'index.html') !== currentEntry) return ''
+      if (!Array.isArray(signed.files) || !signed.files.some(file => file.path === currentEntry)) return ''
+      for (const file of signed.files) {
+        const relative = safeRelativeFilePath(file.path)
+        const filePath = path.resolve(versionsDir, currentVersion, ...relative.split('/'))
+        if (!filePath.startsWith(path.resolve(versionsDir, currentVersion) + path.sep)) return ''
+        if (sha256Hex(fs.readFileSync(filePath)) !== file.sha256) return ''
+      }
       const entryFile = path.join(versionsDir, currentVersion, ...currentEntry.split('/'))
       if (!fs.existsSync(entryFile)) return ''
       return entryFile
@@ -179,7 +177,7 @@ function createHotUpdateService(options = {}) {
   }
 
   const validateManifest = (rawManifest) => {
-    const manifest = rawManifest && typeof rawManifest === 'object' ? rawManifest : {}
+    const manifest = verifyManifest(rawManifest, options.publicKey, manifestUrl)
     const version = String(manifest.version || '').trim()
     if (!version) {
       throw new Error('manifest.version is required')
@@ -200,6 +198,7 @@ function createHotUpdateService(options = {}) {
     const normalizedFiles = files.map((raw) => {
       const item = raw && typeof raw === 'object' ? raw : {}
       const relPath = safeRelativeFilePath(item.path)
+      if (!/^[a-f0-9]{64}$/i.test(item.sha256 || '')) throw new Error('更新文件必须包含 SHA256')
       return {
         path: relPath,
         sha256: String(item.sha256 || '').trim().toLowerCase(),
@@ -207,20 +206,24 @@ function createHotUpdateService(options = {}) {
         url: String(item.url || '').trim()
       }
     })
+    if (!normalizedFiles.some(file=>file.path===entry)) throw new Error('清单缺少入口文件')
+    if (compareVersions(version,snapshot.currentVersion || appVersion)<0) throw new Error('拒绝版本回退')
     return {
       version,
       entry,
       files: normalizedFiles,
-      baseUrl: resolvedBaseURL
+      baseUrl: resolvedBaseURL,
+      signed: rawManifest
     }
   }
 
   const pruneOtherVersions = async (keepVersion) => {
     try {
       const entries = await fsp.readdir(versionsDir, { withFileTypes: true })
+      const previous = entries.filter(ent=>ent.isDirectory() && ent.name!==keepVersion).map(ent=>ent.name).sort((a,b)=>compareVersions(b,a))[0]
       for (const ent of entries) {
         if (!ent.isDirectory()) continue
-        if (ent.name === keepVersion) continue
+        if (ent.name === keepVersion || ent.name === previous) continue
         await fsp.rm(path.join(versionsDir, ent.name), { recursive: true, force: true })
       }
     } catch (_) {
@@ -235,8 +238,8 @@ function createHotUpdateService(options = {}) {
     await ensureDir(tempDir)
     for (const file of manifest.files) {
       const fileUrl = file.url
-        ? new URL(file.url, manifestUrl).toString()
-        : new URL(file.path, manifest.baseUrl).toString()
+        ? secureResourceURL(file.url, manifestUrl)
+        : secureResourceURL(new URL(file.path, manifest.baseUrl).toString(),manifestUrl)
       const bytes = await fetchBuffer(fileUrl)
       if (file.size > 0 && bytes.length !== file.size) {
         throw new Error(`文件大小校验失败: ${file.path}`)
@@ -253,6 +256,7 @@ function createHotUpdateService(options = {}) {
     }
 
     await ensureDir(versionsDir)
+    if (!path.resolve(targetVersionDir).startsWith(path.resolve(versionsDir)+path.sep)) throw new Error('更新目标越界')
     await fsp.rm(targetVersionDir, { recursive: true, force: true })
     await fsp.rename(tempDir, targetVersionDir)
 
@@ -260,6 +264,7 @@ function createHotUpdateService(options = {}) {
       ...persistedState,
       currentVersion: version,
       currentEntry: manifest.entry,
+      trustedManifest: manifest.signed,
       appliedAt: Date.now(),
       lastCheckedAt: Date.now()
     }
@@ -349,6 +354,7 @@ function createHotUpdateService(options = {}) {
       await init()
       return snapshot
     },
+    publicKey: String(options.publicKey || ''),
     getSnapshot() {
       return snapshot
     },

@@ -2,8 +2,7 @@ import { describe, it, expect } from 'vitest'
 const {
   normalizeLotteryInfo,
   normalizeAttendResponse,
-  parseFeedResponse,
-  parsePartitionResponse
+  parseFeedResponse
 } = require('./douyin-response-parser')
 const { ERROR_CODES } = require('./douyin-request-models')
 
@@ -58,16 +57,20 @@ describe('douyin-response-parser', () => {
     it('throws DouyinBackendError on invalid data', () => {
       expect(() => normalizeLotteryInfo(null)).toThrow('福袋信息数据格式错误')
       expect(() => normalizeLotteryInfo('not an object')).toThrow()
+      expect(() => normalizeLotteryInfo({ lottery_id: 9999999999999999999 })).toThrow('精度')
     })
   })
 
   describe('normalizeAttendResponse', () => {
-    it('recognizes data.status = 0 as success', () => {
+    it('requires successful outer and inner statuses', () => {
       const res = normalizeAttendResponse({
+        status_code: 0,
         data: { status: 0 }
       })
       expect(res.success).toBe(true)
       expect(res.code).toBe('OK')
+      expect(normalizeAttendResponse({ status_code: 8, data: { status: 0 } }).success).toBe(false)
+      expect(normalizeAttendResponse({ data: { status: 0 } }).success).toBe(false)
     })
 
     it('recognizes status_code = 0 as success when status is undefined', () => {
@@ -116,7 +119,7 @@ describe('douyin-response-parser', () => {
     })
   })
 
-  describe('parseFeedResponse and parsePartitionResponse', () => {
+  describe('parseFeedResponse', () => {
     it('parses valid feed response', () => {
       const raw = {
         status_code: 0,
@@ -137,16 +140,5 @@ describe('douyin-response-parser', () => {
       expect(parsed.error).toContain('API错误(500)')
     })
 
-    it('parses valid partition response', () => {
-      const raw = {
-        status_code: 0,
-        data: {
-          data: [{ room: { id_str: 'room1' } }]
-        }
-      }
-      const parsed = parsePartitionResponse(raw)
-      expect(parsed.success).toBe(true)
-      expect(parsed.data.length).toBe(1)
-    })
   })
 })

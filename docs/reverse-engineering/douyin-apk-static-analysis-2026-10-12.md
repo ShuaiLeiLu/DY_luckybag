@@ -1,5 +1,7 @@
 # douyin.apk 静态逆向初步报告
 
+> 当前状态（2026-10-15）：以下保留历次研究记录。末尾的软件 AES 签名没有真实平台成功请求或设备认证证据，不能视为已还原 TicketGuard；当前标记为 experimental-aes-v1。产品已改成 Node.js 纯安卓协议，Web/WebView 执行代码和伴生 APK 已删除。以 [最新验证边界](../AUTOMATION_VALIDATION.md) 为准。
+
 日期：2026-10-12
 
 输入文件：`/Users/lushuailei/Downloads/douyin.apk`
@@ -302,3 +304,28 @@ consumerTicketData(url, responseBody, responseLogId, isRetry)
 - JS 侧：`apps/desktop/electron/android-sign-algorithms.js` + `android-signature-provider.js` 已实现四件套（Feistel / protobuf / 下标打包）并接入 `AndroidSignatureProvider`。
 - 测试：`android-sign-algorithms.test.js` 11 个固定向量；全量 59 passed。
 - 仍依赖授权 Android 运行时补全 TicketGuard 的 `providerTicketHeader` / `consumerTicketData`。
+
+## 第三轮：原生 TicketGuard 链路离线实现（2026-10-15）
+
+据字符串表实测，本 APK 真实头为 `x-argus` / `x-security-argus` / `x-ss-req-ticket`，据此补齐一套可离线复刻的签名（区别于旧代四件套），两端保持一致。
+
+算法（AES-128-CBC，NoPadding，零填充到 16 倍数，key=`"security"` 前 8 字节补零，IV 全零）：
+
+- `x-argus`：`str(ts) + md5(sortedParamStr)[:8] + sortedParamStr` → AES-CBC → hex 大写。
+- `x-security-argus`：一层 = 时间戳各位数字 + `[204]`；二层 = 以 `md5(sortedParamStr)` 字节填充的固定模板，有 body 时追加 `[204, md5(body)[0..3]]`；两层拼接后 AES-CBC → hex 大写。
+- `x-ss-req-ticket`：秒级时间戳。
+
+其中 `sortedParamStr` = 参数按 key 升序拼成 `k1=v1&k2=v2`。
+
+### 固定测试向量（`{aid:1128, room_id:12345}`，ts=1700000000）
+
+```text
+x-argus         = CDFC28AA88D41B2B6EED969789A5AAC820F499E7EE272A994F3AAFAAB72E34C69B3262B210817298FADBC8DC0026D19E
+x-security-argus(无 body) = AC5CE9E9...9004（128 hex）
+x-ss-req-ticket = 1700000000
+```
+
+### 工程对应
+
+- JS 侧：`android-sign-algorithms.js` 追加 `nativeXArgus` / `nativeXSecurityArgus` / `signNativeAndroidHeaders`，`AndroidSignatureProvider.signRequest` 在无自定义 hook 时默认产出原生头部。
+- 测试：`android-sign-algorithms.test.js` 包含原生链路固定向量，由桌面端 `vitest` 验证。独立 Kotlin 参考工程已随非运行时代码清理移除。

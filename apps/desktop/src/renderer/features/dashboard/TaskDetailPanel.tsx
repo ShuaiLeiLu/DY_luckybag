@@ -1,11 +1,9 @@
-import { Button, Card, Descriptions, Empty, Space, Steps, Tag, Typography } from 'antd'
+import { Button, Card, Descriptions, Empty, Space, Steps, Tag } from 'antd'
 import {
   PlayCircleOutlined,
   PauseCircleOutlined,
-  QrcodeOutlined,
-  DashboardOutlined,
-  CheckCircleOutlined,
-  LoadingOutlined
+  ApiOutlined,
+  DashboardOutlined
 } from '@ant-design/icons'
 import type { AccountSession } from '@shared/models'
 import { formatRelative, statusText } from '../../lib/runtime'
@@ -69,7 +67,7 @@ export function TaskDetailPanel({
   const stepsItems = [
     {
       title: '登录',
-      description: selectedAccount.token ? '已就绪' : '待扫码'
+      description: selectedAccount.token ? '已就绪' : '待验证'
     },
     {
       title: '启动',
@@ -130,12 +128,10 @@ export function TaskDetailPanel({
             </Button>
             <Button
               size="small"
-              icon={<QrcodeOutlined />}
+              icon={<ApiOutlined />}
               className="text-xs text-slate-300 bg-slate-800/60 border-slate-700 hover:bg-slate-700"
               onClick={() => onReloginAccount?.(selectedAccount)}
-            >
-              扫码
-            </Button>
+            >验证</Button>
           </Space>
         </div>
       }

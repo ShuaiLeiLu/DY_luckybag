@@ -4,7 +4,7 @@
   "description": "Windows 桌面端服务端派单福袋工作台",
   "author": "lushuailei",
   "private": true,
-  "main": "apps/desktop/electron/main-browserview.js",
+  "main": "apps/desktop/electron/main.js",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -25,16 +25,20 @@
     "server:docker:watch": "node ./scripts/docker-hot-watch.mjs",
     "server:docker:up:local": "bash ./scripts/deploy-pool-local.sh --local",
     "server:docker:watch:local": "node ./scripts/docker-hot-watch.mjs --local",
-    "server:test": "node ./run-go.mjs --cwd apps/pool-server test ./..."
+    "server:test": "node ./run-go.mjs --cwd apps/pool-server test ./...",
+    "setup:local": "node scripts/setup-local.mjs",
+    "test:offline": "node scripts/offline-smoke.cjs",
+    "protocol:diagnose": "node scripts/protocol-diagnose.cjs",
+    "protocol:login-diagnose": "node scripts/protocol-login-diagnose.cjs",
+    "protocol:verify-native-core": "node --test scripts/reverse-engineering/metasec/primitives.test.cjs scripts/reverse-engineering/metasec/speck.test.cjs"
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.4",
     "antd": "^6.6.6",
     "electron-updater": "^6.6.2",
-    "framer-motion": "^12.38.0",
-    "lucide-react": "^1.7.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "tough-cookie": "^6.0.2"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.12",
@@ -64,10 +68,11 @@
     "files": [
       "apps/desktop/dist/**/*",
       "apps/desktop/electron/**/*",
+      "apps/desktop/src/shared/defaultSettings.json",
       "package.json"
     ],
     "extraMetadata": {
-      "main": "apps/desktop/electron/main-browserview.js"
+      "main": "apps/desktop/electron/main.js"
     },
     "publish": [
       {

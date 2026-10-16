@@ -1,6 +1,8 @@
 package pool
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"strconv"
 	"strings"
 )
@@ -65,6 +67,7 @@ type ReviewResult struct {
 }
 
 type TaskFeedback struct {
+	EventID              string            `json:"eventId"`
 	Owner                ClaimOwner        `json:"owner"`
 	Event                string            `json:"event"`
 	CandidateKey         string            `json:"candidateKey"`
@@ -272,4 +275,12 @@ func parseNoLockLeaseIDCandidateKey(leaseID string) (string, bool) {
 		return "", false
 	}
 	return key, true
+}
+
+func newTaskLeaseID() string {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		panic(err)
+	}
+	return "lease_" + hex.EncodeToString(id[:])
 }

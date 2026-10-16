@@ -158,6 +158,13 @@ local expireAtMS = tonumber(ARGV[4])
 local maxSlots = tonumber(ARGV[5])
 local payload = ARGV[6]
 local ownerCandidateKey = ARGV[7]
+if redis.call('HEXISTS', KEYS[6], candidateKey) == 0 then return 0 end
+if tonumber(redis.call('HGET', KEYS[7], ownerCandidateKey) or '0') > nowMS then return -2 end
+local owner = cjson.decode(payload)
+for _, activeRaw in ipairs(redis.call('HVALS', leasesKey)) do
+  local ok, active = pcall(cjson.decode, activeRaw)
+  if ok and tonumber(active.expiresAt or 0) > nowMS and active.clientId == owner.clientId and active.accountId == owner.accountId then return -1 end
+end
 local currentCount = tonumber(redis.call('HGET', candidateLeaseCountKey, candidateKey) or '0')
 local joinedCount = tonumber(redis.call('HGET', candidateJoinedCountKey, candidateKey) or '0')
 if currentCount + joinedCount >= maxSlots then
@@ -277,6 +284,7 @@ end
 if tostring(obj.clientId or '') ~= clientID or tostring(obj.accountId or '') ~= accountID then
   return 0
 end
+if tonumber(obj.expiresAt or 0) <= tonumber(ARGV[7]) then return 0 end
 redis.call('HDEL', leasesKey, leaseID)
 if obj.candidateKey then
   local nextCount = tonumber(redis.call('HINCRBY', candidateLeaseCountKey, obj.candidateKey, -1))
@@ -287,14 +295,14 @@ if obj.candidateKey then
   redis.call('HDEL', ownerCandidateLeaseKey, ownerCandidateKey)
   local joinedCount = tonumber(redis.call('HGET', candidateJoinedCountKey, obj.candidateKey) or '0')
   if result == 'join_success' then
+    redis.call('HSET', KEYS[8], ownerCandidateKey, tonumber(ARGV[6]))
+    redis.call('PEXPIRE', KEYS[8], 172800000)
     joinedCount = tonumber(redis.call('HINCRBY', candidateJoinedCountKey, obj.candidateKey, 1))
   end
   local slotLimit = tonumber(obj.slotLimit or '1')
-  if removeCandidate == '1' and (slotLimit <= 1 or joinedCount >= slotLimit) then
+  if removeCandidate == '1' and joinedCount >= slotLimit then
     redis.call('HDEL', candidatesKey, obj.candidateKey)
-    redis.call('ZREM', candidateExpireKey, obj.candidateKey)
-    redis.call('HDEL', candidateLeaseCountKey, obj.candidateKey)
-    redis.call('HDEL', candidateJoinedCountKey, obj.candidateKey)
+    -- Retain counters and expiry tombstone when scanners upload the same lottery again.
   end
 end
 redis.call('ZREM', leaseExpireKey, leaseID)
@@ -302,6 +310,7 @@ return 1
 `),
 		feedbackScript: redis.NewScript(`
 local learningKey = KEYS[1]
+if redis.call('HEXISTS',KEYS[2],ARGV[11])==1 then return 0 end
 local bucketKey = ARGV[1]
 local prizeClass = ARGV[2]
 local remainBucket = ARGV[3]
@@ -358,6 +367,8 @@ elseif event == 'draw_lost' then
 end
 
 redis.call('HSET', learningKey, bucketKey, cjson.encode(obj))
+redis.call('HSET',KEYS[2],ARGV[11],ARGV[9])
+redis.call('PERSIST',KEYS[2])
 return 1
 `),
 		permitScript: redis.NewScript(`
@@ -663,121 +674,52 @@ func (s *RedisService) upsertOne(ctx context.Context, c Candidate, nowMS int64) 
 func (s *RedisService) SweepExpired(nowMS int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	max := strconv.FormatInt(nowMS, 10)
+	script := redis.NewScript(`
+local keys=redis.call('ZRANGEBYSCORE',KEYS[2],'-inf',ARGV[1],'LIMIT',0,1024)
+for _,key in ipairs(keys) do
+  redis.call('HDEL',KEYS[1],key)
+  redis.call('ZREM',KEYS[2],key)
+  redis.call('HDEL',KEYS[3],key)
+  redis.call('HDEL',KEYS[4],key)
+end
+return #keys
+`)
 	for {
-		keys, err := s.rdb.ZRangeByScore(ctx, s.keyExpire(), &redis.ZRangeBy{
-			Min:    "-inf",
-			Max:    max,
-			Offset: 0,
-			Count:  1024,
-		}).Result()
-		if err != nil {
+		n, err := script.Run(ctx, s.rdb, []string{s.keyCandidates(), s.keyExpire(), s.keyCandidateLeaseCount(), s.keyCandidateJoinedCount()}, nowMS).Int()
+		if n > 0 {
+			s.dirty.Store(true)
+		}
+		if err != nil || n < 1024 {
 			break
 		}
-		if len(keys) == 0 {
-			break
-		}
-		pipe := s.rdb.Pipeline()
-		fields := make([]string, 0, len(keys))
-		fields = append(fields, keys...)
-		members := make([]any, 0, len(fields))
-		for _, f := range fields {
-			members = append(members, f)
-		}
-		pipe.HDel(ctx, s.keyCandidates(), fields...)
-		pipe.ZRem(ctx, s.keyExpire(), members...)
-		pipe.HDel(ctx, s.keyCandidateLeaseCount(), fields...)
-		pipe.HDel(ctx, s.keyCandidateJoinedCount(), fields...)
-		_, _ = pipe.Exec(ctx)
-		s.dirty.Store(true)
 	}
 
 	s.sweepExpiredLeases(ctx, nowMS)
 }
 
 func (s *RedisService) sweepExpiredLeases(ctx context.Context, nowMS int64) {
-	max := strconv.FormatInt(nowMS, 10)
+	script := redis.NewScript(`
+ local ids=redis.call('ZRANGEBYSCORE',KEYS[2],'-inf',ARGV[1],'LIMIT',0,1024)
+ for _,id in ipairs(ids) do
+   local raw=redis.call('HGET',KEYS[1],id)
+   if raw then
+     local ok,obj=pcall(cjson.decode,raw)
+     if ok and tonumber(obj.expiresAt or 0)<=tonumber(ARGV[1]) then
+       redis.call('HDEL',KEYS[1],id)
+       local count=tonumber(redis.call('HINCRBY',KEYS[3],obj.candidateKey,-1))
+       if count<=0 then redis.call('HDEL',KEYS[3],obj.candidateKey) end
+       local ownerKey=tostring(obj.clientId)..'|'..tostring(obj.accountId)..'|'..tostring(obj.candidateKey)
+       if redis.call('HGET',KEYS[4],ownerKey)==id then redis.call('HDEL',KEYS[4],ownerKey) end
+       redis.call('ZREM',KEYS[2],id)
+     end
+   else redis.call('ZREM',KEYS[2],id) end
+ end
+ return #ids
+ `)
 	for {
-		leaseIDs, err := s.rdb.ZRangeByScore(ctx, s.keyLeaseExpire(), &redis.ZRangeBy{
-			Min:    "-inf",
-			Max:    max,
-			Offset: 0,
-			Count:  1024,
-		}).Result()
-		if err != nil || len(leaseIDs) == 0 {
+		n, err := script.Run(ctx, s.rdb, []string{s.keyLeases(), s.keyLeaseExpire(), s.keyCandidateLeaseCount(), s.keyOwnerCandidateLease()}, nowMS).Int()
+		if err != nil || n < 1024 {
 			return
-		}
-
-		raws, err := s.rdb.HMGet(ctx, s.keyLeases(), leaseIDs...).Result()
-		if err != nil {
-			return
-		}
-
-		decrByCandidate := make(map[string]int64, len(raws))
-		for _, raw := range raws {
-			if raw == nil {
-				continue
-			}
-			var lease LeaseInfo
-			if err := json.Unmarshal([]byte(asString(raw)), &lease); err != nil {
-				continue
-			}
-			if lease.CandidateKey != "" {
-				decrByCandidate[lease.CandidateKey]++
-			}
-		}
-
-		pipe := s.rdb.Pipeline()
-		if len(leaseIDs) > 0 {
-			fields := make([]string, 0, len(leaseIDs))
-			fields = append(fields, leaseIDs...)
-			pipe.HDel(ctx, s.keyLeases(), fields...)
-			members := make([]any, 0, len(fields))
-			for _, field := range fields {
-				members = append(members, field)
-			}
-			pipe.ZRem(ctx, s.keyLeaseExpire(), members...)
-		}
-		countCmds := make(map[string]*redis.IntCmd, len(decrByCandidate))
-		ownerKeys := make([]string, 0, len(raws))
-		for candidateKey, delta := range decrByCandidate {
-			if candidateKey == "" || delta <= 0 {
-				continue
-			}
-			countCmds[candidateKey] = pipe.HIncrBy(ctx, s.keyCandidateLeaseCount(), candidateKey, -delta)
-		}
-		for _, raw := range raws {
-			if raw == nil {
-				continue
-			}
-			var lease LeaseInfo
-			if err := json.Unmarshal([]byte(asString(raw)), &lease); err != nil {
-				continue
-			}
-			if ownerKey := buildOwnerCandidateLeaseKey(ClaimOwner{ClientID: lease.ClientID, AccountID: lease.AccountID}, lease.CandidateKey); ownerKey != "" {
-				ownerKeys = append(ownerKeys, ownerKey)
-			}
-		}
-		if len(ownerKeys) > 0 {
-			pipe.HDel(ctx, s.keyOwnerCandidateLease(), ownerKeys...)
-		}
-		if _, err := pipe.Exec(ctx); err != nil {
-			return
-		}
-
-		if len(countCmds) > 0 {
-			toDelete := make([]string, 0, len(countCmds))
-			for candidateKey, cmd := range countCmds {
-				if cmd == nil {
-					continue
-				}
-				if value, err := cmd.Result(); err == nil && value <= 0 {
-					toDelete = append(toDelete, candidateKey)
-				}
-			}
-			if len(toDelete) > 0 {
-				_ = s.rdb.HDel(ctx, s.keyCandidateLeaseCount(), toDelete...).Err()
-			}
 		}
 	}
 }
@@ -978,7 +920,7 @@ func (s *RedisService) TopAvailable(limit int, profile FilterProfile, owner Clai
 		return []ScoredCandidate{}, TopMeta{BuiltAtMS: now}, pv
 	}
 	learningLookup := s.fetchLearningLookup(ctx)
-	out, validCount, _ := selectTopCandidatesWithLease(all, profile, now, limit, nil, nil, normalizeClaimOwner(owner), includeClaimedSelf, learningLookup)
+	out, validCount, _ := selectTopCandidatesWithLease(all, profile, now, limit, s.fetchActiveLeaseGroups(ctx, now), s.fetchCandidateJoinedCounts(ctx), normalizeClaimOwner(owner), includeClaimedSelf, learningLookup)
 	_, pv := s.Profile()
 	return out, TopMeta{
 		BuiltAtMS:   now,
@@ -987,7 +929,7 @@ func (s *RedisService) TopAvailable(limit int, profile FilterProfile, owner Clai
 	}, pv
 }
 
-// ClaimTask 方法：从 Redis 共享池中领取一个任务（无租约锁，仅返回兼容 leaseId）。
+// ClaimTask 方法：使用原子租约从 Redis 共享池领取任务。
 func (s *RedisService) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 	now := time.Now().UnixMilli()
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
@@ -996,6 +938,25 @@ func (s *RedisService) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 	s.SweepExpired(now)
 
 	owner := normalizeClaimOwner(options.Owner)
+	if owner.ClientID == "" || owner.AccountID == "" {
+		return ClaimResult{Reason: "invalid_owner"}, nil
+	}
+	for _, lease := range s.fetchActiveLeases(ctx, now) {
+		if ownerMatches(lease, owner) {
+			raw, err := s.rdb.HGet(ctx, s.keyCandidates(), lease.CandidateKey).Result()
+			if err == nil {
+				var c Candidate
+				if json.Unmarshal([]byte(raw), &c) == nil {
+					items, _, _ := selectTopCandidatesWithLease([]Candidate{c}, options.Profile, now, 1, nil, nil, owner, true, nil)
+					if len(items) > 0 {
+						item := items[0]
+						return ClaimResult{Claimed: true, Item: &item, Lease: cloneLeaseInfo(&lease)}, nil
+					}
+					return ClaimResult{Reason: "held_task_unavailable", GeneratedAtMS: now}, nil
+				}
+			}
+		}
+	}
 	leaseSec := normalizeLeaseSec(options.LeaseSec)
 	profile := options.Profile
 	profileAll := profile
@@ -1010,7 +971,7 @@ func (s *RedisService) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 	for _, candidate := range all {
 		candidateMap[candidate.Key] = candidate
 	}
-	scored, _, _ := selectTopCandidatesWithLease(all, profileAll, now, s.cfg.TopCacheMax, nil, nil, owner, false, learningLookup)
+	scored, _, _ := selectTopCandidatesWithLease(all, profileAll, now, s.cfg.TopCacheMax, s.fetchActiveLeaseGroups(ctx, now), s.fetchCandidateJoinedCounts(ctx), owner, false, learningLookup)
 	exclude := make(map[string]struct{}, len(options.ExcludeKeys))
 	for _, key := range options.ExcludeKeys {
 		if trimmed := stringsTrim(key); trimmed != "" {
@@ -1075,7 +1036,14 @@ func (s *RedisService) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 				return false
 			}
 		}
+		lease := &LeaseInfo{LeaseID: newTaskLeaseID(), CandidateKey: key, RoomID: item.RoomID, LotteryID: item.LotteryID, ClientID: owner.ClientID, AccountID: owner.AccountID, SlotLimit: maxInt(item.MaxLeaseSlots, 1), ClaimedAtMS: now, UpdatedAtMS: now, ExpiresAtMS: now + leaseSec*1000, Reason: "active"}
+		payload, _ := json.Marshal(lease)
+		claimed, err := s.claimScript.Run(ctx, s.rdb, []string{s.keyCandidateLeaseCount(), s.keyCandidateJoinedCount(), s.keyOwnerCandidateLease(), s.keyLeases(), s.keyLeaseExpire(), s.keyCandidates(), s.rcfg.Prefix + ":joined-owners"}, key, lease.LeaseID, now, lease.ExpiresAtMS, lease.SlotLimit, string(payload), buildOwnerCandidateLeaseKey(owner, key)).Int()
+		if err != nil || claimed != 1 {
+			return false
+		}
 		copyItem := item
+		copyItem.Lease = cloneLeaseInfo(lease)
 		selected = &copyItem
 		return true
 	}
@@ -1087,25 +1055,12 @@ func (s *RedisService) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 	}
 
 	if selected != nil {
-		key := scoredCandidateKey(*selected)
-		lease := &LeaseInfo{
-			LeaseID:      buildNoLockLeaseID(key, s.seq.Add(1)),
-			CandidateKey: key,
-			RoomID:       selected.RoomID,
-			LotteryID:    selected.LotteryID,
-			ClientID:     owner.ClientID,
-			AccountID:    owner.AccountID,
-			SlotLimit:    maxInt(selected.MaxLeaseSlots, 1),
-			ClaimedAtMS:  now,
-			UpdatedAtMS:  now,
-			ExpiresAtMS:  now + leaseSec*1000,
-			Reason:       "nolock",
-		}
-		selected.Claimed = false
+		lease := selected.Lease
+		selected.Claimed = true
 		selected.Lease = cloneLeaseInfo(lease)
-		selected.LeaseCount = 0
-		selected.JoinedCount = 0
-		selected.AvailableSlots = maxInt(selected.MaxLeaseSlots, 1)
+		selected.LeaseCount = len(s.fetchActiveLeaseGroups(ctx, now)[selected.Key])
+		selected.JoinedCount = s.fetchCandidateJoinedCounts(ctx)[selected.Key]
+		selected.AvailableSlots = maxInt(selected.MaxLeaseSlots-selected.LeaseCount-selected.JoinedCount, 0)
 		return ClaimResult{
 			Claimed:        true,
 			Item:           selected,
@@ -1123,60 +1078,48 @@ func (s *RedisService) ClaimTask(options ClaimOptions) (ClaimResult, error) {
 	}, nil
 }
 
-// RenewTaskLease 方法：无租约锁模式下仅刷新兼容 leaseId 续期信息。
+// RenewTaskLease 方法：仅允许有效租约的所有者续租。
 func (s *RedisService) RenewTaskLease(owner ClaimOwner, leaseID string, leaseSec int64) (*LeaseInfo, bool, error) {
-	now := time.Now().UnixMilli()
-	owner = normalizeClaimOwner(owner)
-	leaseSec = normalizeLeaseSec(leaseSec)
-	candidateKey, ok := parseNoLockLeaseIDCandidateKey(leaseID)
-	if !ok {
-		return nil, false, nil
-	}
-	lease := &LeaseInfo{
-		LeaseID:      stringsTrim(leaseID),
-		CandidateKey: candidateKey,
-		ClientID:     owner.ClientID,
-		AccountID:    owner.AccountID,
-		ClaimedAtMS:  now,
-		UpdatedAtMS:  now,
-		ExpiresAtMS:  now + leaseSec*1000,
-		Reason:       "nolock",
-	}
-	return lease, true, nil
-}
-
-// ReleaseTaskLease 方法：无租约锁模式下为兼容接口保留的空实现。
-func (s *RedisService) ReleaseTaskLease(owner ClaimOwner, leaseID string, reason string) (bool, error) {
-	_ = normalizeClaimOwner(owner)
-	_ = reason
-	if stringsTrim(leaseID) == "" {
-		return false, nil
-	}
-	return true, nil
-}
-
-// FinishTaskLease 方法：无租约锁模式下按需从候选池移除该候选。
-func (s *RedisService) FinishTaskLease(owner ClaimOwner, leaseID string, result string, removeCandidate bool) (bool, error) {
-	_ = normalizeClaimOwner(owner)
-	_ = result
-	candidateKey, ok := parseNoLockLeaseIDCandidateKey(leaseID)
-	if !ok {
-		return false, nil
-	}
-	if !removeCandidate {
-		return true, nil
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
-	pipe := s.rdb.Pipeline()
-	pipe.HDel(ctx, s.keyCandidates(), candidateKey)
-	pipe.ZRem(ctx, s.keyExpire(), candidateKey)
-	pipe.HDel(ctx, s.keyCandidateJoinedCount(), candidateKey)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return false, err
+	owner = normalizeClaimOwner(owner)
+	now := time.Now().UnixMilli()
+	raw, err := s.renewScript.Run(ctx, s.rdb, []string{s.keyLeases(), s.keyLeaseExpire(), s.keyCandidateLeaseCount(), s.keyOwnerCandidateLease()}, leaseID, owner.ClientID, owner.AccountID, now, now+normalizeLeaseSec(leaseSec)*1000).Text()
+	if err != nil {
+		return nil, false, err
 	}
-	s.dirty.Store(true)
-	return true, nil
+	if raw == "" {
+		return nil, false, nil
+	}
+	var lease LeaseInfo
+	if err = json.Unmarshal([]byte(raw), &lease); err != nil {
+		return nil, false, err
+	}
+	return &lease, true, nil
+}
+
+func (s *RedisService) ReleaseTaskLease(owner ClaimOwner, leaseID, reason string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	owner = normalizeClaimOwner(owner)
+	n, err := s.releaseScript.Run(ctx, s.rdb, []string{s.keyLeases(), s.keyLeaseExpire(), s.keyCandidateLeaseCount(), s.keyOwnerCandidateLease()}, leaseID, owner.ClientID, owner.AccountID).Int()
+	return n == 1, err
+}
+
+func (s *RedisService) FinishTaskLease(owner ClaimOwner, leaseID, result string, removeCandidate bool) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	owner = normalizeClaimOwner(owner)
+	remove := 0
+	if removeCandidate {
+		remove = 1
+	}
+	now := time.Now().UnixMilli()
+	n, err := s.finishScript.Run(ctx, s.rdb, []string{s.keyLeases(), s.keyLeaseExpire(), s.keyCandidateLeaseCount(), s.keyCandidateJoinedCount(), s.keyOwnerCandidateLease(), s.keyCandidates(), s.keyExpire(), s.rcfg.Prefix + ":joined-owners"}, leaseID, owner.ClientID, owner.AccountID, remove, result, now+24*60*60*1000, now).Int()
+	if n == 1 {
+		s.dirty.Store(true)
+	}
+	return n == 1, err
 }
 
 // RecordTaskFeedback 方法：将执行端反馈写入 Redis 学习桶。
@@ -1188,10 +1131,13 @@ func (s *RedisService) RecordTaskFeedback(feedback TaskFeedback) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
+	if err := appendFeedbackJSONL(s.cfg.FeedbackLogPath, normalized); err != nil {
+		return err
+	}
 	bucketKey := buildLearningBucketKey(normalized)
 	bucket := newLearningBucketFromFeedback(normalized, bucketKey)
 	_, err := s.feedbackScript.Run(ctx, s.rdb,
-		[]string{s.keyLearning()},
+		[]string{s.keyLearning(), s.rcfg.Prefix + ":feedback-events"},
 		bucketKey,
 		bucket.PrizeClass,
 		bucket.RemainBucket,
@@ -1202,12 +1148,11 @@ func (s *RedisService) RecordTaskFeedback(feedback TaskFeedback) error {
 		normalized.PredictedProbability,
 		normalized.RewardAmount,
 		time.Now().UnixMilli(),
+		normalized.EventID,
 	).Int()
 	if err == nil {
 		s.dirty.Store(true)
-		if appendErr := appendFeedbackJSONL(s.cfg.FeedbackLogPath, normalized); appendErr != nil {
-			return appendErr
-		}
+
 	}
 	return err
 }
@@ -1359,9 +1304,9 @@ func (s *RedisService) TaskDebug(profile FilterProfile, owner ClaimOwner, leaseL
 			Leases: []LeaseInfo{},
 		}, pv
 	}
-	leases := []LeaseInfo{}
-	leaseGroups := map[string][]LeaseInfo{}
-	joinedCounts := map[string]int{}
+	leases := s.fetchActiveLeases(ctx, now)
+	leaseGroups := buildLeaseGroupMap(leases)
+	joinedCounts := s.fetchCandidateJoinedCounts(ctx)
 	learningLookup := s.fetchLearningLookup(ctx)
 	_, pv := s.Profile()
 	return buildTaskDebugSnapshot(all, profile, now, normalizeClaimOwner(owner), leaseGroups, joinedCounts, leases, learningLookup, leaseLimit), pv

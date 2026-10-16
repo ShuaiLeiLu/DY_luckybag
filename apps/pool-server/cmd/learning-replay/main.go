@@ -30,6 +30,7 @@ func main() {
 	defer file.Close()
 
 	feedbacks := make([]pool.TaskFeedback, 0, 1024)
+	seen := make(map[string]bool)
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 8*1024*1024)
 	for scanner.Scan() {
@@ -42,6 +43,10 @@ func main() {
 			fmt.Fprintf(os.Stderr, "skip invalid line: %v\n", err)
 			continue
 		}
+		if feedback.EventID != "" && seen[feedback.EventID] {
+			continue
+		}
+		seen[feedback.EventID] = true
 		feedbacks = append(feedbacks, feedback)
 	}
 	if err := scanner.Err(); err != nil {

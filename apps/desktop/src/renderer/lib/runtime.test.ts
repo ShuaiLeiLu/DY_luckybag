@@ -4,8 +4,7 @@ import {
   createAccountModel,
   deriveRuntimeState,
   formatRelative,
-  mergeAccountModel,
-  statusText
+  mergeAccountModel
 } from './runtime'
 
 function createAccount(overrides: Partial<AccountSession> = {}): AccountSession {
