@@ -6,7 +6,7 @@
  * 业务帧使用本地实验性 x-argus + x-ss-req-ticket 候选。
  * 加载方式：DY_ANDROID_SDK_MODULE 指向本文件（require 支持）。
  */
-const { signNativeAndroidHeaders } = require('../android-sign-algorithms')
+const { signNativeAndroidHeaders } = require('./android-sign-algorithms')
 
 function createAndroidSdkAdapter() {
   const state = { profile: null }
