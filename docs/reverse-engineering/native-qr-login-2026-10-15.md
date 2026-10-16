@@ -345,3 +345,20 @@ npm run protocol:verify-native-core
 6. Header 层（.tmp/probe-sms11/12.cjs）：send_code 响应头带 `bd-tt-error-code`（镜像 body 的 error_code）与 `x-vc-bdturing-parameters`（`{"code":"40000","subtype":"nocaptcha_collect",…}`）。把 `x-vc-bdturing-parameters` 原样回显到下一次请求（大小写各试一次）结果仍为 `7`；备用 origin `i.snssdk.com` 同为 `7`（`ns.snssdk.com` 无法解析；log 返回 HTML）。
 
 代码落点：`QR_PARAMS`/`CHECK_PARAMS`/`SMS_BASE_PARAMS` 均已含 `device_platform:'android'`；`sendCode`/`verifyCode` 通过 `smsParams` 显式带上 `device_id`+`iid`。以上为在线观察到的响应形状；一次真实手机验证码登录成功后再关闭"未验证"标记。
+
+## 18. 错误码语义与端点行为矩阵（2026-10-16，.tmp/probe-sms14/15.cjs + 内联探针）
+
+| 请求形状 | 响应 |
+|---|---|
+| send_code 全参（ids+dp+mix_mode=1+mobile） | `7 系统繁忙，请稍后再试`（稳态，全矩阵唯一值） |
+| send_code 缺 device_id 或 iid（或值为 0） | `2156 系统繁忙，请重启应用或刷新页面后重试` |
+| send_code 缺 aid | `7 访问太频繁，请稍后再试`（description 不同，同为 7） |
+| send_code `/v1/` 后缀 | `4044 请将应用升级至最新版本后重试` |
+| send_voice_code 全参 | `1204 验证码请求错误，请重试` + 非空 `mobile_ticket`（该端点响应多一个 `mobile_ticket` 字段，证明业务层已处理并建立会话） |
+| validate_code（携带任意已知 token，含当轮 voice/qr 的 ticket） | `1 会话过期，请重新登录`（会话存在→随后过期，与 voice 1204 时序一致） |
+| get_qrcode 10 参（含 device_platform） | `0` + 真实载荷（qndata 见第 17 节） |
+| check_qrconnect（含 token+tt 头） | `0`，`status: new → expired` |
+| x-vc-bdturing-parameters 回显（detail/完整 JSON，大小写头）/ x-ms-token / x-ss-cookie / ss_cv / typed / unix / count / index / from / is_from_ttaccountsdk=2 / account_sdk_source=web|EAC | 均保持 `7`，非决定性 |
+| origin `i.snssdk.com` | 同 `7`；`log.snssdk.com` 502/504；`ns/login/api.snssdk.com` 无法解析 |
+
+结论：业务码 `7` 是 `send_code` 当前形状下的稳态；`2156` 由缺 ids 触发（已在 `smsParams` 修复，桌面端已观察到 2156→7 的转变）；`1`/`1204`/`4044` 各自语义如上。本地计算一致不等于平台接受，最终验收仍以一次真实手机收到验证码并登录成功为准。
